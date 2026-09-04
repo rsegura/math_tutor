@@ -17,3 +17,9 @@ def test_wire_format_uses_stable_versioned_tags_not_python_paths():
 def test_wire_decoder_rejects_unknown_type_tag():
     with pytest.raises(ValueError, match="unknown durable type"):
         _load('{"$type":"future/v9","fields":{}}')
+
+
+@pytest.mark.parametrize("tag", ("$dataclass", "$enum"))
+def test_wire_decoder_rejects_unknown_legacy_module_path(tag):
+    with pytest.raises(ValueError, match="unknown durable type"):
+        _load(f'{{"{tag}":"math_tutor.evil:Payload","fields":{{}},"value":"x"}}')

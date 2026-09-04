@@ -284,6 +284,153 @@ def test_proposal_rejects_missing_and_cross_owned_evidence(tmp_path):
     assert repo.commit_once(later).reason == "batch-learner-mismatch"
 
 
+def test_generalized_proposal_preserves_evidence_provenance_across_sessions(tmp_path):
+    path = tmp_path / "generalized.db"
+    migrate(path)
+    repo = SQLiteTutoringRepository(path)
+    plan = LearningPlan(
+        "learner-1", ("objective-1",), ("objective-1",),
+        PresentationProfile.for_age(8), "plan-1",
+    )
+    repo.save_learner(
+        "learner-1", curriculum_snapshot="curriculum-yaml",
+        curriculum_version="curriculum-v1",
+    )
+    repo.save_plan(plan, policy_version="policy-v1")
+    first_session = LearningSession.start(session_id="session-1", plan=plan)
+    second_session = LearningSession.start(session_id="session-2", plan=plan)
+    repo.save_session(first_session, profile_version=1)
+    repo.save_session(second_session, profile_version=1)
+    repo.save_estimate(SkillEstimate(
+        "learner-1", "objective-1", CompetencyState.INDEPENDENT,
+    ))
+
+    first_activity = activity("activity-1")
+    first_observation = observation()
+    first_evidence = EvidenceRecord.initial(
+        evidence_id="evidence-1", learner_id="learner-1",
+        observation=first_observation,
+    )
+    first = MutationBatch(
+        "first-session", "fp-first", "session-1", 1, 1,
+        CommandResult("first-session", CommandStatus.APPLIED, "stored"),
+        activities=(StoredActivity("activity-1", first_activity),),
+        observations=(first_observation,), evidence=(first_evidence,),
+        activity_progress=(ActivityProgress("activity-1", 1, 0, 1),),
+        expected_absent_activity_ids=("activity-1",),
+    )
+    assert repo.commit_once(first).outcome is CommitOutcome.APPLIED
+
+    second_activity = activity("activity-2")
+    second_observation = replace(
+        observation(), observation_id="observation-2", session_id="session-2",
+        activity_id="activity-2",
+    )
+    second_evidence = EvidenceRecord.initial(
+        evidence_id="evidence-2", learner_id="learner-1",
+        observation=second_observation,
+    )
+    proposal = ProposedProfileChange(
+        "learner-1", "objective-1", CompetencyState.INDEPENDENT,
+        CompetencyState.GENERALIZED,
+        ("evidence-1", "evidence-2"),
+        ("observation-1", "observation-2"), 1, "policy-v1",
+    )
+    second = MutationBatch(
+        "second-session", "fp-second", "session-2", 1, 1,
+        CommandResult("second-session", CommandStatus.APPLIED, "stored"),
+        activities=(StoredActivity("activity-2", second_activity),),
+        observations=(second_observation,), evidence=(second_evidence,),
+        profile_change_proposals=(proposal,),
+        activity_progress=(ActivityProgress("activity-2", 1, 0, 1),),
+        expected_absent_activity_ids=("activity-2",),
+    )
+
+    assert repo.commit_once(second).outcome is CommitOutcome.APPLIED
+    assert repo.load_profile_change_proposals("learner-1", "objective-1") == (proposal,)
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute(
+            "SELECT evidence_id,source_session_id FROM proposal_evidence "
+            "ORDER BY evidence_id"
+        ).fetchall()
+    assert rows == [("evidence-1", "session-1"), ("evidence-2", "session-2")]
+
+
+def test_cross_session_proposal_still_rejects_foreign_objective_evidence(tmp_path):
+    repo = repository(tmp_path)
+    base = batch()
+    repo.commit_once(replace(
+        base, profile_change_proposals=(),
+    ))
+    foreign_objective = replace(
+        base.profile_change_proposals[0], evidence_ids=("evidence-1",),
+        observation_ids=("observation-1",), objective_id="objective-2",
+    )
+    later = replace(
+        base, command_id="foreign-objective", command_fingerprint="foreign-objective",
+        expected_session_version=2, session=session(3), activities=(), observations=(),
+        evidence=(), activity_progress=(), expected_absent_activity_ids=(),
+        profile_change_proposals=(foreign_objective,),
+    )
+    assert repo.commit_once(later).reason == "batch-objective-mismatch"
+
+
+def test_cross_session_proposal_rejects_foreign_learner_evidence(tmp_path):
+    path = tmp_path / "foreign-learner.db"
+    migrate(path)
+    repo = SQLiteTutoringRepository(path)
+    for learner_id in ("learner-1", "learner-2"):
+        plan = LearningPlan(
+            learner_id, ("objective-1",), ("objective-1",),
+            PresentationProfile.for_age(8), f"plan-{learner_id}",
+        )
+        repo.save_learner(
+            learner_id, curriculum_snapshot="curriculum-yaml",
+            curriculum_version="curriculum-v1",
+        )
+        repo.save_plan(plan, policy_version="policy-v1")
+        repo.save_session(
+            LearningSession.start(session_id=f"session-{learner_id}", plan=plan),
+            profile_version=1,
+        )
+        repo.save_estimate(SkillEstimate(
+            learner_id, "objective-1", CompetencyState.NOT_OBSERVED,
+        ))
+
+    foreign_activity = activity("foreign-activity")
+    foreign_observation = replace(
+        observation(), observation_id="foreign-observation",
+        learner_id="learner-2", session_id="session-learner-2",
+        activity_id="foreign-activity",
+    )
+    foreign_evidence = EvidenceRecord.initial(
+        evidence_id="foreign-evidence", learner_id="learner-2",
+        observation=foreign_observation,
+    )
+    assert repo.commit_once(MutationBatch(
+        "foreign-source", "foreign-source", "session-learner-2", 1, 1,
+        CommandResult("foreign-source", CommandStatus.APPLIED, "stored"),
+        activities=(StoredActivity("foreign-activity", foreign_activity),),
+        observations=(foreign_observation,), evidence=(foreign_evidence,),
+        activity_progress=(ActivityProgress("foreign-activity", 1, 0, 1),),
+        expected_absent_activity_ids=("foreign-activity",),
+    )).outcome is CommitOutcome.APPLIED
+
+    proposal = ProposedProfileChange(
+        "learner-1", "objective-1", CompetencyState.NOT_OBSERVED,
+        CompetencyState.EXPLORING, ("foreign-evidence",),
+        ("foreign-observation",), 1, "policy-v1",
+    )
+    attempt = MutationBatch(
+        "cross-learner", "cross-learner", "session-learner-1", 1, 1,
+        CommandResult("cross-learner", CommandStatus.APPLIED, "stored"),
+        profile_change_proposals=(proposal,),
+    )
+
+    assert repo.commit_once(attempt).reason == "batch-proposal-evidence-mismatch"
+    assert repo.load_profile_change_proposals("learner-1", "objective-1") == ()
+
+
 def test_commit_once_serializes_two_real_connections(tmp_path):
     repo = repository(tmp_path)
     barrier = threading.Barrier(2)

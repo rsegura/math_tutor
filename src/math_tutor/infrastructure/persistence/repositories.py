@@ -104,6 +104,26 @@ _WIRE_ENUMS = {
 }
 _WIRE_TAGS = {value: key for key, value in _WIRE_TYPES.items()}
 _WIRE_ENUM_TAGS = {value: key for key, value in _WIRE_ENUMS.items()}
+_LEGACY_WIRE_TYPES = {
+    "math_tutor.application.ports:ActivityProgress": ActivityProgress,
+    "math_tutor.application.results:CommandResult": CommandResult,
+    "math_tutor.domain.activities:Activity": Activity,
+    "math_tutor.domain.activities:StructuredAnswer": StructuredAnswer,
+    "math_tutor.domain.evidence:Observation": Observation,
+    "math_tutor.domain.evidence:TranscriptionReliabilityPolicy": TranscriptionReliabilityPolicy,
+    "math_tutor.domain.learning:LearningPlan": LearningPlan,
+    "math_tutor.domain.learning:LearningSession": LearningSession,
+    "math_tutor.domain.learning:PresentationProfile": PresentationProfile,
+    "math_tutor.domain.learning:ProposedProfileChange": ProposedProfileChange,
+    "math_tutor.domain.learning:SkillEstimate": SkillEstimate,
+}
+_LEGACY_WIRE_ENUMS = {
+    "math_tutor.application.results:CommandStatus": CommandStatus,
+    "math_tutor.domain.activities:AnswerInputStatus": AnswerInputStatus,
+    "math_tutor.domain.evidence:ObservationOutcome": ObservationOutcome,
+    "math_tutor.domain.learning:CompetencyState": CompetencyState,
+    "math_tutor.domain.templates:ExpectedAnswerKind": ExpectedAnswerKind,
+}
 
 
 def _tree(value: Any) -> Any:
@@ -132,7 +152,9 @@ def _from_tree(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
     if "$enum" in value:
-        cls = _WIRE_ENUMS.get(value["$enum"])
+        cls = _WIRE_ENUMS.get(value["$enum"]) or _LEGACY_WIRE_ENUMS.get(
+            value["$enum"]
+        )
         if cls is None:
             raise ValueError(f"unknown durable type '{value['$enum']}'")
         return cls(value["value"])
@@ -145,6 +167,13 @@ def _from_tree(value: Any) -> Any:
         if cls is None:
             raise ValueError(f"unknown durable type '{value['$type']}'")
         return cls(**{key: _from_tree(item) for key, item in value["fields"].items()})
+    if "$dataclass" in value:
+        cls = _LEGACY_WIRE_TYPES.get(value["$dataclass"])
+        if cls is None:
+            raise ValueError(f"unknown durable type '{value['$dataclass']}'")
+        return cls(
+            **{key: _from_tree(item) for key, item in value["fields"].items()}
+        )
     return {key: _from_tree(item) for key, item in value.items()}
 
 
@@ -327,7 +356,11 @@ class SQLiteTutoringRepository:
                         "SELECT e.observation_id,e.learner_id,e.session_id,e.objective_id FROM evidence_records e WHERE e.evidence_id=?",
                         (evidence_id,),
                     ).fetchone()
-                    if row is None or tuple(row) != (observation_id, learner_id, batch.session_id, proposal.objective_id):
+                    if row is None or (
+                        row[0] != observation_id
+                        or row[1] != learner_id
+                        or row[3] != proposal.objective_id
+                    ):
                         return "batch-proposal-evidence-mismatch"
                 elif (
                     candidate.observation.observation_id != observation_id
@@ -402,7 +435,13 @@ class SQLiteTutoringRepository:
             for proposal in batch.profile_change_proposals:
                 cursor = db.execute("INSERT INTO profile_change_proposals(learner_id,session_id,objective_id,proposal_json,estimate_version,policy_version) VALUES(?,?,?,?,?,?)", (proposal.learner_id, batch.session_id, proposal.objective_id, _dump(proposal), proposal.estimate_version, proposal.policy_version))
                 for evidence_id, observation_id in zip(proposal.evidence_ids, proposal.observation_ids, strict=True):
-                    db.execute("INSERT INTO proposal_evidence(proposal_id,evidence_id,observation_id,learner_id,session_id,objective_id) VALUES(?,?,?,?,?,?)", (cursor.lastrowid, evidence_id, observation_id, proposal.learner_id, batch.session_id, proposal.objective_id))
+                    source = db.execute(
+                        "SELECT session_id FROM evidence_records WHERE evidence_id=? AND observation_id=? AND learner_id=? AND objective_id=?",
+                        (evidence_id, observation_id, proposal.learner_id, proposal.objective_id),
+                    ).fetchone()
+                    if source is None:
+                        raise sqlite3.IntegrityError("proposal evidence disappeared")
+                    db.execute("INSERT INTO proposal_evidence(proposal_id,evidence_id,observation_id,learner_id,source_session_id,objective_id) VALUES(?,?,?,?,?,?)", (cursor.lastrowid, evidence_id, observation_id, proposal.learner_id, source[0], proposal.objective_id))
             for progress in batch.activity_progress:
                 expectation = next((item for item in batch.expected_activity_progress if item.activity_id == progress.activity_id), None)
                 if expectation is None:
