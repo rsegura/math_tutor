@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from math_tutor.application.ports import ActivityProgress, CommitDecision, PersistedTutoringState
 from math_tutor.application.results import CommandStatus
 from math_tutor.application.service import CanonicalHintResult, CommitHint, EndSession, RecordAnswer, RecordAnswerResult, SelectNextActivity
@@ -16,8 +18,15 @@ class ProgressRepository(Repository):
         super().__init__()
         self.state = replace(self.state, activity_progress=(progress,))
         self.bump_progress_on_commit = False
+        self.create_expected_activity_on_commit = False
 
     def commit_once(self, batch):
+        if self.create_expected_activity_on_commit:
+            self.activities[batch.expected_absent_activity_ids[0]] = self.activities["activity-1"]
+            self.create_expected_activity_on_commit = False
+        for activity_id in getattr(batch, "expected_absent_activity_ids", ()):
+            if activity_id in self.activities:
+                return CommitDecision.conflict("activity-id-already-exists")
         if self.bump_progress_on_commit:
             old = self.state.activity_progress[0]
             self.state = replace(self.state, activity_progress=(replace(old, version=old.version + 1),))
@@ -77,6 +86,95 @@ def test_repeated_authoritative_evidence_allows_exactly_one_difficulty_step_and_
     assert repo.batches[-1].expected_activity_progress[0].version == 3
     assert repo.batches[-1].activity_progress[-1].version == 4
     assert repo.batches[-1].events[-1].detail.endswith("repeated-correct:1->2")
+
+
+def test_adaptation_rejects_reusing_source_activity_id_without_a_batch():
+    repo = ProgressRepository(ActivityProgress("activity-1", 2, 0, 1, consecutive_correct=2, version=3))
+    repo.activities["activity-1"] = replace(repo.activities["activity-1"], template_id="place-value-units-count")
+    runtime = SessionRuntime(); runtime.start_generation("session-1")
+
+    result = service(repo, runtime).select_next_activity(command(
+        SelectNextActivity, source_activity_id="activity-1", objective_id="units-tens",
+        template_id="place-value-units-count", seed=1, difficulty=2, activity_id="activity-1",
+    ))
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.reason == "activity-id-already-exists"
+    assert not repo.batches
+
+
+def test_selection_rejects_activity_id_owned_by_an_unrelated_activity():
+    repo = ProgressRepository(ActivityProgress("activity-1", 0, 0, 1))
+    repo.activities["third-activity"] = repo.activities["activity-1"]
+    runtime = SessionRuntime(); runtime.start_generation("session-1")
+
+    result = service(repo, runtime).select_next_activity(command(
+        SelectNextActivity, source_activity_id=None, objective_id="units-tens",
+        template_id="place-value-units-count", seed=1, difficulty=1, activity_id="third-activity",
+    ))
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.reason == "activity-id-already-exists"
+    assert not repo.batches
+
+
+def test_second_sequential_selection_cannot_reuse_first_activity_id():
+    repo = ProgressRepository(ActivityProgress("activity-1", 0, 0, 1))
+    runtime = SessionRuntime(); first_generation = runtime.start_generation("session-1")
+    tutor = service(repo, runtime)
+    first = tutor.select_next_activity(base(
+        SelectNextActivity, command_id="select-1", generation_id=first_generation.generation_id,
+        source_activity_id=None, objective_id="units-tens",
+        template_id="place-value-units-count", seed=1, difficulty=1,
+        activity_id="chosen-activity",
+    ))
+    assert first.status is CommandStatus.APPLIED
+
+    second_generation = runtime.start_generation("session-1")
+    second = tutor.select_next_activity(base(
+        SelectNextActivity, command_id="select-2", expected_session_version=2,
+        generation_id=second_generation.generation_id, source_activity_id=None,
+        objective_id="units-tens", template_id="place-value-units-count",
+        seed=2, difficulty=1, activity_id="chosen-activity",
+    ))
+
+    assert second.status is CommandStatus.REJECTED
+    assert second.reason == "activity-id-already-exists"
+    assert len(repo.batches) == 1
+
+
+def test_concurrent_activity_creation_is_rejected_by_atomic_absence_expectation():
+    repo = ProgressRepository(ActivityProgress("activity-1", 0, 0, 1))
+    repo.create_expected_activity_on_commit = True
+    runtime = SessionRuntime(); runtime.start_generation("session-1")
+
+    result = service(repo, runtime).select_next_activity(command(
+        SelectNextActivity, source_activity_id=None, objective_id="units-tens",
+        template_id="place-value-units-count", seed=1, difficulty=1, activity_id="new-activity",
+    ))
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.reason == "activity-id-already-exists"
+    assert not repo.batches
+
+
+def test_adaptation_batch_never_contains_duplicate_progress_activity_ids():
+    repo = ProgressRepository(ActivityProgress("activity-1", 2, 0, 1, consecutive_correct=2, version=3))
+    repo.activities["activity-1"] = replace(repo.activities["activity-1"], template_id="place-value-units-count")
+    runtime = SessionRuntime(); runtime.start_generation("session-1")
+
+    result = service(repo, runtime).select_next_activity(command(
+        SelectNextActivity, source_activity_id="activity-1", objective_id="units-tens",
+        template_id="place-value-units-count", seed=1, difficulty=2, activity_id="new-activity",
+    ))
+
+    assert result.status is CommandStatus.APPLIED
+    batch = repo.batches[-1]
+    assert batch.expected_absent_activity_ids == ("new-activity",)
+    assert len({item.activity_id for item in batch.activity_progress}) == len(batch.activity_progress)
+
+    with pytest.raises(ValueError, match="activity progress ids must be unique"):
+        replace(batch, activity_progress=(batch.activity_progress[0],) * 2)
 
 
 def test_low_confidence_answer_persists_only_not_evaluable_authoritative_outcome():

@@ -65,7 +65,12 @@ class Repository:
                 stored = self.observations.get(expected.observation_id)
                 if stored is None or stored.version != expected.version:
                     return CommitDecision.conflict("stale-observation-version")
+            for activity_id in batch.expected_absent_activity_ids:
+                if activity_id in self.activities:
+                    return CommitDecision.conflict("activity-id-already-exists")
             self.batches.append(batch); self.results[batch.command_id] = StoredCommandResult(batch.command_fingerprint, batch.result)
+            for stored_activity in batch.activities:
+                self.activities[stored_activity.activity_id] = stored_activity.activity
             for observation in batch.observations:
                 self.observations[observation.observation_id] = StoredObservation(observation, 1)
             if batch.session: self.state = replace(self.state, session=batch.session)

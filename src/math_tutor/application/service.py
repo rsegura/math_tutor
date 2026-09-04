@@ -371,6 +371,14 @@ class TutoringService:
             return self._rejected(command, "template-not-found")
         if template.objective_id != command.objective_id:
             return self._rejected(command, "template-objective-mismatch")
+        try:
+            existing_activity = self._repository.load_activity(
+                command.session_id, command.activity_id
+            )
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if existing_activity is not None:
+            return self._rejected(command, "activity-id-already-exists")
         source_id = command.source_activity_id
         if source_id is not None:
             try: source_activity = self._repository.load_activity(command.session_id, source_id)
@@ -411,6 +419,7 @@ class TutoringService:
         )
         return self._commit(command, session=session, activities=(StoredActivity(command.activity_id, activity),),
             activity_progress=progress_changes, expected_activity_progress=expected_progress,
+            expected_absent_activity_ids=(command.activity_id,),
             events=(TutoringEvent("activity-selected", command.session_id, activity.objective_id, command.activity_id, f"{activity.template_id}:{reason}:{source_activity.difficulty if source_id else activity.difficulty}->{activity.difficulty}"),), payload=activity)
 
     def propose_evidence(self, command: ProposeEvidence) -> CommandResult:

@@ -68,10 +68,15 @@ class Repo:
                 stored = self.observations.get(expected.observation_id)
                 if stored is None or stored.version != expected.version:
                     return CommitDecision.conflict("stale-observation-version")
+            for activity_id in batch.expected_absent_activity_ids:
+                if activity_id in self.activities:
+                    return CommitDecision.conflict("activity-id-already-exists")
             decision = CommitDecision.applied(batch.result, batch.command_fingerprint)
             from math_tutor.application.ports import StoredCommandResult
             self.results[batch.command_id] = StoredCommandResult(batch.command_fingerprint, batch.result)
             self.batches.append(batch)
+            for stored_activity in batch.activities:
+                self.activities[stored_activity.activity_id] = stored_activity.activity
             if batch.session: self.state = PersistedTutoringState(batch.session, self.state.profile_version)
             return decision
 

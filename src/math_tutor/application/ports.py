@@ -113,6 +113,27 @@ class MutationBatch:
     expected_observations: tuple[ObservationExpectation, ...] = ()
     activity_progress: tuple[ActivityProgress, ...] = ()
     expected_activity_progress: tuple[ActivityProgressExpectation, ...] = ()
+    expected_absent_activity_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Reject ambiguous writes before they reach the durable fence."""
+
+        activity_ids = tuple(item.activity_id for item in self.activities)
+        progress_ids = tuple(item.activity_id for item in self.activity_progress)
+        expected_progress_ids = tuple(
+            item.activity_id for item in self.expected_activity_progress
+        )
+        absent_ids = tuple(self.expected_absent_activity_ids)
+        for name, values in (
+            ("activity", activity_ids),
+            ("activity progress", progress_ids),
+            ("expected activity progress", expected_progress_ids),
+            ("expected absent activity", absent_ids),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} ids must be unique")
+        if not all(isinstance(value, str) and value.strip() for value in absent_ids):
+            raise ValueError("expected absent activity ids must be nonempty strings")
 
 
 class CommitOutcome(Enum):
@@ -152,7 +173,9 @@ class TutoringRepository(Protocol):
     ``commit_once`` performs, in one transaction: command-id lookup and
     fingerprint comparison, all expected-version checks (including observation
     snapshots and activity-progress counters), every write in ``MutationBatch``,
-    and storage of its result.
+    absence checks for ``expected_absent_activity_ids``, and storage of its
+    result. An expected activity that already exists conflicts with reason
+    ``activity-id-already-exists``.
     It returns APPLIED for a new write, REPLAYED only for the same fingerprint,
     COLLISION for the same id with a different fingerprint, or CONFLICT for a
     failed optimistic-lock expectation. No partial write may escape.
