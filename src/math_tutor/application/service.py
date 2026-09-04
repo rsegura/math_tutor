@@ -277,8 +277,6 @@ class TutoringService:
         if activity.objective_id not in state.session.authorised_objective_ids:
             return self._rejected(command, "objective-not-authorised")
         progress, existed = self._progress(state, command.activity_id, activity.difficulty)
-        if progress.attempts_used >= self._pedagogical_policy.max_attempts_per_activity:
-            return self._rejected(command, "attempt-cap-reached")
         check = verify_answer(activity, command.answer)
         try:
             observation = Observation.from_answer(
@@ -310,11 +308,22 @@ class TutoringService:
                 return self._rejected(command, "domain-validation-error")
         correct = observation.outcome is ObservationOutcome.CORRECT
         incorrect = observation.outcome is ObservationOutcome.INCORRECT
+        evaluable = correct or incorrect
+        if evaluable and progress.attempts_used >= self._pedagogical_policy.max_attempts_per_activity:
+            return self._rejected(command, "attempt-cap-reached")
         progress, expected_progress = self._progress_changes(
             progress, existed,
-            attempts_used=progress.attempts_used + 1,
-            consecutive_correct=progress.consecutive_correct + 1 if correct else 0,
-            consecutive_incorrect=progress.consecutive_incorrect + 1 if incorrect else 0,
+            attempts_used=progress.attempts_used + 1 if evaluable else progress.attempts_used,
+            consecutive_correct=(
+                progress.consecutive_correct + 1 if correct
+                else 0 if incorrect
+                else progress.consecutive_correct
+            ),
+            consecutive_incorrect=(
+                progress.consecutive_incorrect + 1 if incorrect
+                else 0 if correct
+                else progress.consecutive_incorrect
+            ),
         )
         session = replace(state.session, version=state.session.version + 1)
         return self._commit(command, session=session, observations=(observation,), evidence=evidence,
@@ -367,16 +376,25 @@ class TutoringService:
             try: source_activity = self._repository.load_activity(command.session_id, source_id)
             except Exception: return self._failed(command, "persistence-unavailable")
             if source_activity is None: return self._rejected(command, "source-activity-not-found")
+            if source_activity.objective_id != command.objective_id:
+                return self._rejected(command, "source-objective-mismatch")
+            if source_activity.template_id != command.template_id:
+                return self._rejected(command, "source-template-mismatch")
             progress, existed = self._progress(state, source_id, source_activity.difficulty)
             if command.difficulty - progress.difficulty not in (-1, 1):
                 return self._rejected(command, "difficulty-step-must-be-one")
             repeated = progress.consecutive_correct if command.difficulty > progress.difficulty else progress.consecutive_incorrect
             if repeated < self._pedagogical_policy.min_repeated_outcomes_for_adaptation:
                 return self._rejected(command, "insufficient-repeated-evidence")
-            expected_progress = (ActivityProgressExpectation(source_id, progress.version),) if existed else ()
+            consumed_progress, expected_progress = self._progress_changes(
+                progress,
+                existed,
+                consecutive_correct=0,
+                consecutive_incorrect=0,
+            )
             reason = "repeated-correct" if command.difficulty > progress.difficulty else "repeated-incorrect"
         else:
-            expected_progress, reason = (), "initial-selection"
+            consumed_progress, expected_progress, reason = None, (), "initial-selection"
         try:
             activity = generate_activity(template, seed=command.seed, difficulty=command.difficulty)
         except (InvalidActivity, TypeError, ValueError):
@@ -386,8 +404,13 @@ class TutoringService:
             command.activity_id, 0, 0, activity.difficulty,
             version=progress.version + 1 if source_id is not None else 1,
         )
+        progress_changes = (
+            (consumed_progress, next_progress)
+            if consumed_progress is not None
+            else (next_progress,)
+        )
         return self._commit(command, session=session, activities=(StoredActivity(command.activity_id, activity),),
-            activity_progress=(next_progress,), expected_activity_progress=expected_progress,
+            activity_progress=progress_changes, expected_activity_progress=expected_progress,
             events=(TutoringEvent("activity-selected", command.session_id, activity.objective_id, command.activity_id, f"{activity.template_id}:{reason}:{source_activity.difficulty if source_id else activity.difficulty}->{activity.difficulty}"),), payload=activity)
 
     def propose_evidence(self, command: ProposeEvidence) -> CommandResult:
