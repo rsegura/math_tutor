@@ -1,0 +1,284 @@
+"""Deterministic construction of activities from reviewed templates.
+
+This module deliberately accepts structured template contracts only.  Speech or
+free-text interpretation belongs outside the educational domain.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from hashlib import sha256
+from itertools import product
+from types import MappingProxyType
+from typing import Mapping, TypeAlias
+
+from math_tutor.domain.templates import (
+    ActivityTemplate,
+    AnswerConstraint,
+    AnswerDerivation,
+    AnswerDerivationOperation,
+    ExpectedAnswerKind,
+)
+
+
+ScalarAnswer: TypeAlias = int | str
+AnswerValue: TypeAlias = ScalarAnswer | tuple[int, ...]
+
+
+class InvalidActivity(ValueError):
+    """Raised when an activity cannot be produced from its reviewed contract."""
+
+
+class AnswerInputStatus(Enum):
+    """Status assigned by the upstream structured-answer interpreter."""
+
+    EVALUABLE = "evaluable"
+    AMBIGUOUS = "ambiguous"
+    NOT_EVALUABLE = "not-evaluable"
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredAnswer:
+    """An interpreter result containing no natural-language parsing logic."""
+
+    kind: ExpectedAnswerKind | None
+    values: Mapping[str, AnswerValue]
+    status: AnswerInputStatus = AnswerInputStatus.EVALUABLE
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, AnswerInputStatus):
+            raise InvalidActivity("answer status must be an AnswerInputStatus")
+        if self.status is AnswerInputStatus.EVALUABLE and not isinstance(
+            self.kind, ExpectedAnswerKind
+        ):
+            raise InvalidActivity("an evaluable answer requires a typed kind")
+        if not isinstance(self.values, Mapping):
+            raise InvalidActivity("answer values must be a mapping")
+        frozen: dict[str, AnswerValue] = {}
+        for field, value in self.values.items():
+            if not isinstance(field, str) or not field:
+                raise InvalidActivity("answer field names must be nonempty strings")
+            frozen[field] = tuple(value) if isinstance(value, list) else value
+        object.__setattr__(self, "values", MappingProxyType(frozen))
+
+    @classmethod
+    def evaluable(
+        cls,
+        kind: ExpectedAnswerKind,
+        values: Mapping[str, AnswerValue],
+    ) -> StructuredAnswer:
+        """Build an answer that deterministic mathematics may evaluate."""
+
+        return cls(kind=kind, values=values)
+
+    @classmethod
+    def ambiguous(cls) -> StructuredAnswer:
+        """Represent multiple plausible interpretations without choosing one."""
+
+        return cls(
+            kind=None,
+            values={},
+            status=AnswerInputStatus.AMBIGUOUS,
+        )
+
+    @classmethod
+    def not_evaluable(cls) -> StructuredAnswer:
+        """Represent input from which no structured answer could be recovered."""
+
+        return cls(
+            kind=None,
+            values={},
+            status=AnswerInputStatus.NOT_EVALUABLE,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Activity:
+    """One concrete, fully reviewable learner activity."""
+
+    template_id: str
+    objective_id: str
+    difficulty: int
+    prompt_es: str
+    parameters: Mapping[str, int]
+    expected_answer: StructuredAnswer
+    error_pattern_ids: tuple[str, ...]
+    hint_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "parameters", MappingProxyType(dict(self.parameters))
+        )
+        object.__setattr__(self, "error_pattern_ids", tuple(self.error_pattern_ids))
+        object.__setattr__(self, "hint_ids", tuple(self.hint_ids))
+
+
+def _derive(
+    derivation: AnswerDerivation, parameters: Mapping[str, int]
+) -> AnswerValue:
+    values = tuple(parameters[name] for name in derivation.parameters)
+    operation = derivation.operation
+    if operation is AnswerDerivationOperation.VALUE:
+        return values[0]
+    if operation is AnswerDerivationOperation.SUM:
+        return sum(values)
+    if operation is AnswerDerivationOperation.DIFFERENCE:
+        return values[0] - values[1]
+    if operation is AnswerDerivationOperation.DOUBLE:
+        return values[0] * 2
+    if operation is AnswerDerivationOperation.MINIMUM:
+        return min(values)
+    if operation is AnswerDerivationOperation.MAXIMUM:
+        return max(values)
+    if operation is AnswerDerivationOperation.RELATION:
+        return "greater" if values[0] > values[1] else (
+            "less" if values[0] < values[1] else "equal"
+        )
+    if operation is AnswerDerivationOperation.SUCCESSOR:
+        return values[0] + 1
+    if operation is AnswerDerivationOperation.PREDECESSOR:
+        return values[0] - 1
+    if operation is AnswerDerivationOperation.FOLLOWING_SEQUENCE:
+        start, length = values
+        return tuple(range(start + 1, start + length + 1))
+    if operation is AnswerDerivationOperation.TENS_DIGIT:
+        return values[0] // 10
+    if operation is AnswerDerivationOperation.UNITS_DIGIT:
+        return values[0] % 10
+    if operation is AnswerDerivationOperation.TENS_VALUE:
+        return (values[0] // 10) * 10
+    if operation is AnswerDerivationOperation.COMPOSE_TENS_UNITS:
+        return values[0] * 10 + values[1]
+    raise InvalidActivity(f"unsupported derivation operation '{operation}'")
+
+
+def _derive_answer(
+    template: ActivityTemplate, parameters: Mapping[str, int]
+) -> StructuredAnswer:
+    values = {
+        derivation.field: _derive(derivation, parameters)
+        for derivation in template.expected_answer.derivations
+    }
+    return StructuredAnswer.evaluable(template.expected_answer.kind, values)
+
+
+def _integer_values(answer: StructuredAnswer) -> tuple[int, ...]:
+    flattened: list[int] = []
+    for value in answer.values.values():
+        if isinstance(value, tuple):
+            flattened.extend(value)
+        elif isinstance(value, int) and not isinstance(value, bool):
+            flattened.append(value)
+    return tuple(flattened)
+
+
+def _answer_satisfies_constraints(
+    template: ActivityTemplate, answer: StructuredAnswer
+) -> bool:
+    constraints = set(template.expected_answer.constraints)
+    values = _integer_values(answer)
+    if AnswerConstraint.NON_NEGATIVE in constraints and any(
+        value < 0 for value in values
+    ):
+        return False
+    if AnswerConstraint.WITHIN_10 in constraints and any(
+        not 0 <= value <= 10 for value in values
+    ):
+        return False
+    if AnswerConstraint.WITHIN_20 in constraints and any(
+        not 0 <= value <= 20 for value in values
+    ):
+        return False
+    sequence = next(
+        (value for value in answer.values.values() if isinstance(value, tuple)),
+        None,
+    )
+    if AnswerConstraint.ASCENDING in constraints and sequence is not None:
+        if any(left >= right for left, right in zip(sequence, sequence[1:])):
+            return False
+    if AnswerConstraint.DESCENDING in constraints and sequence is not None:
+        if any(left <= right for left, right in zip(sequence, sequence[1:])):
+            return False
+    if AnswerConstraint.ADJACENT in constraints and sequence is not None:
+        if any(abs(left - right) != 1 for left, right in zip(sequence, sequence[1:])):
+            return False
+    if AnswerConstraint.DISTINCT in constraints and len(values) != len(set(values)):
+        return False
+    return True
+
+
+def _valid_candidates(
+    template: ActivityTemplate,
+) -> tuple[tuple[dict[str, int], StructuredAnswer], ...]:
+    names = tuple(template.parameter_bounds)
+    ranges = tuple(
+        range(bounds.minimum, bounds.maximum + 1)
+        for bounds in (template.parameter_bounds[name] for name in names)
+    )
+    candidates: list[tuple[dict[str, int], StructuredAnswer]] = []
+    for combination in product(*ranges):
+        parameters = dict(zip(names, combination, strict=True))
+        if not template.allows_parameter_values(parameters):
+            continue
+        answer = _derive_answer(template, parameters)
+        if _answer_satisfies_constraints(template, answer):
+            candidates.append((parameters, answer))
+    candidates.sort(
+        key=lambda item: (
+            sum(abs(value) for value in item[0].values()),
+            tuple(item[0].values()),
+        )
+    )
+    return tuple(candidates)
+
+
+def _difficulty_slice(
+    candidates: tuple[tuple[dict[str, int], StructuredAnswer], ...],
+    template: ActivityTemplate,
+    difficulty: int,
+) -> tuple[tuple[dict[str, int], StructuredAnswer], ...]:
+    levels = template.difficulty_max - template.difficulty_min + 1
+    level = difficulty - template.difficulty_min
+    start = len(candidates) * level // levels
+    stop = len(candidates) * (level + 1) // levels
+    return candidates[start : max(start + 1, stop)]
+
+
+def generate_activity(
+    template: ActivityTemplate, *, seed: int, difficulty: int
+) -> Activity:
+    """Generate the same valid activity for the same template, seed and level."""
+
+    if not isinstance(template, ActivityTemplate):
+        raise InvalidActivity("template must be an ActivityTemplate")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise InvalidActivity("seed must be an integer")
+    if (
+        isinstance(difficulty, bool)
+        or not isinstance(difficulty, int)
+        or not template.difficulty_min <= difficulty <= template.difficulty_max
+    ):
+        raise InvalidActivity("difficulty is outside the reviewed template range")
+
+    candidates = _valid_candidates(template)
+    if not candidates:
+        raise InvalidActivity(
+            f"template '{template.id}' has no mathematically valid assignment"
+        )
+    candidates = _difficulty_slice(candidates, template, difficulty)
+    digest = sha256(f"{template.id}:{seed}:{difficulty}".encode()).digest()
+    parameters, answer = candidates[
+        int.from_bytes(digest[:8], byteorder="big") % len(candidates)
+    ]
+    return Activity(
+        template_id=template.id,
+        objective_id=template.objective_id,
+        difficulty=difficulty,
+        prompt_es=template.prompt_template_es.format(**parameters),
+        parameters=parameters,
+        expected_answer=answer,
+        error_pattern_ids=template.error_pattern_ids,
+        hint_ids=template.hint_ids,
+    )
+
