@@ -188,17 +188,43 @@ def _is_two_digit_contract_satisfied(
     parameters: Mapping[str, int],
     answer: StructuredAnswer,
 ) -> bool:
-    """Recognise a two-digit quantity from declarative derivation structure."""
-
-    answer_integers = _integer_values(answer)
-    if any(10 <= value <= 99 for value in answer_integers):
-        return True
-
-    referenced = _referenced_parameter_values(template, parameters)
-    if any(10 <= value <= 99 for value in referenced):
-        return True
+    """Validate only the reviewed declarative forms that encode two digits."""
 
     derivations = template.expected_answer.derivations
+    place_extractions = {
+        AnswerDerivationOperation.TENS_DIGIT,
+        AnswerDerivationOperation.UNITS_DIGIT,
+        AnswerDerivationOperation.TENS_VALUE,
+    }
+    if derivations and all(
+        item.operation in place_extractions and len(item.parameters) == 1
+        for item in derivations
+    ):
+        return all(10 <= parameters[item.parameters[0]] <= 99 for item in derivations)
+
+    if len(derivations) == 1:
+        derivation = derivations[0]
+        operands = tuple(parameters[name] for name in derivation.parameters)
+        result = answer.values[derivation.field]
+        if derivation.operation is AnswerDerivationOperation.COMPOSE_TENS_UNITS:
+            return (
+                len(operands) == 2
+                and 1 <= operands[0] <= 9
+                and 0 <= operands[1] <= 9
+                and isinstance(result, int)
+                and 10 <= result <= 99
+            )
+        if derivation.operation is AnswerDerivationOperation.SUM:
+            return (
+                len(operands) == 2
+                and 10 <= operands[0] <= 90
+                and operands[0] % 10 == 0
+                and 0 <= operands[1] <= 9
+                and isinstance(result, int)
+                and 10 <= result <= 99
+            )
+
+    referenced = _referenced_parameter_values(template, parameters)
     return (
         len(derivations) == 2
         and all(
@@ -219,8 +245,19 @@ def _has_no_carry(
         for derivation in template.expected_answer.derivations
         if derivation.operation is AnswerDerivationOperation.SUM
     )
+
+    def has_no_carry(operands: tuple[int, ...]) -> bool:
+        if not operands or any(value < 0 for value in operands):
+            return False
+        remaining = operands
+        while any(remaining):
+            if sum(value % 10 for value in remaining) > 9:
+                return False
+            remaining = tuple(value // 10 for value in remaining)
+        return True
+
     return bool(additions) and all(
-        sum(parameters[name] % 10 for name in derivation.parameters) <= 9
+        has_no_carry(tuple(parameters[name] for name in derivation.parameters))
         for derivation in additions
     )
 
@@ -233,9 +270,22 @@ def _has_no_borrow(
         for derivation in template.expected_answer.derivations
         if derivation.operation is AnswerDerivationOperation.DIFFERENCE
     )
+
+    def has_no_borrow(minuend: int, subtrahend: int) -> bool:
+        if minuend < 0 or subtrahend < 0:
+            return False
+        while minuend or subtrahend:
+            if minuend % 10 < subtrahend % 10:
+                return False
+            minuend //= 10
+            subtrahend //= 10
+        return True
+
     return bool(subtractions) and all(
-        parameters[derivation.parameters[0]] % 10
-        >= parameters[derivation.parameters[1]] % 10
+        has_no_borrow(
+            parameters[derivation.parameters[0]],
+            parameters[derivation.parameters[1]],
+        )
         for derivation in subtractions
     )
 

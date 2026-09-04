@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from itertools import zip_longest
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from math_tutor.domain.activities import (
     InvalidActivity,
     StructuredAnswer,
+    _answer_satisfies_constraints,
     generate_activity,
 )
 from math_tutor.domain.templates import ActivityTemplate
@@ -219,23 +221,79 @@ def _oracle_derivation(operation, values):
 
 
 def _oracle_two_digit(template, activity) -> bool:
-    integers = [value for value in activity.expected_answer.values.values() if isinstance(value, int)]
-    if any(10 <= value <= 99 for value in integers):
-        return True
-    referenced = [
-        activity.parameters[name]
-        for derivation in template.expected_answer.derivations
-        for name in derivation.parameters
-    ]
-    if any(10 <= value <= 99 for value in referenced):
-        return True
     derivations = template.expected_answer.derivations
+    extraction_operations = {
+        AnswerDerivationOperation.TENS_DIGIT,
+        AnswerDerivationOperation.UNITS_DIGIT,
+        AnswerDerivationOperation.TENS_VALUE,
+    }
+    if derivations and all(
+        item.operation in extraction_operations for item in derivations
+    ):
+        return all(
+            10 <= activity.parameters[item.parameters[0]] <= 99
+            for item in derivations
+        )
+    if len(derivations) == 1:
+        item = derivations[0]
+        operands = tuple(activity.parameters[name] for name in item.parameters)
+        result = activity.expected_answer.values[item.field]
+        if item.operation is AnswerDerivationOperation.COMPOSE_TENS_UNITS:
+            return (
+                1 <= operands[0] <= 9
+                and 0 <= operands[1] <= 9
+                and 10 <= result <= 99
+            )
+        if item.operation is AnswerDerivationOperation.SUM:
+            return (
+                len(operands) == 2
+                and operands[0] in range(10, 100, 10)
+                and operands[1] in range(10)
+                and 10 <= result <= 99
+            )
+    referenced = [activity.parameters[item.parameters[0]] for item in derivations]
     return (
         len(derivations) == 2
         and all(item.operation is AnswerDerivationOperation.VALUE for item in derivations)
         and 1 <= referenced[0] <= 9
         and 0 <= referenced[1] <= 9
     )
+
+
+def _oracle_no_carry(operands) -> bool:
+    if any(value < 0 for value in operands):
+        return False
+    columns = zip_longest(
+        *(reversed(str(value)) for value in operands), fillvalue="0"
+    )
+    return all(sum(int(digit) for digit in column) < 10 for column in columns)
+
+
+def _oracle_no_borrow(minuend, subtrahend) -> bool:
+    if minuend < 0 or subtrahend < 0:
+        return False
+    width = max(len(str(minuend)), len(str(subtrahend)))
+    minuend_digits = str(minuend).zfill(width)
+    subtrahend_digits = str(subtrahend).zfill(width)
+    return all(
+        left >= right for left, right in zip(minuend_digits, subtrahend_digits)
+    )
+
+
+def _oracle_sequence_constraint(constraint, values) -> bool:
+    pairs = tuple(zip(values, values[1:]))
+    if constraint is AnswerConstraint.ASCENDING:
+        return all(right > left for left, right in pairs)
+    if constraint is AnswerConstraint.DESCENDING:
+        return all(right < left for left, right in pairs)
+    if constraint is AnswerConstraint.ADJACENT:
+        return all(right - left in {-1, 1} for left, right in pairs)
+    if constraint is AnswerConstraint.DISTINCT:
+        return all(
+            value not in values[:position]
+            for position, value in enumerate(values)
+        )
+    raise AssertionError(f"missing sequence constraint oracle for {constraint}")
 
 
 def _oracle_relation(relation, parameters) -> bool:
@@ -291,7 +349,11 @@ def test_catalog_corpus_matches_an_independent_math_and_constraint_oracle(catalo
                     ]
                     assert sums
                     assert all(
-                        sum(activity.parameters[name] % 10 for name in item.parameters) <= 9
+                        _oracle_no_carry(
+                            tuple(
+                                activity.parameters[name] for name in item.parameters
+                            )
+                        )
                         for item in sums
                     )
                 if AnswerConstraint.NO_BORROW in constraints:
@@ -302,9 +364,38 @@ def test_catalog_corpus_matches_an_independent_math_and_constraint_oracle(catalo
                     ]
                     assert differences
                     assert all(
-                        activity.parameters[item.parameters[0]] % 10
-                        >= activity.parameters[item.parameters[1]] % 10
+                        _oracle_no_borrow(
+                            activity.parameters[item.parameters[0]],
+                            activity.parameters[item.parameters[1]],
+                        )
                         for item in differences
+                    )
+                sequence = next(
+                    (
+                        value
+                        for value in activity.expected_answer.values.values()
+                        if isinstance(value, tuple)
+                    ),
+                    None,
+                )
+                if AnswerConstraint.ASCENDING in constraints:
+                    assert sequence is not None
+                    assert _oracle_sequence_constraint(
+                        AnswerConstraint.ASCENDING, sequence
+                    )
+                if AnswerConstraint.DESCENDING in constraints:
+                    assert sequence is not None
+                    assert _oracle_sequence_constraint(
+                        AnswerConstraint.DESCENDING, sequence
+                    )
+                if AnswerConstraint.ADJACENT in constraints:
+                    assert sequence is not None
+                    assert _oracle_sequence_constraint(
+                        AnswerConstraint.ADJACENT, sequence
+                    )
+                if AnswerConstraint.DISTINCT in constraints:
+                    assert _oracle_sequence_constraint(
+                        AnswerConstraint.DISTINCT, contextual
                     )
                 for relation in template.parameter_relations:
                     assert _oracle_relation(relation, activity.parameters)
@@ -407,3 +498,97 @@ def test_generator_fails_closed_for_an_unrecognised_constraint() -> None:
 
     with pytest.raises(InvalidActivity, match="unsupported answer constraint"):
         generate_activity(template, seed=1, difficulty=1)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "accepted"),
+    [
+        ({"a": 104, "b": 205, "c": 310}, True),
+        ({"a": 164, "b": 205, "c": 390}, False),  # carry in tens
+        ({"a": 904, "b": 205, "c": 10}, False),  # carry in hundreds
+        ({"a": -1, "b": 2, "c": 3}, False),
+    ],
+)
+def test_no_carry_checks_every_decimal_column_for_all_operands(
+    parameters, accepted
+) -> None:
+    template = _fixed_template(
+        AnswerDerivationOperation.SUM,
+        parameters,
+        ExpectedAnswerKind.INTEGER,
+        constraints=(AnswerConstraint.NO_CARRY,),
+    )
+
+    if accepted:
+        assert generate_activity(template, seed=1, difficulty=1)
+    else:
+        with pytest.raises(InvalidActivity, match="no mathematically valid"):
+            generate_activity(template, seed=1, difficulty=1)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "accepted"),
+    [
+        ({"minuend": 975, "subtrahend": 342}, True),
+        ({"minuend": 915, "subtrahend": 342}, False),  # borrow in tens
+        ({"minuend": 175, "subtrahend": 342}, False),  # borrow in hundreds
+        ({"minuend": -20, "subtrahend": 3}, False),
+    ],
+)
+def test_no_borrow_checks_every_decimal_column(parameters, accepted) -> None:
+    template = _fixed_template(
+        AnswerDerivationOperation.DIFFERENCE,
+        parameters,
+        ExpectedAnswerKind.INTEGER,
+        constraints=(AnswerConstraint.NO_BORROW,),
+    )
+
+    if accepted:
+        assert generate_activity(template, seed=1, difficulty=1)
+    else:
+        with pytest.raises(InvalidActivity, match="no mathematically valid"):
+            generate_activity(template, seed=1, difficulty=1)
+
+
+def test_two_digit_does_not_accept_an_unrelated_two_digit_operand() -> None:
+    template = _fixed_template(
+        AnswerDerivationOperation.SUM,
+        {"unrelated_two_digit": 11, "units": 1},
+        ExpectedAnswerKind.INTEGER,
+        constraints=(AnswerConstraint.TWO_DIGIT,),
+    )
+
+    with pytest.raises(InvalidActivity, match="no mathematically valid"):
+        generate_activity(template, seed=1, difficulty=1)
+
+
+@pytest.mark.parametrize(
+    ("constraint", "values", "accepted"),
+    [
+        (AnswerConstraint.ASCENDING, (1, 2, 3), True),
+        (AnswerConstraint.ASCENDING, (1, 3, 2), False),
+        (AnswerConstraint.DESCENDING, (3, 2, 1), True),
+        (AnswerConstraint.DESCENDING, (3, 1, 2), False),
+        (AnswerConstraint.ADJACENT, (5, 4, 3), True),
+        (AnswerConstraint.ADJACENT, (5, 3, 2), False),
+        (AnswerConstraint.DISTINCT, (2, 4, 6), True),
+        (AnswerConstraint.DISTINCT, (2, 4, 2), False),
+    ],
+)
+def test_sequence_constraints_have_directed_accept_and_reject_examples(
+    constraint, values, accepted
+) -> None:
+    template = _fixed_template(
+        AnswerDerivationOperation.FOLLOWING_SEQUENCE,
+        {"start": 1, "length": 3},
+        ExpectedAnswerKind.INTEGER_SEQUENCE,
+        constraints=(constraint,),
+    )
+    answer = StructuredAnswer.evaluable(
+        ExpectedAnswerKind.INTEGER_SEQUENCE, {"values": values}
+    )
+
+    assert _answer_satisfies_constraints(
+        template, {"start": 1, "length": 3}, answer
+    ) is accepted
+    assert _oracle_sequence_constraint(constraint, values) is accepted
