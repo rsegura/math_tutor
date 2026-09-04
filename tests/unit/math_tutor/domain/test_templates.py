@@ -10,11 +10,15 @@ from math_tutor.domain.templates import (
     ActivityFamily,
     ActivityTemplate,
     ActivityTemplateCatalog,
+    AnswerDerivation,
+    AnswerDerivationOperation,
     AnswerConstraint,
     ExpectedAnswerKind,
     ExpectedAnswerSpec,
     InvalidActivityTemplate,
     ParameterBounds,
+    ParameterRelation,
+    ParameterRelationKind,
 )
 
 
@@ -23,6 +27,13 @@ def expected_answer() -> ExpectedAnswerSpec:
         kind=ExpectedAnswerKind.INTEGER,
         fields=("answer",),
         constraints=(AnswerConstraint.WITHIN_20,),
+        derivations=(
+            AnswerDerivation(
+                field="answer",
+                operation=AnswerDerivationOperation.SUM,
+                parameters=("left", "right"),
+            ),
+        ),
     )
 
 
@@ -37,6 +48,8 @@ def template(
     prompt: str = "Suma {left} y {right}.",
     errors: object = ("adds-one-extra",),
     hints: object = ("join-groups",),
+    parameter_relations: object = (),
+    answer: ExpectedAnswerSpec | None = None,
 ) -> ActivityTemplate:
     return ActivityTemplate(
         id=template_id,
@@ -53,7 +66,8 @@ def template(
         difficulty_min=difficulty_min,
         difficulty_max=difficulty_max,
         prompt_template_es=prompt,
-        expected_answer=expected_answer(),
+        expected_answer=expected_answer() if answer is None else answer,
+        parameter_relations=parameter_relations,
         error_pattern_ids=errors,
         hint_ids=hints,
     )  # type: ignore[arg-type]
@@ -102,6 +116,7 @@ def test_expected_answer_requires_a_typed_kind() -> None:
             kind="integer",  # type: ignore[arg-type]
             fields=("answer",),
             constraints=(AnswerConstraint.WITHIN_20,),
+            derivations=(),
         )
 
 
@@ -111,6 +126,13 @@ def test_expected_answer_rejects_a_scalar_string_for_sequences(field: str) -> No
         "kind": ExpectedAnswerKind.INTEGER,
         "fields": ("answer",),
         "constraints": (AnswerConstraint.WITHIN_20,),
+        "derivations": (
+            AnswerDerivation(
+                field="answer",
+                operation=AnswerDerivationOperation.VALUE,
+                parameters=("answer",),
+            ),
+        ),
         field: "not-a-sequence",
     }
 
@@ -124,6 +146,7 @@ def test_expected_answer_requires_nonempty_unique_fields() -> None:
             kind=ExpectedAnswerKind.INTEGER,
             fields=("answer", "answer"),
             constraints=(AnswerConstraint.WITHIN_20,),
+            derivations=(),
         )
 
 
@@ -133,7 +156,109 @@ def test_expected_answer_requires_typed_constraints() -> None:
             kind=ExpectedAnswerKind.INTEGER,
             fields=("answer",),
             constraints=("within-20",),  # type: ignore[arg-type]
+            derivations=(
+                AnswerDerivation(
+                    field="answer",
+                    operation=AnswerDerivationOperation.VALUE,
+                    parameters=("answer",),
+                ),
+            ),
         )
+
+
+def test_answer_derivation_requires_a_typed_operation() -> None:
+    with pytest.raises(InvalidActivityTemplate, match="operation"):
+        AnswerDerivation(
+            field="answer",
+            operation="sum",  # type: ignore[arg-type]
+            parameters=("left", "right"),
+        )
+
+
+def test_answer_derivation_enforces_operation_arity() -> None:
+    with pytest.raises(InvalidActivityTemplate, match="two parameters"):
+        AnswerDerivation(
+            field="answer",
+            operation=AnswerDerivationOperation.DIFFERENCE,
+            parameters=("left",),
+        )
+
+
+def test_expected_answer_requires_one_derivation_per_field() -> None:
+    with pytest.raises(InvalidActivityTemplate, match="derivation.*fields"):
+        ExpectedAnswerSpec(
+            kind=ExpectedAnswerKind.INTEGER_PAIR,
+            fields=("tens", "units"),
+            constraints=(AnswerConstraint.TWO_DIGIT,),
+            derivations=(
+                AnswerDerivation(
+                    field="tens",
+                    operation=AnswerDerivationOperation.TENS_DIGIT,
+                    parameters=("number",),
+                ),
+            ),
+        )
+
+
+def test_template_rejects_derivations_referencing_unknown_parameters() -> None:
+    answer = ExpectedAnswerSpec(
+        kind=ExpectedAnswerKind.INTEGER,
+        fields=("answer",),
+        constraints=(AnswerConstraint.WITHIN_20,),
+        derivations=(
+            AnswerDerivation(
+                field="answer",
+                operation=AnswerDerivationOperation.SUM,
+                parameters=("left", "missing"),
+            ),
+        ),
+    )
+
+    with pytest.raises(InvalidActivityTemplate, match="unknown parameter"):
+        ActivityTemplate(
+            id="add-two-groups",
+            objective_id="add-within-20",
+            family=ActivityFamily.ADDITION,
+            parameter_bounds={
+                "left": ParameterBounds(1, 10),
+                "right": ParameterBounds(1, 10),
+            },
+            parameter_relations=(),
+            difficulty_min=1,
+            difficulty_max=3,
+            prompt_template_es="Suma {left} y {right}.",
+            expected_answer=answer,
+            error_pattern_ids=("adds-one-extra",),
+            hint_ids=("join-groups",),
+        )
+
+
+def test_parameter_relation_rejects_unknown_template_parameters() -> None:
+    relation = ParameterRelation(
+        kind=ParameterRelationKind.DISTINCT,
+        parameters=("left", "missing"),
+        value=None,
+    )
+
+    with pytest.raises(InvalidActivityTemplate, match="unknown parameter"):
+        template(parameter_relations=(relation,))
+
+
+def test_template_checks_bounds_and_cross_parameter_relations() -> None:
+    definition = template(
+        parameter_relations=(
+            ParameterRelation(
+                kind=ParameterRelationKind.DISTINCT,
+                parameters=("left", "right"),
+                value=None,
+            ),
+        )
+    )
+
+    assert definition.allows_parameter_values({"left": 2, "right": 3})
+    assert not definition.allows_parameter_values({"left": 2, "right": 2})
+    assert not definition.allows_parameter_values({"left": 2, "right": 30})
+    assert not definition.allows_parameter_values({"left": 2})
 
 
 @pytest.mark.parametrize("field", ["id", "objective_id", "prompt"])
@@ -176,13 +301,27 @@ def test_template_rejects_untyped_parameter_bounds() -> None:
 
 def test_template_copies_parameter_bounds_into_an_immutable_mapping() -> None:
     source = {"left": ParameterBounds(minimum=1, maximum=3)}
-    definition = template(parameters=source, prompt="Usa {left}.")
+    answer = ExpectedAnswerSpec(
+        kind=ExpectedAnswerKind.INTEGER,
+        fields=("answer",),
+        constraints=(AnswerConstraint.WITHIN_20,),
+        derivations=(
+            AnswerDerivation(
+                field="answer",
+                operation=AnswerDerivationOperation.VALUE,
+                parameters=("left",),
+            ),
+        ),
+    )
+    definition = template(parameters=source, prompt="Usa {left}.", answer=answer)
 
     source["right"] = ParameterBounds(minimum=1, maximum=3)
 
     assert tuple(definition.parameter_bounds) == ("left",)
     with pytest.raises(TypeError):
-        definition.parameter_bounds["other"] = ParameterBounds(1, 2)  # type: ignore[index]
+        definition.parameter_bounds["other"] = (  # type: ignore[index]
+            ParameterBounds(1, 2)
+        )
 
 
 @pytest.mark.parametrize(

@@ -19,11 +19,15 @@ from math_tutor.domain.templates import (
     ActivityFamily,
     ActivityTemplate,
     ActivityTemplateCatalog,
+    AnswerDerivation,
+    AnswerDerivationOperation,
     AnswerConstraint,
     ExpectedAnswerKind,
     ExpectedAnswerSpec,
     InvalidActivityTemplate,
     ParameterBounds,
+    ParameterRelation,
+    ParameterRelationKind,
 )
 
 
@@ -55,6 +59,8 @@ def _exact_mapping(
 ) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise CurriculumLoadError(f"{context} must be a mapping")
+    if not all(isinstance(key, str) for key in value):
+        raise CurriculumLoadError(f"{context} keys must be strings")
     actual = set(value)
     unexpected = sorted(actual - keys)
     if unexpected:
@@ -66,8 +72,6 @@ def _exact_mapping(
         raise CurriculumLoadError(
             f"{context} has missing keys: {', '.join(missing)}"
         )
-    if not all(isinstance(key, str) for key in value):
-        raise CurriculumLoadError(f"{context} keys must be strings")
     return value  # type: ignore[return-value]
 
 
@@ -229,7 +233,7 @@ def _parse_expected_answer(
 ) -> ExpectedAnswerSpec:
     item = _exact_mapping(
         value,
-        keys={"kind", "fields", "constraints"},
+        keys={"kind", "fields", "constraints", "derivations"},
         context=context,
     )
     constraints = tuple(
@@ -242,12 +246,69 @@ def _parse_expected_answer(
             _list(item["constraints"], context=f"{context}.constraints")
         )
     )
+    derivations = tuple(
+        _parse_answer_derivation(
+            derivation, context=f"{context}.derivations[{index}]"
+        )
+        for index, derivation in enumerate(
+            _list(item["derivations"], context=f"{context}.derivations")
+        )
+    )
     return ExpectedAnswerSpec(
         kind=_enum_member(
             ExpectedAnswerKind, item["kind"], context=f"{context}.kind"
         ),
         fields=_string_list(item["fields"], context=f"{context}.fields"),
         constraints=constraints,
+        derivations=derivations,
+    )
+
+
+def _parse_answer_derivation(
+    value: object, *, context: str
+) -> AnswerDerivation:
+    item = _exact_mapping(
+        value,
+        keys={"field", "operation", "parameters"},
+        context=context,
+    )
+    return AnswerDerivation(
+        field=_string(item["field"], context=f"{context}.field"),
+        operation=_enum_member(
+            AnswerDerivationOperation,
+            item["operation"],
+            context=f"{context}.operation",
+        ),
+        parameters=_string_list(
+            item["parameters"], context=f"{context}.parameters"
+        ),
+    )
+
+
+def _parse_parameter_relation(
+    value: object, *, context: str
+) -> ParameterRelation:
+    item = _exact_mapping(
+        value,
+        keys={"kind", "parameters", "value"},
+        context=context,
+    )
+    raw_relation_value = item["value"]
+    relation_value = (
+        None
+        if raw_relation_value is None
+        else _integer(raw_relation_value, context=f"{context}.value integer")
+    )
+    return ParameterRelation(
+        kind=_enum_member(
+            ParameterRelationKind,
+            item["kind"],
+            context=f"{context}.kind",
+        ),
+        parameters=_string_list(
+            item["parameters"], context=f"{context}.parameters"
+        ),
+        value=relation_value,
     )
 
 
@@ -262,6 +323,7 @@ def _parse_template(value: object, *, context: str) -> ActivityTemplate:
             "difficulty",
             "prompt_es",
             "expected_answer",
+            "parameter_relations",
             "error_pattern_ids",
             "hint_ids",
         },
@@ -294,6 +356,18 @@ def _parse_template(value: object, *, context: str) -> ActivityTemplate:
         ),
         expected_answer=_parse_expected_answer(
             item["expected_answer"], context=f"{context}.expected_answer"
+        ),
+        parameter_relations=tuple(
+            _parse_parameter_relation(
+                relation,
+                context=f"{context}.parameter_relations[{index}]",
+            )
+            for index, relation in enumerate(
+                _list(
+                    item["parameter_relations"],
+                    context=f"{context}.parameter_relations",
+                )
+            )
         ),
         error_pattern_ids=_string_list(
             item["error_pattern_ids"],

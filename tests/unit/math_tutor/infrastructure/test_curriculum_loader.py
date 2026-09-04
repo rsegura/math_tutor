@@ -8,7 +8,12 @@ import pytest
 import yaml
 
 from math_tutor.domain.curriculum import CurriculumCatalog
-from math_tutor.domain.templates import ActivityTemplate, ActivityTemplateCatalog
+from math_tutor.domain.templates import (
+    ActivityTemplate,
+    ActivityTemplateCatalog,
+    AnswerDerivation,
+    ParameterRelation,
+)
 from math_tutor.infrastructure.curriculum_loader import (
     CurriculumLoadError,
     load_curriculum_catalogs,
@@ -101,6 +106,18 @@ def test_rejects_an_unknown_curriculum_root_key(tmp_path: Path) -> None:
         _load_modified(tmp_path, curriculum, templates)
 
 
+@pytest.mark.parametrize("bad_keys", [(1,), ("unexpected", 1)])
+def test_rejects_non_string_and_mixed_mapping_keys_with_loader_error(
+    tmp_path: Path, bad_keys: tuple[object, ...]
+) -> None:
+    curriculum, templates = _documents()
+    for key in bad_keys:
+        curriculum[key] = True  # type: ignore[index]
+
+    with pytest.raises(CurriculumLoadError, match="keys must be strings"):
+        _load_modified(tmp_path, curriculum, templates)
+
+
 def test_rejects_an_unknown_objective_key(tmp_path: Path) -> None:
     curriculum, templates = _documents()
     curriculum["objectives"][0]["unexpected"] = True  # type: ignore[index]
@@ -125,19 +142,50 @@ def test_rejects_an_unknown_template_key(tmp_path: Path) -> None:
         _load_modified(tmp_path, curriculum, templates)
 
 
-@pytest.mark.parametrize("nested_name", ["parameters", "difficulty", "expected_answer"])
+@pytest.mark.parametrize(
+    "nested_name",
+    [
+        "parameters",
+        "difficulty",
+        "expected_answer",
+        "derivations",
+        "parameter_relations",
+    ],
+)
 def test_rejects_unknown_keys_in_nested_template_objects(
     tmp_path: Path, nested_name: str
 ) -> None:
     curriculum, templates = _documents()
     first = templates["templates"][0]  # type: ignore[index]
-    nested = first[nested_name]
+    if nested_name == "derivations":
+        nested = first["expected_answer"]["derivations"][0]
+    else:
+        nested = first[nested_name]
     if nested_name == "parameters":
         nested = next(iter(nested.values()))
+    elif nested_name == "parameter_relations":
+        nested.append(
+            {"kind": "multiple-of", "parameters": ["count"], "value": 2}
+        )
+        nested = first["parameter_relations"][0]
     nested["unexpected"] = True
 
     with pytest.raises(CurriculumLoadError, match="unexpected keys.*unexpected"):
         _load_modified(tmp_path, curriculum, templates)
+
+
+def test_loader_constructs_typed_derivations_and_relations() -> None:
+    _, templates = load_curriculum_catalogs(CURRICULUM_PATH, TEMPLATES_PATH)
+
+    comparison = templates.template("compare-choose-greater")
+    assert all(
+        isinstance(item, AnswerDerivation)
+        for item in comparison.expected_answer.derivations
+    )
+    assert all(
+        isinstance(item, ParameterRelation)
+        for item in comparison.parameter_relations
+    )
 
 
 def test_rejects_a_missing_required_key(tmp_path: Path) -> None:

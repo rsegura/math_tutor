@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from itertools import product
 from pathlib import Path
 
-from math_tutor.domain.templates import ActivityTemplate, ParameterBounds
+from math_tutor.domain.templates import (
+    ActivityTemplate,
+    AnswerDerivation,
+    ParameterBounds,
+    ParameterRelationKind,
+)
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 
 
@@ -56,6 +62,87 @@ def test_every_catalog_entry_is_typed_and_parameterised() -> None:
             for bounds in definition.parameter_bounds.values()
         )
         assert "{" in definition.prompt_template_es
+        assert all(
+            isinstance(derivation, AnswerDerivation)
+            for derivation in definition.expected_answer.derivations
+        )
+        assert {
+            derivation.field
+            for derivation in definition.expected_answer.derivations
+        } == set(definition.expected_answer.fields)
+
+
+def test_reviewed_relations_exclude_known_contradictory_parameter_sets() -> None:
+    _, templates = loaded_catalogs()
+
+    greater = templates.template("compare-choose-greater")
+    assert any(
+        relation.kind is ParameterRelationKind.DISTINCT
+        for relation in greater.parameter_relations
+    )
+    assert not greater.allows_parameter_values({"left": 7, "right": 7})
+
+    units = templates.template("decompose-find-units")
+    assert not units.allows_parameter_values({"number": 42, "tens": 7})
+    assert units.allows_parameter_values({"number": 42, "tens": 4})
+
+    missing_mark = templates.template("number-line-missing-mark")
+    assert not missing_mark.allows_parameter_values({"before": 3, "after": 9})
+    assert missing_mark.allows_parameter_values({"before": 3, "after": 5})
+
+    expanded = templates.template("compose-from-expanded-values")
+    assert not expanded.allows_parameter_values({"tens_value": 25, "units": 3})
+    assert expanded.allows_parameter_values({"tens_value": 20, "units": 3})
+
+
+def test_every_reviewed_template_has_at_least_one_coherent_parameter_set() -> None:
+    _, templates = loaded_catalogs()
+
+    for definition in templates.templates:
+        names = tuple(definition.parameter_bounds)
+        value_ranges = (
+            range(bounds.minimum, bounds.maximum + 1)
+            for bounds in definition.parameter_bounds.values()
+        )
+        assert any(
+            definition.allows_parameter_values(
+                dict(zip(names, values, strict=True))
+            )
+            for values in product(*value_ranges)
+        ), definition.id
+
+
+def test_every_allowed_combination_respects_reviewed_coherence_rules() -> None:
+    _, templates = loaded_catalogs()
+
+    checks = {
+        "compare-choose-greater": lambda values: (
+            values["left"] != values["right"]
+        ),
+        "compare-choose-smaller": lambda values: (
+            values["left"] != values["right"]
+        ),
+        "compose-from-expanded-values": lambda values: (
+            values["tens_value"] % 10 == 0
+        ),
+        "decompose-find-units": lambda values: (
+            values["tens"] == values["number"] // 10
+        ),
+        "number-line-missing-mark": lambda values: (
+            values["after"] == values["before"] + 2
+        ),
+    }
+    for template_id, check in checks.items():
+        definition = templates.template(template_id)
+        names = tuple(definition.parameter_bounds)
+        ranges = (
+            range(bounds.minimum, bounds.maximum + 1)
+            for bounds in definition.parameter_bounds.values()
+        )
+        for combination in product(*ranges):
+            values = dict(zip(names, combination, strict=True))
+            if definition.allows_parameter_values(values):
+                assert check(values), (template_id, values)
 
 
 def test_reviewed_templates_are_not_duplicates_with_renamed_ids() -> None:

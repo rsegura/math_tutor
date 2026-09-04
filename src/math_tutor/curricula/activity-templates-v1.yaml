@@ -6,7 +6,8 @@ templates:
     parameters: {count: {min: 1, max: 20}}
     difficulty: {min: 1, max: 3}
     prompt_es: "Imagina una fila de {count} fichas. ¿Cuántas fichas hay en total?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: value, parameters: [count]}]}
+    parameter_relations: []
     error_pattern_ids: [counts-item-twice]
     hint_ids: [touch-each-item, say-sequence-slowly]
 
@@ -16,7 +17,8 @@ templates:
     parameters: {start: {min: 0, max: 14}, steps: {min: 2, max: 6}}
     difficulty: {min: 1, max: 3}
     prompt_es: "Empieza en {start} y cuenta {steps} números hacia delante. ¿En cuál terminas?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: sum, parameters: [start, steps]}]}
+    parameter_relations: []
     error_pattern_ids: [skips-number]
     hint_ids: [say-sequence-slowly]
 
@@ -26,7 +28,8 @@ templates:
     parameters: {start: {min: 6, max: 20}, steps: {min: 2, max: 6}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Comienza en {start} y di {steps} números hacia atrás. ¿Cuál es el último?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20], derivations: [{field: answer, operation: difference, parameters: [start, steps]}]}
+    parameter_relations: []
     error_pattern_ids: [skips-number]
     hint_ids: [say-sequence-slowly]
 
@@ -36,7 +39,8 @@ templates:
     parameters: {number: {min: 0, max: 19}}
     difficulty: {min: 1, max: 2}
     prompt_es: "En la serie de números, ¿cuál va justo después de {number}?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: successor, parameters: [number]}]}
+    parameter_relations: []
     error_pattern_ids: [repeats-neighbour]
     hint_ids: [use-one-more-one-less]
 
@@ -46,7 +50,8 @@ templates:
     parameters: {number: {min: 1, max: 20}}
     difficulty: {min: 1, max: 2}
     prompt_es: "En la serie de números, ¿cuál va justo antes de {number}?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20], derivations: [{field: answer, operation: predecessor, parameters: [number]}]}
+    parameter_relations: []
     error_pattern_ids: [reverses-sequence]
     hint_ids: [use-one-more-one-less]
 
@@ -56,7 +61,8 @@ templates:
     parameters: {start: {min: 0, max: 14}, length: {min: 2, max: 5}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Después de {start}, di los {length} números siguientes en orden."
-    expected_answer: {kind: integer-sequence, fields: [values], constraints: [ascending, adjacent, within-20]}
+    expected_answer: {kind: integer-sequence, fields: [values], constraints: [ascending, adjacent, within-20], derivations: [{field: values, operation: following-sequence, parameters: [start, length]}]}
+    parameter_relations: []
     error_pattern_ids: [reverses-sequence, repeats-neighbour]
     hint_ids: [recite-neighbours]
 
@@ -66,7 +72,8 @@ templates:
     parameters: {left: {min: 0, max: 20}, right: {min: 0, max: 20}}
     difficulty: {min: 1, max: 3}
     prompt_es: "Entre {left} y {right}, ¿qué número es mayor?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20, distinct]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: maximum, parameters: [left, right]}]}
+    parameter_relations: [{kind: distinct, parameters: [left, right], value: null}]
     error_pattern_ids: [chooses-first-number]
     hint_ids: [locate-larger-count, compare-on-line]
 
@@ -76,7 +83,8 @@ templates:
     parameters: {left: {min: 0, max: 20}, right: {min: 0, max: 20}}
     difficulty: {min: 1, max: 3}
     prompt_es: "Entre {left} y {right}, ¿qué número es menor?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20, distinct]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: minimum, parameters: [left, right]}]}
+    parameter_relations: [{kind: distinct, parameters: [left, right], value: null}]
     error_pattern_ids: [chooses-first-number]
     hint_ids: [locate-larger-count]
 
@@ -86,7 +94,8 @@ templates:
     parameters: {left: {min: 0, max: 20}, right: {min: 0, max: 20}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Completa la relación: {left} es mayor, menor o igual que {right}."
-    expected_answer: {kind: relation, fields: [relation], constraints: [within-20]}
+    expected_answer: {kind: relation, fields: [relation], constraints: [within-20], derivations: [{field: relation, operation: relation, parameters: [left, right]}]}
+    parameter_relations: []
     error_pattern_ids: [confuses-greater-less]
     hint_ids: [compare-on-line]
 
@@ -96,7 +105,8 @@ templates:
     parameters: {number: {min: 10, max: 99}}
     difficulty: {min: 1, max: 3}
     prompt_es: "En el número {number}, ¿cuántas decenas y cuántas unidades hay?"
-    expected_answer: {kind: integer-pair, fields: [tens, units], constraints: [two-digit]}
+    expected_answer: {kind: integer-pair, fields: [tens, units], constraints: [two-digit], derivations: [{field: tens, operation: tens-digit, parameters: [number]}, {field: units, operation: units-digit, parameters: [number]}]}
+    parameter_relations: []
     error_pattern_ids: [swaps-tens-units]
     hint_ids: [group-in-tens, name-place-columns]
 
@@ -106,7 +116,8 @@ templates:
     parameters: {number: {min: 10, max: 99}}
     difficulty: {min: 1, max: 3}
     prompt_es: "¿Cuántas decenas completas contiene {number}?"
-    expected_answer: {kind: integer, fields: [tens], constraints: [two-digit]}
+    expected_answer: {kind: integer, fields: [tens], constraints: [two-digit], derivations: [{field: tens, operation: tens-digit, parameters: [number]}]}
+    parameter_relations: []
     error_pattern_ids: [reads-digits-as-counts]
     hint_ids: [name-place-columns]
 
@@ -116,7 +127,8 @@ templates:
     parameters: {number: {min: 10, max: 99}}
     difficulty: {min: 1, max: 3}
     prompt_es: "¿Cuántas unidades sueltas quedan en {number}?"
-    expected_answer: {kind: integer, fields: [units], constraints: [two-digit]}
+    expected_answer: {kind: integer, fields: [units], constraints: [two-digit], derivations: [{field: units, operation: units-digit, parameters: [number]}]}
+    parameter_relations: []
     error_pattern_ids: [reads-digits-as-counts]
     hint_ids: [group-in-tens]
 
@@ -126,7 +138,8 @@ templates:
     parameters: {tens_digit: {min: 1, max: 9}, units_digit: {min: 0, max: 9}}
     difficulty: {min: 2, max: 4}
     prompt_es: "En {tens_digit}{units_digit}, di qué cifra ocupa las decenas y cuál ocupa las unidades."
-    expected_answer: {kind: integer-pair, fields: [tens_digit, units_digit], constraints: [two-digit]}
+    expected_answer: {kind: integer-pair, fields: [tens_digit, units_digit], constraints: [two-digit], derivations: [{field: tens_digit, operation: value, parameters: [tens_digit]}, {field: units_digit, operation: value, parameters: [units_digit]}]}
+    parameter_relations: []
     error_pattern_ids: [swaps-tens-units]
     hint_ids: [name-place-columns]
 
@@ -136,7 +149,8 @@ templates:
     parameters: {tens: {min: 1, max: 9}, units: {min: 0, max: 9}}
     difficulty: {min: 1, max: 3}
     prompt_es: "¿Qué número forman {tens} decenas y {units} unidades?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [two-digit]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [two-digit], derivations: [{field: answer, operation: compose-tens-units, parameters: [tens, units]}]}
+    parameter_relations: []
     error_pattern_ids: [swaps-composed-digits]
     hint_ids: [convert-tens-to-units, place-tens-before-units]
 
@@ -146,7 +160,8 @@ templates:
     parameters: {tens_value: {min: 10, max: 90}, units: {min: 0, max: 9}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Compón el número que tiene {tens_value} y {units} unidades más."
-    expected_answer: {kind: integer, fields: [answer], constraints: [two-digit]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [two-digit], derivations: [{field: answer, operation: sum, parameters: [tens_value, units]}]}
+    parameter_relations: [{kind: multiple-of, parameters: [tens_value], value: 10}]
     error_pattern_ids: [concatenates-values]
     hint_ids: [convert-tens-to-units]
 
@@ -156,7 +171,8 @@ templates:
     parameters: {tens: {min: 1, max: 9}, units: {min: 0, max: 9}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Primero coloca {tens} en las decenas y luego {units} en las unidades. ¿Qué número sale?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [two-digit]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [two-digit], derivations: [{field: answer, operation: compose-tens-units, parameters: [tens, units]}]}
+    parameter_relations: []
     error_pattern_ids: [swaps-composed-digits]
     hint_ids: [place-tens-before-units]
 
@@ -166,7 +182,8 @@ templates:
     parameters: {blocks: {min: 1, max: 9}, counters: {min: 0, max: 9}}
     difficulty: {min: 1, max: 3}
     prompt_es: "Tienes {blocks} barras de diez y {counters} fichas sueltas. ¿Qué número representan?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [two-digit]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [two-digit], derivations: [{field: answer, operation: compose-tens-units, parameters: [blocks, counters]}]}
+    parameter_relations: []
     error_pattern_ids: [concatenates-values]
     hint_ids: [convert-tens-to-units]
 
@@ -176,7 +193,8 @@ templates:
     parameters: {number: {min: 10, max: 99}}
     difficulty: {min: 1, max: 3}
     prompt_es: "Descompón {number}: ¿cuántas decenas y cuántas unidades tiene?"
-    expected_answer: {kind: integer-pair, fields: [tens, units], constraints: [two-digit]}
+    expected_answer: {kind: integer-pair, fields: [tens, units], constraints: [two-digit], derivations: [{field: tens, operation: tens-digit, parameters: [number]}, {field: units, operation: units-digit, parameters: [number]}]}
+    parameter_relations: []
     error_pattern_ids: [swaps-decomposed-parts]
     hint_ids: [read-each-place, expand-tens-value]
 
@@ -186,7 +204,8 @@ templates:
     parameters: {number: {min: 10, max: 99}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Expresa {number} como una decena completa más sus unidades, por ejemplo 20 más 3."
-    expected_answer: {kind: integer-pair, fields: [tens_value, units], constraints: [two-digit]}
+    expected_answer: {kind: integer-pair, fields: [tens_value, units], constraints: [two-digit], derivations: [{field: tens_value, operation: tens-value, parameters: [number]}, {field: units, operation: units-digit, parameters: [number]}]}
+    parameter_relations: []
     error_pattern_ids: [drops-zero-value]
     hint_ids: [expand-tens-value]
 
@@ -196,7 +215,8 @@ templates:
     parameters: {number: {min: 10, max: 99}, tens: {min: 1, max: 9}}
     difficulty: {min: 3, max: 5}
     prompt_es: "El número {number} tiene {tens} decenas. ¿Cuántas unidades sueltas le corresponden?"
-    expected_answer: {kind: integer, fields: [units], constraints: [two-digit]}
+    expected_answer: {kind: integer, fields: [units], constraints: [two-digit], derivations: [{field: units, operation: units-digit, parameters: [number]}]}
+    parameter_relations: [{kind: equals-tens-digit, parameters: [tens, number], value: null}]
     error_pattern_ids: [drops-zero-value]
     hint_ids: [read-each-place]
 
@@ -206,7 +226,8 @@ templates:
     parameters: {start: {min: 0, max: 14}, jumps: {min: 1, max: 6}}
     difficulty: {min: 1, max: 3}
     prompt_es: "En la recta, sal de {start} y avanza {jumps} saltos. ¿Dónde llegas?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: sum, parameters: [start, jumps]}]}
+    parameter_relations: []
     error_pattern_ids: [counts-start-as-step]
     hint_ids: [mark-start-before-moving, match-direction-to-operation]
 
@@ -216,7 +237,8 @@ templates:
     parameters: {start: {min: 6, max: 20}, jumps: {min: 1, max: 6}}
     difficulty: {min: 2, max: 4}
     prompt_es: "En la recta, sal de {start} y retrocede {jumps} saltos. ¿Dónde terminas?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20], derivations: [{field: answer, operation: difference, parameters: [start, jumps]}]}
+    parameter_relations: []
     error_pattern_ids: [moves-wrong-direction]
     hint_ids: [mark-start-before-moving, match-direction-to-operation]
 
@@ -226,7 +248,8 @@ templates:
     parameters: {before: {min: 0, max: 18}, after: {min: 2, max: 20}}
     difficulty: {min: 2, max: 4}
     prompt_es: "En una recta aparece {before}, un hueco y después {after}. ¿Qué número ocupa el hueco?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [adjacent, within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: successor, parameters: [before]}]}
+    parameter_relations: [{kind: offset-equals, parameters: [after, before], value: 2}]
     error_pattern_ids: [moves-wrong-direction]
     hint_ids: [match-direction-to-operation]
 
@@ -236,7 +259,8 @@ templates:
     parameters: {left: {min: 0, max: 5}, right: {min: 0, max: 5}}
     difficulty: {min: 1, max: 2}
     prompt_es: "Junta un grupo de {left} fichas con otro de {right}. ¿Cuántas hay?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-10]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-10], derivations: [{field: answer, operation: sum, parameters: [left, right]}]}
+    parameter_relations: []
     error_pattern_ids: [counts-one-addend-only]
     hint_ids: [join-small-groups]
 
@@ -246,7 +270,8 @@ templates:
     parameters: {start: {min: 1, max: 6}, increase: {min: 1, max: 4}}
     difficulty: {min: 1, max: 3}
     prompt_es: "Empieza con {start} y cuenta {increase} más. ¿Qué total obtienes?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-10]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-10], derivations: [{field: answer, operation: sum, parameters: [start, increase]}]}
+    parameter_relations: []
     error_pattern_ids: [adds-one-extra]
     hint_ids: [count-on-from-larger]
 
@@ -256,7 +281,8 @@ templates:
     parameters: {known: {min: 1, max: 5}, missing: {min: 1, max: 5}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Hay {known} cuentas y añadimos {missing}. ¿Cuántas cuentas quedan juntas?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-10]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-10], derivations: [{field: answer, operation: sum, parameters: [known, missing]}]}
+    parameter_relations: []
     error_pattern_ids: [counts-one-addend-only]
     hint_ids: [join-small-groups, count-on-from-larger]
 
@@ -266,7 +292,8 @@ templates:
     parameters: {number: {min: 1, max: 5}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Tienes dos grupos iguales de {number}. ¿Cuánto es {number} más {number}?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-10]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-10], derivations: [{field: answer, operation: double, parameters: [number]}]}
+    parameter_relations: []
     error_pattern_ids: [adds-one-extra]
     hint_ids: [join-small-groups]
 
@@ -276,7 +303,8 @@ templates:
     parameters: {left: {min: 5, max: 10}, right: {min: 1, max: 10}}
     difficulty: {min: 2, max: 4}
     prompt_es: "En una caja hay {left} piezas y en otra {right}. ¿Cuántas piezas hay al juntarlas?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: sum, parameters: [left, right]}]}
+    parameter_relations: []
     error_pattern_ids: [loses-count-across-ten]
     hint_ids: [bridge-through-ten, verify-by-counting-on]
 
@@ -286,7 +314,8 @@ templates:
     parameters: {left: {min: 6, max: 9}, right: {min: 2, max: 9}}
     difficulty: {min: 3, max: 5}
     prompt_es: "Calcula {left} más {right} completando primero la decena."
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: sum, parameters: [left, right]}]}
+    parameter_relations: []
     error_pattern_ids: [loses-count-across-ten]
     hint_ids: [bridge-through-ten]
 
@@ -296,7 +325,8 @@ templates:
     parameters: {start: {min: 10, max: 15}, addend: {min: 1, max: 5}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Partes de {start} y añades {addend}. ¿A qué número llegas?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: sum, parameters: [start, addend]}]}
+    parameter_relations: []
     error_pattern_ids: [treats-addition-as-concatenation]
     hint_ids: [separate-tens-and-units, verify-by-counting-on]
 
@@ -306,7 +336,8 @@ templates:
     parameters: {first: {min: 1, max: 6}, second: {min: 1, max: 6}, third: {min: 1, max: 6}}
     difficulty: {min: 3, max: 5}
     prompt_es: "Suma tres grupos: {first}, {second} y {third}. ¿Cuál es el total?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [within-20], derivations: [{field: answer, operation: sum, parameters: [first, second, third]}]}
+    parameter_relations: []
     error_pattern_ids: [loses-count-across-ten]
     hint_ids: [bridge-through-ten, verify-by-counting-on]
 
@@ -316,7 +347,8 @@ templates:
     parameters: {minuend: {min: 6, max: 20}, subtrahend: {min: 1, max: 5}}
     difficulty: {min: 1, max: 3}
     prompt_es: "Tienes {minuend} fichas y quitas {subtrahend}. ¿Cuántas quedan?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20], derivations: [{field: answer, operation: difference, parameters: [minuend, subtrahend]}]}
+    parameter_relations: []
     error_pattern_ids: [adds-instead-of-subtracts]
     hint_ids: [remove-from-starting-set, count-back-carefully]
 
@@ -326,7 +358,8 @@ templates:
     parameters: {start: {min: 6, max: 20}, steps: {min: 1, max: 5}}
     difficulty: {min: 2, max: 4}
     prompt_es: "Empieza en {start} y retrocede {steps}. ¿Qué resultado obtienes?"
-    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20], derivations: [{field: answer, operation: difference, parameters: [start, steps]}]}
+    parameter_relations: []
     error_pattern_ids: [adds-instead-of-subtracts]
     hint_ids: [count-back-carefully]
 
@@ -336,6 +369,7 @@ templates:
     parameters: {larger: {min: 10, max: 20}, smaller: {min: 1, max: 9}}
     difficulty: {min: 3, max: 5}
     prompt_es: "¿Cuántos más hay en {larger} que en {smaller}? Calcula la diferencia."
-    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20]}
+    expected_answer: {kind: integer, fields: [answer], constraints: [non-negative, within-20], derivations: [{field: answer, operation: difference, parameters: [larger, smaller]}]}
+    parameter_relations: []
     error_pattern_ids: [reverses-minuend-subtrahend]
     hint_ids: [remove-from-starting-set, verify-with-addition]
