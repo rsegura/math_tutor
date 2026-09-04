@@ -29,7 +29,9 @@ LEGACY_PROGRESS_JSON = '{"$dataclass":"math_tutor.application.ports:ActivityProg
 LEGACY_ESTIMATE_JSON = '{"$dataclass":"math_tutor.domain.learning:SkillEstimate","fields":{"learner_id":"learner-1","objective_id":"objective-1","state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"not-observed"},"supporting_evidence_ids":{"$tuple":[]},"supporting_observation_ids":{"$tuple":[]},"version":1}}'
 LEGACY_PROPOSAL_JSON = '{"$dataclass":"math_tutor.domain.learning:ProposedProfileChange","fields":{"evidence_ids":{"$tuple":["evidence-1"]},"from_state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"not-observed"},"learner_id":"learner-1","objective_id":"objective-1","observation_ids":{"$tuple":["observation-1"]},"policy_version":"policy-v1","to_state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"exploring"},"estimate_version":1}}'
 LEGACY_COMMAND_RESULT_JSON = '{"$dataclass":"math_tutor.application.results:CommandResult","fields":{"command_id":"legacy-command","payload":{"$mapping":[["spoken","Muy bien"],["score",5]]},"reason":"stored","replayed":false,"status":{"$enum":"math_tutor.application.results:CommandStatus","value":"applied"}}}'
+LEGACY_PROPOSAL_RESULT_JSON = '{"$dataclass":"math_tutor.application.results:CommandResult","fields":{"command_id":"proposal-command","payload":' + LEGACY_PROPOSAL_JSON + ',"reason":"stored","replayed":false,"status":{"$enum":"math_tutor.application.results:CommandStatus","value":"applied"}}}'
 LEGACY_GENERALIZED_PROPOSAL_JSON = '{"$dataclass":"math_tutor.domain.learning:ProposedProfileChange","fields":{"evidence_ids":{"$tuple":["evidence-1","evidence-2"]},"from_state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"independent"},"learner_id":"learner-1","objective_id":"objective-1","observation_ids":{"$tuple":["observation-1","observation-2"]},"policy_version":"policy-v1","to_state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"generalized"},"estimate_version":1}}'
+LEGACY_GENERALIZED_RESULT_JSON = '{"$dataclass":"math_tutor.application.results:CommandResult","fields":{"command_id":"proposal-command","payload":' + LEGACY_GENERALIZED_PROPOSAL_JSON + ',"reason":"stored","replayed":false,"status":{"$enum":"math_tutor.application.results:CommandStatus","value":"applied"}}}'
 
 
 def test_failing_migration_does_not_leave_schema_or_version(tmp_path):
@@ -92,6 +94,19 @@ def test_v1_database_is_upgraded_without_rewriting_history_or_losing_data(tmp_pa
         "INSERT INTO profile_change_proposals(learner_id,objective_id,proposal_json,estimate_version,policy_version) VALUES(?,?,?,?,?)",
         ("learner-1", "objective-1", _dump(proposal), 1, "policy-v1"),
     )
+    connection.execute(
+        "INSERT INTO tutoring_events(command_id,kind,session_id,objective_id,detail) "
+        "VALUES('proposal-command','profile-change-proposed','session-1','objective-1','exploring')"
+    )
+    connection.execute(
+        "INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES(?,?,?)",
+        (
+            "proposal-command", "proposal-fingerprint",
+            _dump(CommandResult(
+                "proposal-command", CommandStatus.APPLIED, "stored", proposal
+            )),
+        ),
+    )
     connection.commit()
     connection.close()
 
@@ -116,11 +131,16 @@ def test_v1_database_is_upgraded_without_rewriting_history_or_losing_data(tmp_pa
         assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(tmp_path):
+@pytest.mark.parametrize("explicit_migration_dir", (False, True))
+def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(
+    tmp_path, explicit_migration_dir
+):
     database = tmp_path / "legacy-multisession.db"
-    original_v1 = Path(
-        "src/math_tutor/infrastructure/persistence/migrations/0001_initial.sql"
-    ).read_text()
+    migrations = Path("src/math_tutor/infrastructure/persistence/migrations")
+    migration_contents = {
+        path.name: path.read_bytes() for path in migrations.glob("*.sql")
+    }
+    original_v1 = migration_contents["0001_initial.sql"].decode()
     connection = sqlite3.connect(database)
     connection.executescript(original_v1)
     connection.execute("INSERT INTO schema_migrations(version) VALUES(1)")
@@ -133,19 +153,21 @@ def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(t
         "VALUES('plan-1',1,'learner-1',?,'policy-v1')",
         (LEGACY_PLAN_JSON,),
     )
-    for number in (1, 2):
+    for number in (1, 2, 3):
         session_json = LEGACY_SESSION_JSON.replace("session-1", f"session-{number}")
+        connection.execute(
+            "INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) "
+            "VALUES(?, 'learner-1','plan-1',1,?,1,1)",
+            (f"session-{number}", session_json),
+        )
+        if number == 3:
+            continue
         activity_json = LEGACY_ACTIVITY_JSON.replace("activity-1", f"activity-{number}")
         observation_json = (
             LEGACY_OBSERVATION_JSON
             .replace("session-1", f"session-{number}")
             .replace("activity-1", f"activity-{number}")
             .replace("observation-1", f"observation-{number}")
-        )
-        connection.execute(
-            "INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) "
-            "VALUES(?, 'learner-1','plan-1',1,?,1,1)",
-            (f"session-{number}", session_json),
         )
         connection.execute(
             "INSERT INTO activities(session_id,activity_id,activity_json) VALUES(?,?,?)",
@@ -172,10 +194,23 @@ def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(t
         "VALUES('learner-1','objective-1',?,1,'policy-v1')",
         (LEGACY_GENERALIZED_PROPOSAL_JSON,),
     )
+    connection.execute(
+        "INSERT INTO tutoring_events(command_id,kind,session_id,objective_id,detail) "
+        "VALUES('proposal-command','profile-change-proposed','session-3','objective-1','generalized')"
+    )
+    connection.execute(
+        "INSERT INTO processed_commands(command_id,command_fingerprint,result_json) "
+        "VALUES('proposal-command','proposal-fingerprint',?)",
+        (LEGACY_GENERALIZED_RESULT_JSON,),
+    )
     connection.commit()
     connection.close()
 
-    migrate(database)
+    migrate(database, migration_dir=migrations if explicit_migration_dir else None)
+
+    assert {
+        path.name: path.read_bytes() for path in migrations.glob("*.sql")
+    } == migration_contents
 
     repository = SQLiteTutoringRepository(database)
     expected_plan = LearningPlan(
@@ -206,6 +241,9 @@ def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(t
         assert repository.load_observation(
             f"session-{number}", f"observation-{number}"
         ).observation == expected_observation
+    assert repository.load_state("session-3").session == LearningSession.start(
+        session_id="session-3", plan=expected_plan
+    )
     assert repository.load_evidence("learner-1", "objective-1") == tuple(
         EvidenceRecord(
             f"evidence-{number}", "learner-1", observation, "legacy"
@@ -226,7 +264,7 @@ def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(t
     with sqlite3.connect(database) as upgraded:
         assert upgraded.execute(
             "SELECT session_id FROM profile_change_proposals"
-        ).fetchone() == ("session-2",)
+        ).fetchone() == ("session-3",)
         assert upgraded.execute(
             "SELECT evidence_id,source_session_id FROM proposal_evidence "
             "ORDER BY evidence_id"
@@ -235,6 +273,20 @@ def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(t
             ("evidence-2", "session-2"),
         ]
         assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_unrelated_custom_version_two_migration_is_not_rewritten(tmp_path):
+    migrations = tmp_path / "custom-migrations"
+    migrations.mkdir()
+    migration = migrations / "0002_custom.sql"
+    migration.write_text("CREATE TABLE custom_v2(value TEXT);", encoding="utf-8")
+
+    migrate(tmp_path / "custom.db", migration_dir=migrations)
+
+    with sqlite3.connect(tmp_path / "custom.db") as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='custom_v2'"
+        ).fetchone() == ("custom_v2",)
 
 
 def test_frozen_legacy_codec_payloads_survive_upgrade_and_replay(tmp_path):
@@ -254,6 +306,8 @@ def test_frozen_legacy_codec_payloads_survive_upgrade_and_replay(tmp_path):
     connection.execute("INSERT INTO skill_estimates(learner_id,objective_id,estimate_json,version) VALUES('learner-1','objective-1',?,1)", (LEGACY_ESTIMATE_JSON,))
     connection.execute("INSERT INTO profile_change_proposals(learner_id,objective_id,proposal_json,estimate_version,policy_version) VALUES('learner-1','objective-1',?,1,'policy-v1')", (LEGACY_PROPOSAL_JSON,))
     connection.execute("INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES('legacy-command','legacy-fingerprint',?)", (LEGACY_COMMAND_RESULT_JSON,))
+    connection.execute("INSERT INTO tutoring_events(command_id,kind,session_id,objective_id,detail) VALUES('proposal-command','profile-change-proposed','session-1','objective-1','exploring')")
+    connection.execute("INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES('proposal-command','proposal-fingerprint',?)", (LEGACY_PROPOSAL_RESULT_JSON,))
     connection.commit()
     connection.close()
 

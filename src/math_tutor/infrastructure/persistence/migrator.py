@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
 
-_V2_FIRST_EVIDENCE_SESSION = """e.evidence_id=json_extract(p.proposal_json,'$.fields.evidence_ids.\"$tuple\"[0]')"""
-_V2_CURRENT_EVIDENCE_SESSION = """e.evidence_id=json_extract(p.proposal_json,'$.fields.evidence_ids.\"$tuple\"[#-1]')"""
+_PUBLISHED_V2_SHA256 = "23a2c991a273acebd8708d587658ebfcfce4f38abf21661e94b8bcfe76763364"
+_V2_INFERRED_PROPOSAL_SESSION = """COALESCE((SELECT o.session_id FROM evidence_records e JOIN observations o ON o.observation_id=e.observation_id
+   WHERE e.evidence_id=json_extract(p.proposal_json,'$.fields.evidence_ids.\"$tuple\"[0]')),
+   (SELECT session_id FROM learning_sessions s WHERE s.learner_id=p.learner_id ORDER BY created_at LIMIT 1))"""
+_V2_EVENT_PROPOSAL_SESSION = """(SELECT CASE WHEN COUNT(*)=1 THEN MAX(event.session_id) END
+   FROM tutoring_events event
+   JOIN processed_commands command ON command.command_id=event.command_id
+   JOIN learning_sessions owner ON owner.session_id=event.session_id
+   WHERE event.kind='profile-change-proposed'
+    AND owner.learner_id=p.learner_id
+    AND event.objective_id=p.objective_id
+    AND event.detail=json_extract(p.proposal_json,'$.fields.to_state.value')
+    AND json_extract(command.result_json,'$.fields.payload')=json(p.proposal_json))"""
 _V2_PROPOSAL_LINK_SELECT = """SELECT p.proposal_id,e.value,o.value,p.learner_id,p.session_id,p.objective_id
  FROM profile_change_proposals_v2 p"""
 _V2_PROVENANCE_LINK_SELECT = """SELECT p.proposal_id,e.value,o.value,p.learner_id,
@@ -16,15 +28,15 @@ _V2_PROVENANCE_LINK_SELECT = """SELECT p.proposal_id,e.value,o.value,p.learner_i
  FROM profile_change_proposals_v2 p"""
 
 
-def _upgrade_compatible_sql(sql: str, version: int) -> str:
+def _upgrade_compatible_sql(sql: str, version: int, digest: str) -> str:
     """Adapt a published v2 migration without rewriting its historical file."""
-    if version != 2:
+    if version != 2 or digest != _PUBLISHED_V2_SHA256:
         return sql
-    if _V2_FIRST_EVIDENCE_SESSION not in sql or _V2_PROPOSAL_LINK_SELECT not in sql:
+    if _V2_INFERRED_PROPOSAL_SESSION not in sql or _V2_PROPOSAL_LINK_SELECT not in sql:
         raise RuntimeError("published v2 migration does not match compatibility contract")
     return sql.replace(
-        _V2_FIRST_EVIDENCE_SESSION,
-        _V2_CURRENT_EVIDENCE_SESSION,
+        _V2_INFERRED_PROPOSAL_SESSION,
+        _V2_EVENT_PROPOSAL_SESSION,
     ).replace(
         _V2_PROPOSAL_LINK_SELECT,
         _V2_PROVENANCE_LINK_SELECT,
@@ -47,9 +59,11 @@ def migrate(database: str | Path, *, migration_dir: str | Path | None = None) ->
             connection.execute("BEGIN IMMEDIATE")
             try:
                 statement = ""
-                sql = migration.read_text(encoding="utf-8")
-                if migration_dir is None:
-                    sql = _upgrade_compatible_sql(sql, version)
+                contents = migration.read_bytes()
+                sql = contents.decode("utf-8")
+                sql = _upgrade_compatible_sql(
+                    sql, version, hashlib.sha256(contents).hexdigest()
+                )
                 for character in sql:
                     statement += character
                     if sqlite3.complete_statement(statement):
