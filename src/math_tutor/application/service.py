@@ -1,0 +1,272 @@
+"""Validated mutation fence for tutoring commands."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from hashlib import sha256
+
+from math_tutor.application.ports import (
+    CommitOutcome,
+    MutationBatch,
+    StoredActivity,
+    TutoringEvent,
+    TutoringRepository,
+)
+from math_tutor.application.results import CommandResult, CommandStatus
+from math_tutor.application.session_runtime import SessionRuntime
+from math_tutor.domain.activities import Activity, StructuredAnswer
+from math_tutor.domain.evidence import (
+    EvidenceRecord,
+    Observation,
+    TranscriptionReliabilityPolicy,
+)
+from math_tutor.domain.learning import ProgressionPolicy
+from math_tutor.domain.mathematics import verify_answer
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Command:
+    command_id: str
+    session_id: str
+    expected_session_version: int
+    expected_profile_version: int
+    generation_id: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RecordAnswer(Command):
+    activity_id: str
+    answer: StructuredAnswer
+    response_text: str | None
+    stt_confidence: float
+    assistance_level: int
+    observation_id: str
+    evidence_id: str | None
+    retain_evidence: bool
+    reason_for_retention: str | None
+    transcription_policy: TranscriptionReliabilityPolicy
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CommitHint(Command):
+    activity_id: str
+    hint_id: str
+    hint_index: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SelectNextActivity(Command):
+    activity_id: str
+    activity: Activity
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProposeEvidence(Command):
+    observation: Observation
+    evidence_id: str
+    interpretation: str
+    reason_for_retention: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProposeProfileChange(Command):
+    objective_id: str
+    progression_policy: ProgressionPolicy
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EndSession(Command):
+    reason: str
+
+
+class TutoringService:
+    def __init__(self, repository: TutoringRepository, runtime: SessionRuntime) -> None:
+        self._repository = repository
+        self._runtime = runtime
+
+    @staticmethod
+    def _fingerprint(command: Command) -> str:
+        return sha256(repr(command).encode("utf-8")).hexdigest()
+
+    def _state(self, command: Command):
+        try:
+            prior = self._repository.load_command_result(command.command_id)
+            if prior is not None:
+                if prior.command_fingerprint != self._fingerprint(command):
+                    return None, self._rejected(command, "command-id-collision")
+                return None, prior.result.as_replay()
+            if not self._runtime.is_active(command.session_id, command.generation_id):
+                return None, self._rejected(command, "generation-not-active")
+            state = self._repository.load_state(command.session_id)
+        except Exception:
+            return None, self._failed(command, "persistence-unavailable")
+        if state is None:
+            return None, self._rejected(command, "session-not-found")
+        if state.session.ended:
+            return None, self._rejected(command, "session-ended")
+        if command.expected_session_version != state.session.version:
+            return None, self._rejected(command, "stale-session-version")
+        if command.expected_profile_version != state.profile_version:
+            return None, self._rejected(command, "stale-profile-version")
+        return state, None
+
+    @staticmethod
+    def _rejected(command: Command, reason: str) -> CommandResult:
+        return CommandResult(command.command_id, CommandStatus.REJECTED, reason)
+
+    @staticmethod
+    def _failed(command: Command, reason: str) -> CommandResult:
+        return CommandResult(command.command_id, CommandStatus.PERSISTENCE_FAILED, reason)
+
+    def _commit(self, command: Command, **changes) -> CommandResult:
+        if not self._runtime.consume_generation(
+            command.session_id, command.generation_id
+        ):
+            return self._rejected(command, "generation-not-active")
+        result = CommandResult(
+            command.command_id,
+            CommandStatus.APPLIED,
+            "applied",
+            changes.pop("payload", None),
+        )
+        batch = MutationBatch(
+            command_id=command.command_id,
+            command_fingerprint=self._fingerprint(command),
+            session_id=command.session_id,
+            expected_session_version=command.expected_session_version,
+            expected_profile_version=command.expected_profile_version,
+            result=result,
+            **changes,
+        )
+        try:
+            decision = self._repository.commit_once(batch)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if decision.outcome is CommitOutcome.REPLAYED:
+            if decision.result is None:
+                return self._failed(command, "invalid-persistence-response")
+            return decision.result.as_replay()
+        if decision.outcome is CommitOutcome.CONFLICT:
+            return self._rejected(command, decision.reason or "concurrent-mutation")
+        if decision.outcome is not CommitOutcome.COMMITTED or decision.result is None:
+            return self._failed(command, "invalid-persistence-response")
+        return decision.result
+
+    def record_answer(self, command: RecordAnswer) -> CommandResult:
+        state, error = self._state(command)
+        if error: return error
+        try:
+            activity = self._repository.load_activity(command.session_id, command.activity_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if activity is None: return self._rejected(command, "activity-not-found")
+        if activity.objective_id not in state.session.authorised_objective_ids:
+            return self._rejected(command, "objective-not-authorised")
+        check = verify_answer(activity, command.answer)
+        try:
+            observation = Observation.from_answer(
+                observation_id=command.observation_id,
+                learner_id=state.session.learner_id,
+                session_id=command.session_id,
+                objective_id=activity.objective_id,
+                activity_id=command.activity_id,
+                answer_outcome=check.outcome,
+                stt_confidence=command.stt_confidence,
+                assistance_level=command.assistance_level,
+                response_text=command.response_text,
+                transcription_policy=command.transcription_policy,
+            )
+        except (TypeError, ValueError):
+            return self._rejected(command, "domain-validation-error")
+        evidence = ()
+        if command.retain_evidence:
+            if command.evidence_id is None or command.reason_for_retention is None:
+                return self._rejected(command, "retained-evidence-requires-id-and-reason")
+            try:
+                evidence = (EvidenceRecord.initial(
+                    evidence_id=command.evidence_id,
+                    learner_id=state.session.learner_id,
+                    observation=observation,
+                    reason_for_retention=command.reason_for_retention,
+                ),)
+            except (TypeError, ValueError):
+                return self._rejected(command, "domain-validation-error")
+        session = replace(state.session, version=state.session.version + 1)
+        return self._commit(command, session=session, observations=(observation,), evidence=evidence,
+            events=(TutoringEvent("answer-recorded", command.session_id, activity.objective_id, command.activity_id, check.reason),),
+            payload=check)
+
+    def commit_hint(self, command: CommitHint) -> CommandResult:
+        state, error = self._state(command)
+        if error: return error
+        try: activity = self._repository.load_activity(command.session_id, command.activity_id)
+        except Exception: return self._failed(command, "persistence-unavailable")
+        if activity is None: return self._rejected(command, "activity-not-found")
+        if activity.objective_id not in state.session.authorised_objective_ids:
+            return self._rejected(command, "objective-not-authorised")
+        if command.hint_index < 0 or command.hint_index >= len(activity.hint_ids) or activity.hint_ids[command.hint_index] != command.hint_id:
+            return self._rejected(command, "hint-not-reviewed-at-index")
+        session = replace(state.session, version=state.session.version + 1)
+        return self._commit(command, session=session, events=(TutoringEvent("hint-committed", command.session_id, activity.objective_id, command.activity_id, command.hint_id),))
+
+    def select_next_activity(self, command: SelectNextActivity) -> CommandResult:
+        state, error = self._state(command)
+        if error: return error
+        if command.activity.objective_id not in state.session.authorised_objective_ids:
+            return self._rejected(command, "objective-not-authorised")
+        if command.activity.objective_id not in state.session.active_objective_ids:
+            return self._rejected(command, "objective-not-active")
+        session = replace(state.session, version=state.session.version + 1)
+        return self._commit(command, session=session, activities=(StoredActivity(command.activity_id, command.activity),),
+            events=(TutoringEvent("activity-selected", command.session_id, command.activity.objective_id, command.activity_id, command.activity.template_id),), payload=command.activity)
+
+    def propose_evidence(self, command: ProposeEvidence) -> CommandResult:
+        state, error = self._state(command)
+        if error: return error
+        observation = command.observation
+        if observation.session_id != command.session_id or observation.learner_id != state.session.learner_id:
+            return self._rejected(command, "observation-outside-session")
+        if observation.objective_id not in state.session.authorised_objective_ids:
+            return self._rejected(command, "objective-not-authorised")
+        try:
+            evidence = EvidenceRecord.initial(
+                evidence_id=command.evidence_id,
+                learner_id=state.session.learner_id,
+                observation=observation,
+                interpretation=command.interpretation,
+                reason_for_retention=command.reason_for_retention,
+            )
+        except (TypeError, ValueError):
+            return self._rejected(command, "domain-validation-error")
+        session = replace(state.session, version=state.session.version + 1)
+        return self._commit(command, session=session, evidence=(evidence,),
+            events=(TutoringEvent("evidence-proposed", command.session_id, observation.objective_id, observation.activity_id, command.evidence_id),), payload=evidence)
+
+    def propose_profile_change(self, command: ProposeProfileChange) -> CommandResult:
+        state, error = self._state(command)
+        if error: return error
+        if command.objective_id not in state.session.authorised_objective_ids:
+            return self._rejected(command, "objective-not-authorised")
+        try:
+            estimate = self._repository.load_estimate(state.session.learner_id, command.objective_id)
+            evidence = self._repository.load_evidence(state.session.learner_id, command.objective_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if estimate is None: return self._rejected(command, "estimate-not-found")
+        try:
+            proposal = command.progression_policy.propose_change(estimate, evidence)
+        except (TypeError, ValueError):
+            return self._rejected(command, "domain-validation-error")
+        if proposal is None: return self._rejected(command, "insufficient-evidence")
+        session = replace(state.session, version=state.session.version + 1)
+        return self._commit(command, session=session, profile_change_proposals=(proposal,),
+            events=(TutoringEvent("profile-change-proposed", command.session_id, command.objective_id, detail=proposal.to_state.value),), payload=proposal)
+
+    def end_session(self, command: EndSession) -> CommandResult:
+        state, error = self._state(command)
+        if error: return error
+        try:
+            session = state.session.end(reason=command.reason)
+        except (TypeError, ValueError):
+            return self._rejected(command, "domain-validation-error")
+        return self._commit(command, session=session, events=(TutoringEvent("session-ended", command.session_id, detail=command.reason),))
