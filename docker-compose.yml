@@ -1,0 +1,54 @@
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.6
+    command: --config /etc/livekit.yaml
+    ports:
+      - "127.0.0.1:7880:7880"
+      - "127.0.0.1:7881:7881"
+      - "127.0.0.1:50000-50019:50000-50019/udp"
+    volumes:
+      - ./docker/livekit.yaml:/etc/livekit.yaml:ro
+
+  tooling:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.tooling
+      target: tooling
+    profiles: ["dev", "test"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PYTHONPATH: /app/src:/app
+    volumes:
+      - .:/app
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+    profiles: ["dev"]
+    depends_on:
+      - livekit
+    network_mode: service:livekit
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LIVEKIT_URL: ws://127.0.0.1:7880
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: devsecret-devsecret-devsecret-0000
+      DATABASE_PATH: /app/data/math_tutor.db
+      STORE_AUDIO: "false"
+    volumes:
+      - .:/app
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+    profiles: ["dev"]
+    command: python -m http.server 8080 --bind 0.0.0.0 --directory web/static
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - .:/app

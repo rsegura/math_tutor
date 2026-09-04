@@ -1,0 +1,10 @@
+.git
+.env
+.venv
+.worktrees
+__pycache__
+*.py[cod]
+.pytest_cache
+*.sqlite
+*.sqlite3
+data

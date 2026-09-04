@@ -29,7 +29,14 @@ Anti-patterns that will get a change rejected:
 
 ## Test taxonomy
 
-The locations below are the target layout and are created with their delivery phase. After Phases 0–2, `tests/unit/` (domain, application, harness, infrastructure, dependency and import-boundary guards), `tests/contract/` (pinned LiveKit SDK surface, worker, compose topology, token endpoint, static page) and `tests/integration/` (the scripted `FakeModelAdapter` harness conversation gate) are populated; `tests/e2e/` arrives with its phase. Phase 3 adds `tests/integration/test_voice_boundary.py`, the voice-boundary gate: it drives `ScreeningAgent`'s real `on_user_turn_completed`/`llm_node` over a `build_screening_runtime` composition to pin turn correlation, supersession, §14 interruption case (b), transcript integrity under a barge-in, and idempotent replay. Phase 4 adds `tests/integration/test_persistence_wal.py`, the §14 WAL battery (cold start before any sidecar exists, sidecar recreation across a writer restart, a query-only reader against a live writer, and the bounded busy timeout), and `tests/support/persistence.py`, which builds every temporary database under `tmp_path`. `tests/test_environment.py` and `tests/test_development_harness.py` remain at the tests root as repository guardrails.
+The locations below are the target layout and are created with their delivery
+phase. `tests/unit/` covers domain, application, harness, infrastructure,
+dependency, and import-boundary guards. `tests/contract/` pins LiveKit SDK
+surfaces, worker composition, Compose topology, token endpoints, and static
+pages. `tests/integration/` drives the pedagogical harness through a scripted
+`FakeModelAdapter`, while `tests/e2e/` is reserved for controlled fake
+STT/LLM/TTS flows. Persistence tests build every temporary database under
+`tmp_path`; repository guardrails remain at the tests root.
 
 | Layer | Target location | Phase / rules |
 |---|---|---|
