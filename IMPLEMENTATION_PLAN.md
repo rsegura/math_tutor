@@ -465,7 +465,100 @@ git add src/math_tutor/application tests
 git commit -m "feat: add evidence-linked tutoring review"
 ```
 
-### Task 10: Add composition and voice routing
+### Task 10: Provision authorised learners, plans, consent, and sessions
+
+**Dependencies:** Tasks 5, 6, 8, and 9.
+
+**Files:**
+- Create: `src/math_tutor/application/provisioning.py`
+- Modify: `src/math_tutor/application/ports.py`
+- Create: `src/math_tutor/domain/audio_consent.py`
+- Create: `src/math_tutor/infrastructure/persistence/migrations/0002_audio_consent.sql`
+- Modify: `src/math_tutor/infrastructure/persistence/migrator.py`
+- Modify: `src/math_tutor/infrastructure/persistence/repositories.py`
+- Create: `web/app.py`
+- Create: `web/therapist_api.py`
+- Modify: `docker-compose.yml`
+- Modify: `.env.example`
+- Create: `tests/unit/math_tutor/application/test_provisioning.py`
+- Create: `tests/contract/math_tutor/test_therapist_api.py`
+- Create: `tests/integration/math_tutor/test_provisioning_flow.py`
+
+**Step 1: Write failing tests**
+
+Define application commands for:
+
+- `create_learner`, storing only an opaque learner ID, pseudonym, and
+  `age_years` needed to adapt presentation—never a legal name or birth date;
+- `create_learning_plan` and `update_learning_plan`, with authorised objective
+  IDs, allowlisted functional adaptations, session limits, and
+  `expected_version` optimistic concurrency;
+- `grant_audio_consent` and `revoke_audio_consent`, versioned, explicit, and
+  never inferred from starting tutoring. A grant belongs to the learner and
+  current plan version; session start may bind that grant to the new session;
+- `start_learning_session`, which requires a current non-empty plan, accepts an
+  optional valid `audio_consent_id`, and creates an opaque
+  `tutoring_session_id` plus a short-lived opaque learner join code. When a
+  consent ID is supplied, it creates the session-scoped consent snapshot used
+  by clip capture.
+
+The API contract must fail closed unless `THERAPIST_API_TOKEN` is configured
+server-side and the request supplies the matching bearer credential. Reject
+unknown objectives, invalid limits/adaptations, stale expected versions, and
+start requests with no authorised objectives. Assert that the therapist token
+never appears in API responses, logs, static assets, learner join data, or the
+child-facing configuration.
+
+Test that audio consent is absent and default-off for a new learner. Its absence
+must not prevent plan creation or session start; it authorises no clip capture.
+Revocation calls an injected idempotent `ClipPurgePort` for the consent scope,
+including all session snapshots derived from the grant and when revocation is
+repeated or no clips exist.
+
+Drive an integration test from an empty database through learner creation,
+plan creation, optional consent grant, and session start. Cover unauthorised
+therapist requests, stale plan updates, empty objectives, start without consent,
+grant/revoke, and repeated revoke.
+
+**Step 2: Verify RED**
+
+```bash
+make test ARGS="tests/unit/math_tutor/application/test_provisioning.py tests/contract/math_tutor/test_therapist_api.py tests/integration/math_tutor/test_provisioning_flow.py -v"
+```
+
+Expected: FAIL because the provisioning service, authorised API, and consent
+persistence do not exist.
+
+**Step 3: Implement provisioning and the authorised API**
+
+Implement commands through application ports and the shared mutation fence;
+the FastAPI boundary only validates/authenticates input and maps typed results.
+Store a hash of the learner join code, never its plaintext. Configure the web
+service to launch `uvicorn web.app:app` and read `THERAPIST_API_TOKEN` only from
+server-side environment. Startup must fail if the therapist API is enabled with
+an empty or placeholder credential. Do not embed or return this credential to
+the learner client.
+
+Persist consent grants and revocations through `0002_audio_consent.sql`.
+`ClipPurgePort` is the application-level revocation contract; Task 12 supplies
+the physical clip implementation. Until clips exist, its repository-backed
+implementation remains an idempotent no-op with an auditable revocation row.
+
+**Step 4: Verify GREEN**
+
+Run the three task tests and all application/persistence tests; expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add src/math_tutor/application src/math_tutor/domain/audio_consent.py src/math_tutor/infrastructure/persistence web/app.py web/therapist_api.py docker-compose.yml .env.example tests/unit/math_tutor/application tests/contract/math_tutor/test_therapist_api.py tests/integration/math_tutor/test_provisioning_flow.py
+git commit -m "feat: provision authorised tutoring sessions"
+```
+
+### Task 11: Add composition and voice routing
+
+**Dependencies:** Task 10's persisted learner, plan, session, join-code, and
+authorisation contracts.
 
 **Files:**
 - Create: `src/math_tutor/agent/__init__.py`
@@ -476,7 +569,7 @@ git commit -m "feat: add evidence-linked tutoring review"
 - Modify: `docker/Dockerfile.agent`
 - Modify: `docker-compose.yml`
 - Modify: `Makefile`
-- Create: `web/app.py`
+- Modify: `web/app.py`
 - Create: `web/token_api.py`
 - Create: `web/review_api.py`
 - Create: `web/static/index.html`
@@ -487,6 +580,7 @@ git commit -m "feat: add evidence-linked tutoring review"
 - Create: `tests/contract/math_tutor/test_review_endpoint.py`
 - Create: `tests/contract/math_tutor/test_web_app.py`
 - Create: `tests/contract/math_tutor/test_voice_client.py`
+- Create: `tests/integration/math_tutor/test_session_bootstrap_flow.py`
 - Create: `tests/integration/math_tutor/test_voice_boundary.py`
 
 **Step 1: Write failing tests**
@@ -499,10 +593,35 @@ service with `uvicorn web.app:app`, the FastAPI app exposes token and review
 routes, and the served client requests a room token before connecting to
 LiveKit.
 
+The learner token endpoint accepts only an existing `tutoring_session_id` and
+its short-lived learner join code. It must validate the stored hash, expiry,
+session status, current plan version, and at least one authorised objective
+before issuing a room token or dispatch. It never creates a learner, plan, or
+empty session implicitly. Dispatch metadata carries only opaque IDs and the
+expected session/plan versions.
+
+The worker must reconstruct the learner presentation data, LearningPlan, active
+LearningSession, limits, adaptations, and objective set from durable state. It
+fails closed before model or speech activity if the session is absent,
+inactive/terminal, stale, unauthorised, or has no objectives. Missing audio
+consent is valid and starts tutoring with clip capture disabled.
+
+Add an empty-database integration flow:
+
+```text
+authorised therapist -> learner -> non-empty plan -> optional consent
+  -> active session -> learner token -> dispatch -> worker reconstruction
+```
+
+Cover the same flow without consent, plus invalid join code, unauthorised
+therapist request, empty-objective plan, missing/inactive session, and consent
+revocation. Revocation must invoke the idempotent purge contract and must not
+terminate or invalidate the tutoring session.
+
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/math_tutor/agent/test_voice_agent.py tests/contract/math_tutor tests/integration/math_tutor/test_voice_boundary.py -v"
+make test ARGS="tests/unit/math_tutor/agent/test_voice_agent.py tests/contract/math_tutor tests/integration/math_tutor/test_session_bootstrap_flow.py tests/integration/math_tutor/test_voice_boundary.py -v"
 ```
 
 **Step 3: Implement composition**
@@ -512,10 +631,14 @@ adapt the required STT correlation, TTS watchdog, terminal closer, provider
 factory, and active-generation patterns from `audio_poc`; place them under
 `src/math_tutor/`, remove all source-product semantics, and pin their behaviour
 with local tests. The standalone worker has no product-mode branch. Replace the
-scaffold image `CMD`, Compose commands, and Make target so none remains a
-placeholder: the agent launches the real worker and the web service launches
-the FastAPI application through Uvicorn. Implement the minimum token and review
-APIs plus a static voice client that obtains a token and connects to LiveKit.
+remaining scaffold agent image `CMD`, Compose agent command, and `make agent`
+target so the agent launches the real worker. Preserve and contract-test Task
+10's Uvicorn web entrypoint. Implement the minimum token and review APIs plus a
+static voice client that obtains a token and connects to LiveKit.
+The token API calls the provisioning query port and releases dispatch only
+after all persisted session and plan checks pass. The worker composition root
+opens repositories and reconstructs that exact authorised session; it has no
+fallback that synthesises state from dispatch metadata.
 
 **Step 4: Verify GREEN**
 
@@ -524,17 +647,19 @@ Run the task tests and all math-tutor agent and contract tests; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/math_tutor/agent src/math_tutor/infrastructure/dispatch.py docker/Dockerfile.agent docker-compose.yml Makefile web tests/unit/math_tutor/agent tests/contract/math_tutor tests/integration/math_tutor/test_voice_boundary.py
+git add src/math_tutor/agent src/math_tutor/infrastructure/dispatch.py docker/Dockerfile.agent docker-compose.yml Makefile web tests/unit/math_tutor/agent tests/contract/math_tutor tests/integration/math_tutor/test_session_bootstrap_flow.py tests/integration/math_tutor/test_voice_boundary.py
 git commit -m "feat: route voice sessions to tutoring runtime"
 ```
 
-### Task 11: Capture short evidence clips without retaining full audio
+### Task 12: Capture short evidence clips without retaining full audio
+
+**Dependencies:** Task 10's consent and purge port; Task 11's worker runtime.
 
 **Files:**
-- Create: `src/math_tutor/domain/audio_consent.py`
+- Modify: `src/math_tutor/application/provisioning.py`
 - Create: `src/math_tutor/infrastructure/evidence_clips.py`
 - Create: `src/math_tutor/infrastructure/clip_retention.py`
-- Create: `src/math_tutor/infrastructure/persistence/migrations/0002_audio_consent.sql`
+- Create: `src/math_tutor/infrastructure/persistence/migrations/0003_audio_clip_retention.sql`
 - Modify: `src/math_tutor/infrastructure/persistence/migrator.py`
 - Modify: `src/math_tutor/infrastructure/persistence/repositories.py`
 - Modify: `src/math_tutor/agent/voice_agent.py`
@@ -581,7 +706,9 @@ operation for the review API. Consent revocation prevents new clips and queues
 existing clips from that consent scope for deletion. Store files under a
 configured math-tutor evidence directory with opaque IDs; store no transcript
 in filenames or logs. Persist consent scope, revocation, clip expiry, and
-deletion audit data through migration `0002_audio_consent.sql`.
+deletion audit data through migration `0003_audio_clip_retention.sql`. Replace
+Task 10's no-clips purge implementation with this idempotent physical purge
+through the same `ClipPurgePort`.
 
 The worker runtime owns exactly one `RetentionSweeper`. Its factory validates
 `AUDIO_RETENTION_SWEEP_INTERVAL_SECONDS` in the range 60–3600 seconds (default
@@ -601,13 +728,17 @@ Run task tests; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/math_tutor/domain/audio_consent.py src/math_tutor/agent src/math_tutor/infrastructure/evidence_clips.py src/math_tutor/infrastructure/clip_retention.py src/math_tutor/infrastructure/persistence .env.example tests/unit/math_tutor/agent/test_retention_sweeper_lifecycle.py tests/unit/math_tutor/infrastructure tests/integration/math_tutor/test_selective_audio_retention.py
+git add src/math_tutor/application/provisioning.py src/math_tutor/agent src/math_tutor/infrastructure/evidence_clips.py src/math_tutor/infrastructure/clip_retention.py src/math_tutor/infrastructure/persistence .env.example tests/unit/math_tutor/agent/test_retention_sweeper_lifecycle.py tests/unit/math_tutor/infrastructure tests/integration/math_tutor/test_selective_audio_retention.py
 git commit -m "feat: retain only selected tutoring audio evidence"
 ```
 
-### Task 12: Add therapist review UI and API
+### Task 13: Add therapist review UI and API
+
+**Dependencies:** Task 10's therapist authentication and provisioning boundary;
+Task 12's authorised clip access and deletion service.
 
 **Files:**
+- Modify: `web/therapist_api.py`
 - Modify: `web/review_api.py`
 - Create: `web/static/tutoring-review.html`
 - Create: `web/static/tutoring-review.js`
@@ -632,7 +763,9 @@ make test ARGS="tests/contract/math_tutor/test_review_api.py tests/contract/math
 
 Keep reads on query-only connections. Send corrections through a narrow writer
 service with expected revision. Render objective progress, assistance, evidence,
-provisional hypotheses, and next-objective proposals separately.
+provisional hypotheses, and next-objective proposals separately. Mount every
+review and clip mutation behind the same fail-closed therapist authentication;
+the child-facing token/client routes never receive that credential.
 
 **Step 4: Verify GREEN**
 
@@ -645,7 +778,7 @@ git add web tests/contract
 git commit -m "feat: add therapist tutoring review"
 ```
 
-### Task 13: Build tutoring evals and the acceptance gate
+### Task 14: Build tutoring evals and the acceptance gate
 
 **Files:**
 - Create: `evals/math_tutor/runner.py`
@@ -691,7 +824,7 @@ git add evals/math_tutor tests/integration/math_tutor/test_eval_runner.py Makefi
 git commit -m "test: gate tutoring behaviour with offline evals"
 ```
 
-### Task 14: Close the PoC verification gate
+### Task 15: Close the PoC verification gate
 
 **Files:**
 - Create: `docs/math-tutor-poc-verification.md`
