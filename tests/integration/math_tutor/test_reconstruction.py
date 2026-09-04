@@ -1,4 +1,7 @@
-from math_tutor.application.ports import ActivityProgress
+from math_tutor.application.ports import ActivityProgress, MutationBatch, StoredActivity
+from math_tutor.application.results import CommandResult, CommandStatus
+from math_tutor.domain.activities import Activity, StructuredAnswer
+from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.domain.learning import CompetencyState, LearningPlan, LearningSession, PresentationProfile, SkillEstimate
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
@@ -33,7 +36,12 @@ def test_full_session_aggregate_survives_repository_reopen(tmp_path):
     repo.save_plan(plan, policy_version="policy-v4")
     repo.save_session(session, profile_version=7)
     repo.save_estimate(SkillEstimate("learner-9", "count", CompetencyState.NOT_OBSERVED))
-    repo.save_activity_progress("session-9", ActivityProgress("activity-9", 0, 0, 1))
+    activity = Activity("template-1", "count", 1, "Cuenta", {"n": 1}, StructuredAnswer.evaluable(ExpectedAnswerKind.INTEGER, {"answer": 1}), (), ())
+    repo.commit_once(MutationBatch("bootstrap-activity", "fp", "session-9", 1, 7,
+        CommandResult("bootstrap-activity", CommandStatus.APPLIED, "created"),
+        activities=(StoredActivity("activity-9", activity),),
+        activity_progress=(ActivityProgress("activity-9", 0, 0, 1),),
+        expected_absent_activity_ids=("activity-9",)))
     aggregate = SQLiteTutoringRepository(path).load_session_aggregate("session-9")
     assert aggregate.session == session
     assert aggregate.plan == plan

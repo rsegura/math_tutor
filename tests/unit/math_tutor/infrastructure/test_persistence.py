@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from dataclasses import replace
 
 from math_tutor.application.ports import (
@@ -44,6 +45,15 @@ def batch(command_id="command-1", fingerprint="fp-1"):
     proposal = ProposedProfileChange("learner-1", "objective-1", CompetencyState.NOT_OBSERVED, CompetencyState.EXPLORING, ("evidence-1",), ("observation-1",), 1, "policy-v1")
     result = CommandResult(command_id, CommandStatus.APPLIED, "applied", {"spoken": "Muy bien"})
     return MutationBatch(command_id, fingerprint, "session-1", 1, 1, result, session(version=2), (StoredActivity("activity-1", activity()),), (obs,), (evidence,), (proposal,), (TutoringEvent("answer-recorded", "session-1", "objective-1", "activity-1", "correct"),), activity_progress=(ActivityProgress("activity-1", 1, 0, 1),), expected_absent_activity_ids=("activity-1",))
+
+
+def bootstrap_progress(repo, *items):
+    stored = tuple(StoredActivity(item.activity_id, activity(item.activity_id)) for item in items)
+    result = CommandResult("bootstrap", CommandStatus.APPLIED, "created")
+    mutation = MutationBatch("bootstrap", "bootstrap", "session-1", 1, 1, result,
+                             activities=stored, activity_progress=items,
+                             expected_absent_activity_ids=tuple(item.activity_id for item in items))
+    assert repo.commit_once(mutation).outcome is CommitOutcome.APPLIED
 
 
 def test_migration_is_idempotent_and_schema_has_no_full_session_audio(tmp_path):
@@ -108,7 +118,7 @@ def test_progress_observation_and_absence_expectations_are_checked_inside_transa
 
 def test_activity_progress_upsert_preserves_unmentioned_rows(tmp_path):
     repo = repository(tmp_path)
-    repo.save_activity_progress("session-1", ActivityProgress("a", 0, 0, 1), ActivityProgress("b", 0, 0, 2))
+    bootstrap_progress(repo, ActivityProgress("a", 0, 0, 1), ActivityProgress("b", 0, 0, 2))
     result = CommandResult("c", CommandStatus.APPLIED, "applied")
     mutation = MutationBatch("c", "fp", "session-1", 1, 1, result, activity_progress=(ActivityProgress("a", 1, 0, 1, version=2),), expected_activity_progress=(ActivityProgressExpectation("a", 1),))
     assert repo.commit_once(mutation).outcome is CommitOutcome.APPLIED
@@ -172,7 +182,7 @@ def test_batch_rejects_cross_session_and_cross_learner_payloads(tmp_path):
 
 def test_every_progress_update_requires_exact_cas_expectation(tmp_path):
     repo = repository(tmp_path)
-    repo.save_activity_progress("session-1", ActivityProgress("a", 0, 0, 1))
+    bootstrap_progress(repo, ActivityProgress("a", 0, 0, 1))
     result = CommandResult("c", CommandStatus.APPLIED, "applied")
     blind = MutationBatch("c", "fp", "session-1", 1, 1, result,
                           activity_progress=(ActivityProgress("a", 1, 0, 1, version=2),))
@@ -250,3 +260,40 @@ def test_session_must_reference_plan_version_owned_by_same_learner(tmp_path):
         assert "plan" in str(error)
     else:
         raise AssertionError("session without owned plan version accepted")
+
+
+def test_observation_objective_must_match_its_canonical_activity(tmp_path):
+    repo = repository(tmp_path)
+    canonical = replace(activity(), objective_id="objective-1")
+    repo.commit_once(replace(batch(), activities=(StoredActivity("activity-1", canonical),), observations=(), evidence=(), profile_change_proposals=(), activity_progress=()))
+    wrong = replace(observation("wrong"), observation_id="observation-wrong", objective_id="objective-2")
+    attempt = replace(batch(command_id="wrong-objective", fingerprint="wrong-objective"), activities=(), observations=(wrong,), evidence=(), profile_change_proposals=(), activity_progress=(), expected_absent_activity_ids=(), expected_session_version=2, session=session(3))
+    assert repo.commit_once(attempt).reason == "batch-objective-mismatch"
+    assert repo.load_observation("session-1", "observation-wrong") is None
+
+
+def test_proposal_rejects_missing_and_cross_owned_evidence(tmp_path):
+    repo = repository(tmp_path)
+    base = batch()
+    missing = replace(base.profile_change_proposals[0], evidence_ids=("missing",), observation_ids=("observation-1",))
+    assert repo.commit_once(replace(base, profile_change_proposals=(missing,))).reason == "batch-proposal-evidence-mismatch"
+
+    repo.commit_once(base)
+    other = replace(base.profile_change_proposals[0], learner_id="learner-2")
+    later = replace(base, command_id="other", command_fingerprint="other", expected_session_version=2, session=session(3), activities=(), observations=(), evidence=(), activity_progress=(), expected_absent_activity_ids=(), profile_change_proposals=(other,))
+    assert repo.commit_once(later).reason == "batch-learner-mismatch"
+
+
+def test_commit_once_serializes_two_real_connections(tmp_path):
+    repo = repository(tmp_path)
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def commit(candidate):
+        barrier.wait()
+        outcomes.append(SQLiteTutoringRepository(repo.database).commit_once(candidate).outcome)
+
+    first = threading.Thread(target=commit, args=(batch(),))
+    second = threading.Thread(target=commit, args=(batch(fingerprint="collision"),))
+    first.start(); second.start(); first.join(); second.join()
+    assert sorted(item.value for item in outcomes) == ["applied", "collision"]

@@ -207,6 +207,8 @@ class SQLiteTutoringRepository:
 
     def save_estimate(self, estimate: SkillEstimate, *, expected_version: int | None = None) -> None:
         with self._connect() as db:
+            if db.execute("SELECT 1 FROM learners WHERE learner_id=?", (estimate.learner_id,)).fetchone() is None:
+                raise ValueError("skill estimate learner does not exist")
             if expected_version is None:
                 try:
                     db.execute("INSERT INTO skill_estimates(learner_id,objective_id,estimate_json,version) VALUES(?,?,?,?)", (estimate.learner_id, estimate.objective_id, _dump(estimate), estimate.version))
@@ -223,6 +225,8 @@ class SQLiteTutoringRepository:
         """Bootstrap progress only; mutation updates belong to commit_once CAS."""
         with self._connect() as db:
             for item in progress:
+                if db.execute("SELECT 1 FROM activities WHERE session_id=? AND activity_id=?", (session_id, item.activity_id)).fetchone() is None:
+                    raise ValueError("activity progress requires a canonical activity")
                 if item.version != 1:
                     raise ValueError("bootstrap activity progress must start at version 1")
                 try:
@@ -296,6 +300,11 @@ class SQLiteTutoringRepository:
             existing_activity = db.execute("SELECT activity_json FROM activities WHERE session_id=? AND activity_id=?", (batch.session_id, observation.activity_id)).fetchone()
             if observation.activity_id not in activity_ids and existing_activity is None:
                 return "batch-activity-mismatch"
+            canonical_activity = next((item.activity for item in batch.activities if item.activity_id == observation.activity_id), None)
+            if canonical_activity is None and existing_activity is not None:
+                canonical_activity = _load(existing_activity[0])
+            if canonical_activity is None or canonical_activity.objective_id != observation.objective_id:
+                return "batch-objective-mismatch"
         observations = {item.observation_id: item for item in batch.observations}
         for evidence in batch.evidence:
             observation = observations.get(evidence.observation.observation_id)
@@ -311,13 +320,36 @@ class SQLiteTutoringRepository:
                 return "batch-learner-mismatch"
             if proposal.objective_id not in objective_scope:
                 return "batch-objective-mismatch"
+            for evidence_id, observation_id in zip(proposal.evidence_ids, proposal.observation_ids, strict=True):
+                candidate = next((item for item in batch.evidence if item.evidence_id == evidence_id), None)
+                if candidate is None:
+                    row = db.execute(
+                        "SELECT e.observation_id,e.learner_id,e.session_id,e.objective_id FROM evidence_records e WHERE e.evidence_id=?",
+                        (evidence_id,),
+                    ).fetchone()
+                    if row is None or tuple(row) != (observation_id, learner_id, batch.session_id, proposal.objective_id):
+                        return "batch-proposal-evidence-mismatch"
+                elif (
+                    candidate.observation.observation_id != observation_id
+                    or candidate.learner_id != learner_id
+                    or candidate.observation.session_id != batch.session_id
+                    or candidate.observation.objective_id != proposal.objective_id
+                ):
+                    return "batch-proposal-evidence-mismatch"
         for event in batch.events:
             if event.session_id != batch.session_id:
                 return "batch-session-mismatch"
             if event.objective_id is not None and event.objective_id not in objective_scope:
                 return "batch-objective-mismatch"
-            if event.activity_id is not None and event.activity_id not in activity_ids and db.execute("SELECT 1 FROM activities WHERE session_id=? AND activity_id=?", (batch.session_id, event.activity_id)).fetchone() is None:
-                return "batch-activity-mismatch"
+            if event.activity_id is not None:
+                canonical = next((item.activity for item in batch.activities if item.activity_id == event.activity_id), None)
+                if canonical is None:
+                    row = db.execute("SELECT activity_json FROM activities WHERE session_id=? AND activity_id=?", (batch.session_id, event.activity_id)).fetchone()
+                    canonical = _load(row[0]) if row else None
+                if canonical is None:
+                    return "batch-activity-mismatch"
+                if event.objective_id is not None and canonical.objective_id != event.objective_id:
+                    return "batch-objective-mismatch"
         for expected in batch.expected_observations:
             row = db.execute("SELECT version FROM observations WHERE session_id=? AND observation_id=?", (batch.session_id, expected.observation_id)).fetchone()
             if row is None or row[0] != expected.version: return "stale-observation-version"
@@ -360,15 +392,17 @@ class SQLiteTutoringRepository:
                 cursor = db.execute("UPDATE learning_sessions SET session_json=?,version=? WHERE session_id=? AND version=?", (_dump(batch.session), batch.session.version, batch.session_id, batch.expected_session_version))
                 if cursor.rowcount != 1: raise sqlite3.IntegrityError("lost session update")
             for stored in batch.activities:
-                db.execute("INSERT INTO activities(session_id,activity_id,activity_json) VALUES(?,?,?)", (batch.session_id, stored.activity_id, _dump(stored.activity)))
+                db.execute("INSERT INTO activities(session_id,activity_id,objective_id,activity_json) VALUES(?,?,?,?)", (batch.session_id, stored.activity_id, stored.activity.objective_id, _dump(stored.activity)))
             for observation in batch.observations:
-                db.execute("INSERT INTO observations(observation_id,session_id,learner_id,objective_id,observation_json,version) VALUES(?,?,?,?,?,1)", (observation.observation_id, observation.session_id, observation.learner_id, observation.objective_id, _dump(observation)))
+                db.execute("INSERT INTO observations(observation_id,session_id,learner_id,objective_id,activity_id,observation_json,version) VALUES(?,?,?,?,?,?,1)", (observation.observation_id, observation.session_id, observation.learner_id, observation.objective_id, observation.activity_id, _dump(observation)))
             for evidence in batch.evidence:
                 db.execute("INSERT INTO evidence_records(evidence_id,observation_id,learner_id,session_id,objective_id,reason_for_retention) VALUES(?,?,?,?,?,?)", (evidence.evidence_id, evidence.observation.observation_id, evidence.learner_id, evidence.observation.session_id, evidence.observation.objective_id, evidence.reason_for_retention))
                 for revision in evidence.interpretations:
                     db.execute("INSERT INTO evidence_interpretations(evidence_id,version,interpretation,reason) VALUES(?,?,?,?)", (evidence.evidence_id, revision.version, revision.interpretation, revision.reason))
             for proposal in batch.profile_change_proposals:
-                db.execute("INSERT INTO profile_change_proposals(learner_id,objective_id,proposal_json,estimate_version,policy_version) VALUES(?,?,?,?,?)", (proposal.learner_id, proposal.objective_id, _dump(proposal), proposal.estimate_version, proposal.policy_version))
+                cursor = db.execute("INSERT INTO profile_change_proposals(learner_id,session_id,objective_id,proposal_json,estimate_version,policy_version) VALUES(?,?,?,?,?,?)", (proposal.learner_id, batch.session_id, proposal.objective_id, _dump(proposal), proposal.estimate_version, proposal.policy_version))
+                for evidence_id, observation_id in zip(proposal.evidence_ids, proposal.observation_ids, strict=True):
+                    db.execute("INSERT INTO proposal_evidence(proposal_id,evidence_id,observation_id,learner_id,session_id,objective_id) VALUES(?,?,?,?,?,?)", (cursor.lastrowid, evidence_id, observation_id, proposal.learner_id, batch.session_id, proposal.objective_id))
             for progress in batch.activity_progress:
                 expectation = next((item for item in batch.expected_activity_progress if item.activity_id == progress.activity_id), None)
                 if expectation is None:
@@ -391,6 +425,10 @@ class SQLiteTutoringRepository:
 
     def append_therapist_review(self, review_id: str, version: int, learner_id: str, session_id: str | None, review: object) -> None:
         with self._connect() as db:
+            if db.execute("SELECT 1 FROM learners WHERE learner_id=?", (learner_id,)).fetchone() is None:
+                raise ValueError("review learner does not exist")
+            if session_id is not None and db.execute("SELECT 1 FROM learning_sessions WHERE session_id=? AND learner_id=?", (session_id, learner_id)).fetchone() is None:
+                raise ValueError("review session is not owned by learner")
             db.execute("INSERT INTO therapist_reviews(review_id,version,learner_id,session_id,review_json) VALUES(?,?,?,?,?)", (review_id,version,learner_id,session_id,_dump(review)))
 
     def load_therapist_reviews(self, review_id: str) -> tuple[TherapistReviewRecord, ...]:
@@ -400,6 +438,8 @@ class SQLiteTutoringRepository:
 
     def append_profile_revision(self, revision_id: str, learner_id: str, profile_version: int, revision: object, *, policy_version: str) -> None:
         with self._connect() as db:
+            if db.execute("SELECT 1 FROM learners WHERE learner_id=?", (learner_id,)).fetchone() is None:
+                raise ValueError("profile revision learner does not exist")
             db.execute("INSERT INTO profile_revisions(revision_id,learner_id,profile_version,revision_json,policy_version) VALUES(?,?,?,?,?)", (revision_id,learner_id,profile_version,_dump(revision),policy_version))
 
     def load_profile_revisions(self, learner_id: str) -> tuple[ProfileRevisionRecord, ...]:
@@ -457,10 +497,15 @@ class SQLiteTutoringRepository:
             observations = tuple(StoredObservation(_load(row[0]), row[1]) for row in db.execute("SELECT observation_json,version FROM observations WHERE session_id=? ORDER BY observation_id", (session_id,)))
             evidence_ids = [row[0] for row in db.execute("SELECT e.evidence_id FROM evidence_records e JOIN observations o ON o.observation_id=e.observation_id WHERE o.session_id=? ORDER BY e.evidence_id", (session_id,))]
             evidence = tuple(record for objective in _load(session_row[0]).authorised_objective_ids for record in self.load_evidence(learner_id, objective) if record.evidence_id in evidence_ids)
-            estimates = tuple(_load(row[0]) for row in db.execute("SELECT estimate_json FROM skill_estimates WHERE learner_id=? ORDER BY objective_id", (learner_id,)))
+            authorised = set(_load(session_row[0]).authorised_objective_ids)
+            estimates = tuple(
+                _load(row[1])
+                for row in db.execute("SELECT objective_id,estimate_json FROM skill_estimates WHERE learner_id=? ORDER BY objective_id", (learner_id,))
+                if row[0] in authorised
+            )
             progress = tuple(_load(row[0]) for row in db.execute("SELECT progress_json FROM activity_progress WHERE session_id=? ORDER BY activity_id", (session_id,)))
             events = tuple(PersistedEvent(*row) for row in db.execute("SELECT kind,session_id,objective_id,activity_id,detail FROM tutoring_events WHERE session_id=? ORDER BY event_id", (session_id,)))
-            proposals = tuple(_load(row[0]) for row in db.execute("SELECT proposal_json FROM profile_change_proposals WHERE learner_id=? ORDER BY proposal_id", (learner_id,)))
+            proposals = tuple(_load(row[0]) for row in db.execute("SELECT proposal_json FROM profile_change_proposals WHERE learner_id=? AND session_id=? ORDER BY proposal_id", (learner_id, session_id)))
             reviews = tuple(TherapistReviewRecord(row[0],row[1],row[2],row[3],_load(row[4])) for row in db.execute("SELECT review_id,version,learner_id,session_id,review_json FROM therapist_reviews WHERE session_id=? ORDER BY review_id,version", (session_id,)))
             revisions = tuple(ProfileRevisionRecord(row[0],row[1],row[2],_load(row[3]),row[4]) for row in db.execute("SELECT revision_id,learner_id,profile_version,revision_json,policy_version FROM profile_revisions WHERE learner_id=? ORDER BY profile_version", (learner_id,)))
             clips = tuple(EvidenceClipRecord(*row) for row in db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at FROM evidence_clips WHERE session_id=? ORDER BY clip_id", (session_id,)))
