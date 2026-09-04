@@ -171,6 +171,108 @@ def test_curriculum_snapshots_are_immutable_across_catalog_updates(tmp_path):
     assert repo.load_curriculum_snapshot("learner-1", "curriculum-v2") == "new-yaml"
 
 
+def test_session_aggregate_uses_curriculum_authorised_for_its_plan(tmp_path):
+    path = tmp_path / "history.db"
+    migrate(path)
+    repo = SQLiteTutoringRepository(path)
+    repo.save_learner("learner-1", curriculum_snapshot="snapshot-v1", curriculum_version="v1")
+    plan_v1 = LearningPlan("learner-1", ("objective-1",), ("objective-1",), PresentationProfile.for_age(8), "plan-1", 1)
+    repo.save_plan(plan_v1, policy_version="policy-v1")
+    repo.save_session(LearningSession.start(session_id="session-v1", plan=plan_v1), profile_version=1)
+
+    repo.save_learner("learner-1", curriculum_snapshot="snapshot-v2", curriculum_version="v2")
+    plan_v2 = replace(plan_v1, version=2)
+    repo.save_plan(plan_v2, policy_version="policy-v1")
+    repo.save_session(LearningSession.start(session_id="session-v2", plan=plan_v2), profile_version=1)
+
+    old = repo.load_session_aggregate("session-v1")
+    new = repo.load_session_aggregate("session-v2")
+    assert (old.curriculum_version, old.curriculum_snapshot) == ("v1", "snapshot-v1")
+    assert (new.curriculum_version, new.curriculum_snapshot) == ("v2", "snapshot-v2")
+
+
+def test_review_series_has_immutable_owner_and_strictly_sequential_versions(tmp_path):
+    repo = repository(tmp_path)
+    repo.append_therapist_review("review-1", 1, "learner-1", "session-1", {"decision": "confirm"})
+
+    invalid = (
+        (3, "learner-1", "session-1"),
+        (1, "learner-1", "session-1"),
+        (2, "learner-1", None),
+    )
+    for version, learner_id, session_id in invalid:
+        try:
+            repo.append_therapist_review("review-1", version, learner_id, session_id, {"decision": "invalid"})
+        except (ValueError, sqlite3.IntegrityError):
+            pass
+        else:
+            raise AssertionError("invalid review series mutation accepted")
+
+    repo.save_learner("learner-2", curriculum_snapshot="curriculum-yaml", curriculum_version="curriculum-v1")
+    foreign_plan = LearningPlan(
+        "learner-2", ("objective-1",), ("objective-1",),
+        PresentationProfile.for_age(8), "plan-2",
+    )
+    repo.save_plan(foreign_plan, policy_version="policy-v1")
+    repo.save_session(
+        LearningSession.start(session_id="session-2", plan=foreign_plan),
+        profile_version=1,
+    )
+    try:
+        repo.append_therapist_review(
+            "review-1", 2, "learner-2", "session-2", {"decision": "foreign"}
+        )
+    except ValueError as error:
+        assert "owner" in str(error)
+    else:
+        raise AssertionError("review series crossed learner ownership")
+
+    repo.append_therapist_review("review-1", 2, "learner-1", "session-1", {"decision": "correct"})
+    assert [record.version for record in repo.load_therapist_reviews("review-1")] == [1, 2]
+
+
+def test_concurrent_review_append_has_one_winner(tmp_path):
+    repo = repository(tmp_path)
+    repo.append_therapist_review("review-1", 1, "learner-1", "session-1", {"decision": "initial"})
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def append(decision):
+        barrier.wait()
+        try:
+            repo.append_therapist_review("review-1", 2, "learner-1", "session-1", {"decision": decision})
+            outcomes.append("applied")
+        except (ValueError, sqlite3.IntegrityError):
+            outcomes.append("rejected")
+
+    threads = [threading.Thread(target=append, args=(decision,)) for decision in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(outcomes) == ["applied", "rejected"]
+    assert [record.version for record in repo.load_therapist_reviews("review-1")] == [1, 2]
+
+
+def test_review_owner_and_versions_are_immutable_at_schema_boundary(tmp_path):
+    repo = repository(tmp_path)
+    repo.append_therapist_review("review-1", 1, "learner-1", "session-1", {"decision": "initial"})
+    with sqlite3.connect(repo.database) as connection:
+        for statement in (
+            "UPDATE therapist_review_series SET session_id=NULL WHERE review_id='review-1'",
+            "DELETE FROM therapist_review_series WHERE review_id='review-1'",
+            "UPDATE therapist_reviews SET session_id=NULL WHERE review_id='review-1' AND version=1",
+            "DELETE FROM therapist_reviews WHERE review_id='review-1' AND version=1",
+        ):
+            try:
+                connection.execute(statement)
+            except sqlite3.IntegrityError:
+                pass
+            else:
+                raise AssertionError("review history was mutable through raw storage")
+
+
 def test_batch_rejects_cross_session_and_cross_learner_payloads(tmp_path):
     repo = repository(tmp_path)
     wrong_session = replace(batch(), session=replace(session(2), session_id="other"))

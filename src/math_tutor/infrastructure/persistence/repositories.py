@@ -215,7 +215,13 @@ class SQLiteTutoringRepository:
 
     def save_plan(self, plan: LearningPlan, *, policy_version: str) -> None:
         with self._connect() as db:
-            db.execute("INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version) VALUES(?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, _dump(plan), policy_version))
+            learner = db.execute(
+                "SELECT curriculum_version FROM learners WHERE learner_id=?",
+                (plan.learner_id,),
+            ).fetchone()
+            if learner is None:
+                raise ValueError("learning plan learner does not exist")
+            db.execute("INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version,curriculum_version) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, _dump(plan), policy_version, learner[0]))
 
     def load_plan(self, plan_id: str, version: int) -> LearningPlan | None:
         with self._connect() as db:
@@ -463,12 +469,44 @@ class SQLiteTutoringRepository:
             db.close()
 
     def append_therapist_review(self, review_id: str, version: int, learner_id: str, session_id: str | None, review: object) -> None:
-        with self._connect() as db:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM learners WHERE learner_id=?", (learner_id,)).fetchone() is None:
                 raise ValueError("review learner does not exist")
             if session_id is not None and db.execute("SELECT 1 FROM learning_sessions WHERE session_id=? AND learner_id=?", (session_id, learner_id)).fetchone() is None:
                 raise ValueError("review session is not owned by learner")
+            series = db.execute(
+                "SELECT learner_id,session_id,latest_version FROM therapist_review_series WHERE review_id=?",
+                (review_id,),
+            ).fetchone()
+            if series is None:
+                if version != 1:
+                    raise ValueError("review series must start at version 1")
+                db.execute(
+                    "INSERT INTO therapist_review_series(review_id,learner_id,session_id,latest_version) VALUES(?,?,?,1)",
+                    (review_id, learner_id, session_id),
+                )
+            else:
+                if (series[0], series[1]) != (learner_id, session_id):
+                    raise ValueError("review series owner cannot change")
+                if version != series[2] + 1:
+                    if version <= series[2]:
+                        raise sqlite3.IntegrityError("review version already exists")
+                    raise ValueError("review version must advance by exactly one")
+                cursor = db.execute(
+                    "UPDATE therapist_review_series SET latest_version=? WHERE review_id=? AND latest_version=?",
+                    (version, review_id, series[2]),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("stale review version")
             db.execute("INSERT INTO therapist_reviews(review_id,version,learner_id,session_id,review_json) VALUES(?,?,?,?,?)", (review_id,version,learner_id,session_id,_dump(review)))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     def load_therapist_reviews(self, review_id: str) -> tuple[TherapistReviewRecord, ...]:
         with self._connect() as db:
@@ -530,8 +568,11 @@ class SQLiteTutoringRepository:
             if session_row is None:
                 return None
             learner_id, plan_id, plan_version = session_row[2], session_row[3], session_row[4]
-            learner = db.execute("SELECT curriculum_snapshot,curriculum_version FROM learners WHERE learner_id=?", (learner_id,)).fetchone()
-            plan_row = db.execute("SELECT plan_json,policy_version FROM learning_plans WHERE plan_id=? AND version=? AND learner_id=?", (plan_id, plan_version, learner_id)).fetchone()
+            plan_row = db.execute("SELECT plan_json,policy_version,curriculum_version FROM learning_plans WHERE plan_id=? AND version=? AND learner_id=?", (plan_id, plan_version, learner_id)).fetchone()
+            curriculum = db.execute(
+                "SELECT curriculum_snapshot,curriculum_version FROM curriculum_snapshots WHERE learner_id=? AND curriculum_version=?",
+                (learner_id, plan_row[2]),
+            ).fetchone()
             activities = tuple(_load(row[0]) for row in db.execute("SELECT activity_json FROM activities WHERE session_id=? ORDER BY activity_id", (session_id,)))
             observations = tuple(StoredObservation(_load(row[0]), row[1]) for row in db.execute("SELECT observation_json,version FROM observations WHERE session_id=? ORDER BY observation_id", (session_id,)))
             evidence_ids = [row[0] for row in db.execute("SELECT e.evidence_id FROM evidence_records e JOIN observations o ON o.observation_id=e.observation_id WHERE o.session_id=? ORDER BY e.evidence_id", (session_id,))]
@@ -548,4 +589,4 @@ class SQLiteTutoringRepository:
             reviews = tuple(TherapistReviewRecord(row[0],row[1],row[2],row[3],_load(row[4])) for row in db.execute("SELECT review_id,version,learner_id,session_id,review_json FROM therapist_reviews WHERE session_id=? ORDER BY review_id,version", (session_id,)))
             revisions = tuple(ProfileRevisionRecord(row[0],row[1],row[2],_load(row[3]),row[4]) for row in db.execute("SELECT revision_id,learner_id,profile_version,revision_json,policy_version FROM profile_revisions WHERE learner_id=? ORDER BY profile_version", (learner_id,)))
             clips = tuple(EvidenceClipRecord(*row) for row in db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at FROM evidence_clips WHERE session_id=? ORDER BY clip_id", (session_id,)))
-        return SessionAggregate(_load(session_row[0]), _load(plan_row[0]), learner[0], learner[1], plan_row[1], session_row[1], activities, observations, evidence, estimates, progress, events, proposals, reviews, revisions, clips)
+        return SessionAggregate(_load(session_row[0]), _load(plan_row[0]), curriculum[0], curriculum[1], plan_row[1], session_row[1], activities, observations, evidence, estimates, progress, events, proposals, reviews, revisions, clips)

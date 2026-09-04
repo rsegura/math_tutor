@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from math_tutor.infrastructure.persistence.migrator import migrate
-from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
+from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository, _dump
 from math_tutor.domain.learning import (
     CompetencyState, LearningPlan, LearningSession, PresentationProfile,
     ProposedProfileChange, SkillEstimate,
@@ -125,7 +125,7 @@ def test_v1_database_is_upgraded_without_rewriting_history_or_losing_data(tmp_pa
     assert decision.outcome.value == "applied"
     assert repo.load_command_result("post-upgrade").result.reason == "stored"
     with sqlite3.connect(database) as upgraded:
-        assert [row[0] for row in upgraded.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3]
+        assert [row[0] for row in upgraded.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4]
         assert "session_id" in {row[1] for row in upgraded.execute("PRAGMA table_info(profile_change_proposals)")}
         assert "source_session_id" in {row[1] for row in upgraded.execute("PRAGMA table_info(proposal_evidence)")}
         assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -273,6 +273,46 @@ def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(
             ("evidence-2", "session-2"),
         ]
         assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_v4_upgrade_fails_closed_when_legacy_plan_curriculum_is_ambiguous(tmp_path):
+    database = tmp_path / "ambiguous-curriculum.db"
+    source = Path("src/math_tutor/infrastructure/persistence/migrations")
+    pre_v4 = tmp_path / "pre-v4"
+    pre_v4.mkdir()
+    for migration in sorted(source.glob("000[1-3]_*.sql")):
+        (pre_v4 / migration.name).write_bytes(migration.read_bytes())
+    migrate(database, migration_dir=pre_v4)
+
+    repo = SQLiteTutoringRepository(database)
+    repo.save_learner("learner-1", curriculum_snapshot="snapshot-v1", curriculum_version="v1")
+    plan = LearningPlan(
+        "learner-1", ("objective-1",), ("objective-1",),
+        PresentationProfile.for_age(8), "plan-1",
+    )
+    # Pre-v4 storage has no plan-level provenance.
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version) VALUES(?,?,?,?,?)",
+            ("plan-1", 1, "learner-1", _dump(plan), "policy-v1"),
+        )
+        connection.execute(
+            "INSERT INTO curriculum_snapshots(learner_id,curriculum_version,curriculum_snapshot) VALUES(?,?,?)",
+            ("learner-1", "v2", "snapshot-v2"),
+        )
+        connection.execute(
+            "UPDATE learners SET curriculum_version='v2',curriculum_snapshot='snapshot-v2' WHERE learner_id='learner-1'"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        migrate(database)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version=4"
+        ).fetchone() is None
+        assert "curriculum_version" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(learning_plans)")
+        }
 
 
 def test_unrelated_custom_version_two_migration_is_not_rewritten(tmp_path):
