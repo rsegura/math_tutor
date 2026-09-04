@@ -77,7 +77,7 @@ def _resolve_from_import(
     if path.name != "__init__.py":
         current.pop()
     keep = len(current) - (node.level - 1)
-    if keep < 0:
+    if keep <= 0:
         return "<relative-beyond-source-root>"
     resolved = current[:keep]
     if node.module:
@@ -95,7 +95,14 @@ def _imports(path: Path, source_root: Path):
             resolved = _resolve_from_import(
                 node, path=path, source_root=source_root
             )
-            if node.level == 0 and resolved == "math_tutor":
+            expands_aliases = (
+                node.level == 0 and resolved == "math_tutor"
+            ) or (
+                node.level > 0
+                and node.module is None
+                and resolved != "<relative-beyond-source-root>"
+            )
+            if expands_aliases:
                 for alias in node.names:
                     module = (resolved if alias.name == "*"
                               else f"{resolved}.{alias.name}")
@@ -169,7 +176,13 @@ def test_real_math_tutor_tree_respects_import_direction() -> None:
         ("domain", "from fastapi import FastAPI", "fastapi"),
         ("application", "import openai", "openai"),
         ("application", "import sqlite3", "sqlite3"),
+        ("application", "import requests", "requests"),
         ("harness", "import aiosqlite", "aiosqlite"),
+        (
+            "application",
+            "from ...json import loads",
+            "<relative-beyond-source-root>",
+        ),
         ("domain", "import src", "src"),
         ("domain", "from src.math_tutor.domain import model", "src.math_tutor.domain"),
         ("domain", "from domain import screening", "domain"),
@@ -199,11 +212,15 @@ def test_boundary_scan_rejects_forbidden_imports_in_temporary_tree(
         ("domain", "from math_tutor import domain"),
         (
             "application",
-            "from math_tutor.domain import values\nfrom .ports import StorePort",
+            "from math_tutor.domain import values\n"
+            "from .ports import StorePort\n"
+            "from .. import domain",
         ),
         (
             "harness",
-            "from math_tutor.application.ports import ModelPort\nfrom . import validation",
+            "from math_tutor.application.ports import ModelPort\n"
+            "from . import validation\n"
+            "from .. import application",
         ),
         (
             "infrastructure",
