@@ -97,7 +97,7 @@ sessions.
 
 ## 4. Architecture
 
-The existing structure remains:
+The standalone product follows this structure:
 
 ```text
 VOICE

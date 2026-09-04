@@ -13,7 +13,10 @@ docker compose --profile dev run --rm tooling uv run pytest <anything>   # canon
 The pytest configuration registers `live_llm` and applies `-m "not live_llm"`
 by default, including for the canonical Docker command. `make test-live-llm`
 selects that marker and is ready for future opt-in provider smokes, but the
-bootstrap scaffold does not contain any live-provider tests yet.
+bootstrap scaffold does not contain any live-provider tests yet. Until one is
+added, the target reports `SKIP` and maps only pytest's no-tests exit status to
+success; collection errors and test failures keep their original non-zero
+status.
 
 ## TDD protocol (Red → Green → Refactor)
 

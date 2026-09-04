@@ -19,7 +19,7 @@ test: ## Run pytest inside the network-independent tooling container
 	$(COMPOSE) run --rm tooling uv run pytest $(ARGS)
 
 test-live-llm: ## Run only opt-in real-provider checks
-	$(COMPOSE) run --rm tooling uv run pytest -m live_llm $(ARGS)
+	$(COMPOSE) run --rm tooling sh -c 'uv run pytest -m live_llm $(ARGS); status=$$?; if [ "$$status" -eq 5 ]; then echo "SKIP: no live_llm tests are implemented yet"; exit 0; fi; exit "$$status"'
 
 lock: ## Regenerate uv.lock inside Docker; never edit it by hand
 	docker build -q --target toolchain -t math-tutor-voice-poc-toolchain -f docker/Dockerfile.tooling .

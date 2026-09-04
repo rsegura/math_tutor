@@ -2,57 +2,64 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a bounded-autonomy mathematics tutoring vertical for units, tens, and simple addition/subtraction while preserving the existing medical screening product.
+**Goal:** Build a standalone bounded-autonomy mathematics voice tutor for
+units, tens, and simple addition/subtraction.
 
-**Architecture:** Introduce tutoring as a separate bounded context under `src/tutoring/`; do not generalise or destabilise the screening domain prematurely. Reuse provider-neutral model contracts, voice transport primitives, persistence infrastructure patterns, and review concepts, while giving tutoring its own domain, harness, schema, prompts, evals, and composition root. The LLM proposes pedagogical actions; deterministic code verifies mathematics and progression; therapist review consolidates material profile changes.
+**Architecture:** Implement the product under the canonical namespace
+`src/math_tutor/`, with its own domain, application layer, pedagogical harness,
+infrastructure, voice composition, schema, prompts, evals, and web boundary.
+The LLM proposes pedagogical actions; deterministic code verifies mathematics
+and progression; therapist review consolidates material profile changes.
 
-**Tech Stack:** Python 3.12, LiveKit Agents, FastAPI, SQLite, YAML, pytest/pytest-asyncio, Docker Compose, existing OpenAI-compatible adapters.
+**Tech Stack:** Python 3.12, LiveKit Agents, FastAPI, SQLite, YAML,
+pytest/pytest-asyncio, Docker Compose, and OpenAI-compatible adapters.
 
 ---
 
 ## Delivery constraints
 
-- Use a dedicated Git worktree before implementation.
+- Work only in the standalone `poc_math` repository and its feature branch.
 - Run all Python and pytest commands through Docker, per `AGENTS.md`.
 - Follow Red → Green → Refactor for every behaviour.
-- Keep `HARNESS_MODE=custom` screening behaviour unchanged.
-- Add `PRODUCT_MODE=screening|math_tutor`; default to `screening` until the
-  tutoring live gate closes.
 - Do not store full-session audio.
-- Do not claim clinical efficacy or emit diagnostic statements.
+- Do not emit diagnoses, medical labels, or unsupported efficacy claims.
+- Code from `audio_poc` is reference material only. Copy or adapt a reusable
+  provider, transport, persistence, or review pattern only in the task that
+  requires it, place it under this repository's namespace, remove all medical
+  semantics, and cover the adapted behaviour with a failing test first.
 
-### Task 1: Freeze tutoring boundaries and import direction
+### Task 1: Freeze math tutor boundaries and import direction
 
 **Files:**
-- Create: `src/tutoring/__init__.py`
-- Create: `src/tutoring/domain/__init__.py`
-- Create: `src/tutoring/application/__init__.py`
-- Create: `src/tutoring/harness/__init__.py`
-- Create: `src/tutoring/infrastructure/__init__.py`
-- Modify: `tests/unit/test_import_boundaries.py`
+- Modify: `src/math_tutor/__init__.py`
+- Create: `src/math_tutor/domain/__init__.py`
+- Create: `src/math_tutor/application/__init__.py`
+- Create: `src/math_tutor/harness/__init__.py`
+- Create: `src/math_tutor/infrastructure/__init__.py`
+- Create: `tests/unit/math_tutor/test_import_boundaries.py`
 
 **Step 1: Write the failing test**
 
-Add a boundary test that parses imports under `src/tutoring/domain` and
-`src/tutoring/application` and rejects LiveKit, FastAPI, OpenAI, SQLite, and
-the existing screening domain. Assert that tutoring domain imports only stdlib
-or `tutoring.domain`, and tutoring application imports only tutoring domain and
-declared ports.
+Add a boundary test that parses imports under `src/math_tutor/domain` and
+`src/math_tutor/application` and rejects LiveKit, FastAPI, OpenAI, SQLite, and
+all infrastructure packages. Assert that the domain imports only the standard
+library or `math_tutor.domain`, and the application layer imports only the
+math-tutor domain and declared ports.
 
 **Step 2: Verify RED**
 
 Run:
 
 ```bash
-make test ARGS="tests/unit/test_import_boundaries.py -k tutoring -v"
+make test ARGS="tests/unit/math_tutor/test_import_boundaries.py -v"
 ```
 
-Expected: FAIL because the tutoring package does not exist.
+Expected: FAIL because the boundary test and layered packages do not exist.
 
 **Step 3: Add the package skeleton**
 
 Create the four layers with module docstrings documenting the allowed inward
-dependencies. Do not move existing screening code.
+dependencies. Keep `src/` as a source root, not a Python package.
 
 **Step 4: Verify GREEN**
 
@@ -61,15 +68,15 @@ Run the same command; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/tutoring tests/unit/test_import_boundaries.py
-git commit -m "chore: establish tutoring bounded context"
+git add src/math_tutor tests/unit/math_tutor/test_import_boundaries.py
+git commit -m "chore: establish math tutor boundaries"
 ```
 
 ### Task 2: Model curriculum objectives and prerequisite graph
 
 **Files:**
-- Create: `src/tutoring/domain/curriculum.py`
-- Create: `tests/unit/tutoring/domain/test_curriculum.py`
+- Create: `src/math_tutor/domain/curriculum.py`
+- Create: `tests/unit/math_tutor/domain/test_curriculum.py`
 
 **Step 1: Write failing tests**
 
@@ -95,7 +102,7 @@ hints, and deterministic topological ordering.
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/domain/test_curriculum.py -v"
+make test ARGS="tests/unit/math_tutor/domain/test_curriculum.py -v"
 ```
 
 Expected: import failure.
@@ -111,7 +118,7 @@ constructor and exposes `objective(id)` and `prerequisites_met(id, states)`.
 Run the task tests, then:
 
 ```bash
-make test ARGS="tests/unit/tutoring/domain tests/unit/test_import_boundaries.py"
+make test ARGS="tests/unit/math_tutor/domain tests/unit/math_tutor/test_import_boundaries.py"
 ```
 
 Expected: PASS.
@@ -119,16 +126,16 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/tutoring/domain tests/unit/tutoring
+git add src/math_tutor/domain tests/unit/math_tutor
 git commit -m "feat: model tutoring curriculum graph"
 ```
 
 ### Task 3: Load the first reviewed curriculum slice from YAML
 
 **Files:**
-- Create: `src/tutoring/infrastructure/curriculum_loader.py`
-- Create: `src/tutoring/curricula/primary-math-v1.yaml`
-- Create: `tests/unit/tutoring/infrastructure/test_curriculum_loader.py`
+- Create: `src/math_tutor/infrastructure/curriculum_loader.py`
+- Create: `src/math_tutor/curricula/primary-math-v1.yaml`
+- Create: `tests/unit/math_tutor/infrastructure/test_curriculum_loader.py`
 
 **Step 1: Write failing tests**
 
@@ -140,7 +147,7 @@ load containing `units-tens`, `compose-two-digit`, `add-within-20`, and
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/infrastructure/test_curriculum_loader.py -v"
+make test ARGS="tests/unit/math_tutor/infrastructure/test_curriculum_loader.py -v"
 ```
 
 **Step 3: Implement loader and minimal content**
@@ -157,17 +164,17 @@ Run the test file; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/tutoring/curricula src/tutoring/infrastructure tests/unit/tutoring/infrastructure
+git add src/math_tutor/curricula src/math_tutor/infrastructure tests/unit/math_tutor/infrastructure
 git commit -m "feat: load primary math curriculum slice"
 ```
 
 ### Task 4: Add deterministic activities and answer verification
 
 **Files:**
-- Create: `src/tutoring/domain/activities.py`
-- Create: `src/tutoring/domain/mathematics.py`
-- Create: `tests/unit/tutoring/domain/test_activities.py`
-- Create: `tests/unit/tutoring/domain/test_mathematics.py`
+- Create: `src/math_tutor/domain/activities.py`
+- Create: `src/math_tutor/domain/mathematics.py`
+- Create: `tests/unit/math_tutor/domain/test_activities.py`
+- Create: `tests/unit/math_tutor/domain/test_mathematics.py`
 
 **Step 1: Write failing tests**
 
@@ -188,7 +195,7 @@ def test_place_value_answer_is_checked_without_the_llm():
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/domain/test_activities.py tests/unit/tutoring/domain/test_mathematics.py -v"
+make test ARGS="tests/unit/math_tutor/domain/test_activities.py tests/unit/math_tutor/domain/test_mathematics.py -v"
 ```
 
 **Step 3: Implement minimum deterministic engine**
@@ -205,17 +212,17 @@ Run the two test files; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/tutoring/domain tests/unit/tutoring/domain
+git add src/math_tutor/domain tests/unit/math_tutor/domain
 git commit -m "feat: verify primary math activities deterministically"
 ```
 
 ### Task 5: Model learning plans, observations, and provisional competency
 
 **Files:**
-- Create: `src/tutoring/domain/learning.py`
-- Create: `src/tutoring/domain/evidence.py`
-- Create: `tests/unit/tutoring/domain/test_learning.py`
-- Create: `tests/unit/tutoring/domain/test_evidence.py`
+- Create: `src/math_tutor/domain/learning.py`
+- Create: `src/math_tutor/domain/evidence.py`
+- Create: `tests/unit/math_tutor/domain/test_learning.py`
+- Create: `tests/unit/math_tutor/domain/test_evidence.py`
 
 **Step 1: Write failing tests**
 
@@ -232,7 +239,7 @@ Test that:
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/domain/test_learning.py tests/unit/tutoring/domain/test_evidence.py -v"
+make test ARGS="tests/unit/math_tutor/domain/test_learning.py tests/unit/math_tutor/domain/test_evidence.py -v"
 ```
 
 **Step 3: Implement the domain state machine**
@@ -249,61 +256,66 @@ Run all tutoring domain tests; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/tutoring/domain tests/unit/tutoring/domain
+git add src/math_tutor/domain tests/unit/math_tutor/domain
 git commit -m "feat: add evidence-based learning progression"
 ```
 
 ### Task 6: Define the tutoring application ports and mutation fence
 
 **Files:**
-- Create: `src/tutoring/application/ports.py`
-- Create: `src/tutoring/application/results.py`
-- Create: `src/tutoring/application/tutoring_service.py`
-- Create: `tests/unit/tutoring/application/test_tutoring_service.py`
-- Create: `tests/unit/tutoring/application/test_tutoring_fence.py`
+- Create: `src/math_tutor/application/ports.py`
+- Create: `src/math_tutor/application/results.py`
+- Create: `src/math_tutor/application/session_runtime.py`
+- Create: `src/math_tutor/application/service.py`
+- Create: `tests/unit/math_tutor/application/test_service.py`
+- Create: `tests/unit/math_tutor/application/test_mutation_fence.py`
 
 **Step 1: Write failing tests**
 
-Adapt the existing fence guarantees to tutoring: active generation, durable
-idempotency, expected profile/session version, authorised objective, atomic
-observation plus evidence plus event, and fail-closed persistence.
+Specify the mutation-fence guarantees: active generation, durable idempotency,
+expected profile/session version, authorised objective, atomic observation plus
+evidence plus event, and fail-closed persistence.
 
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/application -v"
+make test ARGS="tests/unit/math_tutor/application -v"
 ```
 
 **Step 3: Implement service and ports**
 
 Declare repository protocols inward. Implement commands for recording answers,
 committing hints, selecting the next activity, proposing evidence, proposing a
-profile change, and ending a session. Reuse `application.session_runtime` for
-generation cancellation, but keep tutoring mutations separate from
-`ScreeningService`.
+profile change, and ending a session. Use
+`math_tutor.application.session_runtime` for generation cancellation. If its
+concurrency pattern is adapted from
+`audio_poc`, copy only the required provider-neutral behaviour into
+`math_tutor.application.session_runtime` and test it independently.
 
 **Step 4: Verify GREEN**
 
-Run tutoring application and existing fence tests; expected: PASS.
+Run all math-tutor application tests created so far; expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add src/tutoring/application tests/unit/tutoring/application
+git add src/math_tutor/application tests/unit/math_tutor/application
 git commit -m "feat: add tutoring mutation fence"
 ```
 
 ### Task 7: Implement the bounded pedagogical harness
 
 **Files:**
-- Create: `src/tutoring/harness/contracts.py`
-- Create: `src/tutoring/harness/context.py`
-- Create: `src/tutoring/harness/registry.py`
-- Create: `src/tutoring/harness/loop.py`
-- Create: `src/tutoring/harness/prompts.py`
-- Create: `tests/unit/tutoring/harness/test_registry.py`
-- Create: `tests/unit/tutoring/harness/test_context.py`
-- Create: `tests/unit/tutoring/harness/test_loop.py`
+- Create: `src/math_tutor/harness/contracts.py`
+- Create: `src/math_tutor/harness/context.py`
+- Create: `src/math_tutor/harness/model.py`
+- Create: `src/math_tutor/harness/limits.py`
+- Create: `src/math_tutor/harness/registry.py`
+- Create: `src/math_tutor/harness/loop.py`
+- Create: `src/math_tutor/harness/prompts.py`
+- Create: `tests/unit/math_tutor/harness/test_registry.py`
+- Create: `tests/unit/math_tutor/harness/test_context.py`
+- Create: `tests/unit/math_tutor/harness/test_loop.py`
 
 **Step 1: Write failing tests**
 
@@ -316,41 +328,43 @@ Test the smallest tool surface and its policies:
 - `end_session` respects stop requests immediately;
 - mathematical speech is released only after deterministic verification;
 - invalid output gets one bounded repair; and
-- model/tool steps remain subject to existing hard budgets.
+- model/tool steps remain subject to explicit hard budgets.
 
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/harness -v"
+make test ARGS="tests/unit/math_tutor/harness -v"
 ```
 
 **Step 3: Implement contracts, registry, context, and loop**
 
-Reuse provider-neutral `llm_harness.contracts.ModelAdapter` and
-`llm_harness.runtime.limits.HarnessLimits`. Build context from child-safe static
-policy, authorised plan, current activity, structured learner state, bounded
-recent history, and current turn. Never include diagnostic labels or unrelated
-clinical history.
+Define provider-neutral `ModelAdapter` and `HarnessLimits` contracts inside the
+math-tutor harness. They may adapt the corresponding patterns from `audio_poc`
+in this task, without importing that project or copying its domain semantics.
+Build context from child-safe static policy, authorised plan, current activity,
+structured learner state, bounded recent history, and current turn. Never
+include diagnostic labels or unrelated learner data.
 
 **Step 4: Verify GREEN**
 
-Run tutoring harness tests and the existing harness suite; expected: PASS.
+Run all math-tutor harness tests created so far; expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add src/tutoring/harness tests/unit/tutoring/harness
+git add src/math_tutor/harness tests/unit/math_tutor/harness
 git commit -m "feat: add bounded pedagogical harness"
 ```
 
 ### Task 8: Persist tutoring state and selective evidence
 
 **Files:**
-- Create: `src/infrastructure/persistence/migrations/0003_tutoring.sql`
-- Modify: `src/infrastructure/persistence/migrator.py`
-- Create: `src/tutoring/infrastructure/persistence.py`
-- Create: `tests/unit/tutoring/infrastructure/test_persistence.py`
-- Create: `tests/integration/test_tutoring_reconstruction.py`
+- Create: `src/math_tutor/infrastructure/persistence/__init__.py`
+- Create: `src/math_tutor/infrastructure/persistence/migrations/0001_initial.sql`
+- Create: `src/math_tutor/infrastructure/persistence/migrator.py`
+- Create: `src/math_tutor/infrastructure/persistence/repositories.py`
+- Create: `tests/unit/math_tutor/infrastructure/test_persistence.py`
+- Create: `tests/integration/math_tutor/test_reconstruction.py`
 
 **Step 1: Write failing tests**
 
@@ -362,34 +376,36 @@ each clip references one evidence record with bounded duration metadata.
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/infrastructure/test_persistence.py tests/integration/test_tutoring_reconstruction.py -v"
+make test ARGS="tests/unit/math_tutor/infrastructure/test_persistence.py tests/integration/math_tutor/test_reconstruction.py -v"
 ```
 
 **Step 3: Add migration and repositories**
 
-Increment `SCHEMA_VERSION` to `3`. Use append-only revisions for interpretations
-and reviews. Store objective observations separately from revisable estimates.
-Persist curriculum snapshots and policy versions for reproducibility.
+Create schema version `1` for this standalone product. Use append-only revisions
+for interpretations and reviews. Store objective observations separately from
+revisable estimates. Persist curriculum snapshots and policy versions for
+reproducibility. Persistence patterns may be adapted from `audio_poc` only in
+this task and must use math-tutor table and field semantics.
 
 **Step 4: Verify GREEN**
 
-Run the two tests plus existing migration and reconstruction tests; expected:
+Run the two tests plus all persistence tests created in this task; expected:
 PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add src/infrastructure/persistence src/tutoring/infrastructure tests
+git add src/math_tutor/infrastructure/persistence tests/unit/math_tutor/infrastructure/test_persistence.py tests/integration/math_tutor/test_reconstruction.py
 git commit -m "feat: persist tutoring sessions and evidence"
 ```
 
 ### Task 9: Produce evidence-linked summaries and therapist corrections
 
 **Files:**
-- Create: `src/tutoring/application/summary.py`
-- Create: `src/tutoring/application/review.py`
-- Create: `tests/unit/tutoring/application/test_summary.py`
-- Create: `tests/integration/test_tutoring_review.py`
+- Create: `src/math_tutor/application/summary.py`
+- Create: `src/math_tutor/application/review.py`
+- Create: `tests/unit/math_tutor/application/test_summary.py`
+- Create: `tests/integration/math_tutor/test_review.py`
 
 **Step 1: Write failing tests**
 
@@ -401,7 +417,7 @@ original proposal, and dependent estimates are recalculated.
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/application/test_summary.py tests/integration/test_tutoring_review.py -v"
+make test ARGS="tests/unit/math_tutor/application/test_summary.py tests/integration/math_tutor/test_review.py -v"
 ```
 
 **Step 3: Implement summary and correction services**
@@ -417,60 +433,62 @@ Run the task tests; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/tutoring/application tests
+git add src/math_tutor/application tests
 git commit -m "feat: add evidence-linked tutoring review"
 ```
 
-### Task 10: Add tutoring composition and voice routing
+### Task 10: Add composition and voice routing
 
 **Files:**
-- Create: `src/agent/tutoring_agent.py`
-- Create: `src/agent/tutoring_runtime_factory.py`
-- Modify: `src/agent/worker.py`
-- Modify: `src/infrastructure/dispatch.py`
-- Modify: `web/app.py`
-- Create: `tests/unit/agent/test_tutoring_agent.py`
-- Modify: `tests/contract/test_worker_contract.py`
-- Modify: `tests/contract/test_token_endpoint.py`
-- Create: `tests/integration/test_tutoring_voice_boundary.py`
+- Create: `src/math_tutor/agent/__init__.py`
+- Create: `src/math_tutor/agent/voice_agent.py`
+- Create: `src/math_tutor/agent/runtime_factory.py`
+- Create: `src/math_tutor/agent/worker.py`
+- Create: `src/math_tutor/infrastructure/dispatch.py`
+- Create: `web/app.py`
+- Create: `tests/unit/math_tutor/agent/test_voice_agent.py`
+- Create: `tests/contract/math_tutor/test_worker_contract.py`
+- Create: `tests/contract/math_tutor/test_token_endpoint.py`
+- Create: `tests/integration/math_tutor/test_voice_boundary.py`
 
 **Step 1: Write failing tests**
 
-Test strict `PRODUCT_MODE`, product-tagged dispatch metadata, no silent fallback,
-turn correlation, interruption cancellation, low-confidence confirmation, stop
-priority, and unchanged screening defaults.
+Test math-tutor-tagged dispatch metadata, strict provider configuration with no
+silent fallback, turn correlation, interruption cancellation, low-confidence
+confirmation, and stop priority.
 
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/agent/test_tutoring_agent.py tests/contract/test_worker_contract.py tests/contract/test_token_endpoint.py tests/integration/test_tutoring_voice_boundary.py -v"
+make test ARGS="tests/unit/math_tutor/agent/test_voice_agent.py tests/contract/math_tutor/test_worker_contract.py tests/contract/math_tutor/test_token_endpoint.py tests/integration/math_tutor/test_voice_boundary.py -v"
 ```
 
 **Step 3: Implement composition**
 
-Reuse the current STT correlation, TTS watchdog, terminal closer, provider
-factories, and active-generation runtime through small extracted helpers where
-tests prove identical semantics. Do not make `ScreeningAgent` branch internally
-on product behaviour.
+Create the math-tutor worker and composition root. In this task only, copy or
+adapt the required STT correlation, TTS watchdog, terminal closer, provider
+factory, and active-generation patterns from `audio_poc`; place them under
+`src/math_tutor/`, remove all source-product semantics, and pin their behaviour
+with local tests. The standalone worker has no product-mode branch.
 
 **Step 4: Verify GREEN**
 
-Run the task tests and all existing agent/contract tests; expected: PASS.
+Run the task tests and all math-tutor agent and contract tests; expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add src/agent src/infrastructure/dispatch.py web/app.py tests
+git add src/math_tutor/agent src/math_tutor/infrastructure/dispatch.py web/app.py tests/unit/math_tutor/agent tests/contract/math_tutor tests/integration/math_tutor/test_voice_boundary.py
 git commit -m "feat: route voice sessions to tutoring runtime"
 ```
 
 ### Task 11: Capture short evidence clips without retaining full audio
 
 **Files:**
-- Create: `src/tutoring/infrastructure/evidence_clips.py`
-- Modify: `src/agent/tutoring_agent.py`
-- Create: `tests/unit/tutoring/infrastructure/test_evidence_clips.py`
-- Create: `tests/integration/test_selective_audio_retention.py`
+- Create: `src/math_tutor/infrastructure/evidence_clips.py`
+- Modify: `src/math_tutor/agent/voice_agent.py`
+- Create: `tests/unit/math_tutor/infrastructure/test_evidence_clips.py`
+- Create: `tests/integration/math_tutor/test_selective_audio_retention.py`
 
 **Step 1: Write failing tests**
 
@@ -482,7 +500,7 @@ session close removes pending buffers.
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/tutoring/infrastructure/test_evidence_clips.py tests/integration/test_selective_audio_retention.py -v"
+make test ARGS="tests/unit/math_tutor/infrastructure/test_evidence_clips.py tests/integration/math_tutor/test_selective_audio_retention.py -v"
 ```
 
 **Step 3: Implement clip capture**
@@ -499,7 +517,7 @@ Run task tests; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/agent/tutoring_agent.py src/tutoring/infrastructure tests
+git add src/math_tutor/agent/voice_agent.py src/math_tutor/infrastructure/evidence_clips.py tests/unit/math_tutor/infrastructure/test_evidence_clips.py tests/integration/math_tutor/test_selective_audio_retention.py
 git commit -m "feat: retain only selected tutoring audio evidence"
 ```
 
@@ -510,8 +528,8 @@ git commit -m "feat: retain only selected tutoring audio evidence"
 - Create: `web/static/tutoring-review.html`
 - Create: `web/static/tutoring-review.js`
 - Modify: `web/app.py`
-- Create: `tests/contract/test_tutoring_review_api.py`
-- Create: `tests/contract/test_tutoring_review_page.py`
+- Create: `tests/contract/math_tutor/test_review_api.py`
+- Create: `tests/contract/math_tutor/test_review_page.py`
 
 **Step 1: Write failing contract tests**
 
@@ -522,7 +540,7 @@ no-store headers, and absence of diagnostic labels.
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/contract/test_tutoring_review_api.py tests/contract/test_tutoring_review_page.py -v"
+make test ARGS="tests/contract/math_tutor/test_review_api.py tests/contract/math_tutor/test_review_page.py -v"
 ```
 
 **Step 3: Implement read and correction surfaces**
@@ -533,7 +551,7 @@ provisional hypotheses, and next-objective proposals separately.
 
 **Step 4: Verify GREEN**
 
-Run task tests and existing review tests; expected: PASS.
+Run all math-tutor review tests; expected: PASS.
 
 **Step 5: Commit**
 
@@ -545,12 +563,12 @@ git commit -m "feat: add therapist tutoring review"
 ### Task 13: Build tutoring evals and the acceptance gate
 
 **Files:**
-- Create: `evals/tutoring/runner.py`
-- Create: `evals/tutoring/metrics.py`
-- Create: `evals/tutoring/scenarios/`
-- Create: `tests/integration/test_tutoring_eval_runner.py`
+- Create: `evals/math_tutor/runner.py`
+- Create: `evals/math_tutor/metrics.py`
+- Create: `evals/math_tutor/scenarios/`
+- Create: `tests/integration/math_tutor/test_eval_runner.py`
 - Modify: `Makefile`
-- Modify: `docs/agents/TESTING.md`
+- Modify: `TESTING_REFERENCE.md`
 
 **Step 1: Write failing tests**
 
@@ -562,12 +580,12 @@ never exact model wording.
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/integration/test_tutoring_eval_runner.py -v"
+make test ARGS="tests/integration/math_tutor/test_eval_runner.py -v"
 ```
 
 **Step 3: Implement runner and gate**
 
-Add `make eval-tutoring`. Report mathematical speech errors, unsupported
+Add `make eval-math`. Report mathematical speech errors, unsupported
 profile updates, STT misattributions, ignored stop requests, intervention
 ratings, evidence coverage, latency, and review-time fixtures. Exit non-zero if
 any hard safety invariant fails.
@@ -575,8 +593,8 @@ any hard safety invariant fails.
 **Step 4: Verify GREEN**
 
 ```bash
-make test ARGS="tests/integration/test_tutoring_eval_runner.py -v"
-make eval-tutoring
+make test ARGS="tests/integration/math_tutor/test_eval_runner.py -v"
+make eval-math
 ```
 
 Expected: tests PASS; deterministic fake-model eval gate exits `0`.
@@ -584,28 +602,27 @@ Expected: tests PASS; deterministic fake-model eval gate exits `0`.
 **Step 5: Commit**
 
 ```bash
-git add evals tests/integration Makefile docs/agents/TESTING.md
+git add evals/math_tutor tests/integration/math_tutor/test_eval_runner.py Makefile TESTING_REFERENCE.md
 git commit -m "test: gate tutoring behaviour with offline evals"
 ```
 
 ### Task 14: Close the PoC verification gate
 
 **Files:**
-- Create: `docs/tutoring-poc-verification.md`
+- Create: `docs/math-tutor-poc-verification.md`
 - Modify: `AGENTS.md`
-- Modify: `docs/agents/DOCKER.md`
+- Create: `docs/DOCKER.md`
 
 **Step 1: Run automated verification**
 
 ```bash
 make test
-make eval
-make eval-tutoring
+make eval-math
 docker compose --profile dev config
 ```
 
-Expected: full tests PASS, screening baseline does not regress, tutoring fake
-eval gate PASS, Compose configuration valid.
+Expected: full tests PASS, the math-tutor fake-model eval gate PASS, and the
+Compose configuration is valid.
 
 **Step 2: Run professional tabletop verification**
 
@@ -628,13 +645,13 @@ whether each acceptance criterion passed. Do not mark unrun gates as passing.
 **Step 5: Commit**
 
 ```bash
-git add AGENTS.md docs/agents/DOCKER.md docs/tutoring-poc-verification.md
+git add AGENTS.md docs/DOCKER.md docs/math-tutor-poc-verification.md
 git commit -m "docs: close tutoring poc verification gate"
 ```
 
 ## Final review checklist
 
-- Existing screening tests and evals are unchanged or intentionally updated.
+- Every implementation path belongs to the standalone math-tutor repository.
 - Mathematical output is deterministically verified before speech.
 - Low-confidence STT never degrades learner state.
 - Stop and pause requests pre-empt pedagogy.
