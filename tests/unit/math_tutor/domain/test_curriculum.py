@@ -148,6 +148,23 @@ def test_objective_rejects_reference_ids_that_are_not_trimmed_and_nonempty(
         objective("place-value", **arguments)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("requires", "prerequisite"),
+        ("families", "activity family"),
+        ("errors", "error pattern"),
+    ],
+)
+def test_objective_rejects_a_scalar_string_for_reference_sequences(
+    field: str, message: str
+) -> None:
+    arguments = {field: "x"}
+
+    with pytest.raises(InvalidCurriculum, match=message):
+        objective("place-value", **arguments)  # type: ignore[arg-type]
+
+
 def test_objective_rejects_an_empty_hint_sequence() -> None:
     with pytest.raises(InvalidCurriculum, match="hint"):
         objective("place-value", hints=())
@@ -270,6 +287,30 @@ def test_prerequisites_are_not_met_when_a_required_objective_is_missing() -> Non
     )
 
     assert catalog.prerequisites_met("place-value", set()) is False
+
+
+def test_two_prerequisites_are_not_met_by_a_partial_achievement_set() -> None:
+    catalog = CurriculumCatalog(
+        (
+            objective("count"),
+            objective("compose"),
+            objective("addition", requires=("count", "compose")),
+        )
+    )
+
+    assert catalog.prerequisites_met("addition", {"count"}) is False
+
+
+def test_two_prerequisites_are_met_by_the_full_achievement_set() -> None:
+    catalog = CurriculumCatalog(
+        (
+            objective("count"),
+            objective("compose"),
+            objective("addition", requires=("count", "compose")),
+        )
+    )
+
+    assert catalog.prerequisites_met("addition", {"count", "compose"}) is True
 
 
 def test_prerequisite_check_rejects_an_unknown_objective() -> None:

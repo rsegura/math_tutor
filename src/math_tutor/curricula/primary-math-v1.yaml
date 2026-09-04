@@ -1,0 +1,156 @@
+schema_version: primary-math/v1
+objectives:
+  - id: count-to-20
+    band: initial
+    title_es: Contar hasta veinte
+    instruction_es: Cuenta colecciones y avanza o retrocede sin perder ningún número.
+    prerequisite_ids: []
+    activity_families: [counting]
+    known_error_pattern_ids: [skips-number, counts-item-twice]
+    hints:
+      - id: touch-each-item
+        text_es: Señala cada elemento una sola vez mientras cuentas.
+        order: 1
+      - id: say-sequence-slowly
+        text_es: Di la serie despacio y comprueba el último número.
+        order: 2
+
+  - id: number-sequence-within-20
+    band: initial
+    title_es: Completar series hasta veinte
+    instruction_es: Identifica el número anterior, el siguiente y los huecos de una serie.
+    prerequisite_ids: [count-to-20]
+    activity_families: [number-sequence]
+    known_error_pattern_ids: [reverses-sequence, repeats-neighbour]
+    hints:
+      - id: recite-neighbours
+        text_es: Di en voz baja los números vecinos del que aparece.
+        order: 1
+      - id: use-one-more-one-less
+        text_es: Piensa en uno más para avanzar y uno menos para retroceder.
+        order: 2
+
+  - id: compare-within-20
+    band: initial
+    title_es: Comparar cantidades hasta veinte
+    instruction_es: Decide qué cantidad es mayor, menor o igual usando el valor, no el tamaño escrito.
+    prerequisite_ids: [count-to-20]
+    activity_families: [comparison]
+    known_error_pattern_ids: [chooses-first-number, confuses-greater-less]
+    hints:
+      - id: locate-larger-count
+        text_es: Cuenta ambas cantidades y observa cuál llega más lejos.
+        order: 1
+      - id: compare-on-line
+        text_es: El número situado más a la derecha en la recta es el mayor.
+        order: 2
+
+  - id: units-tens
+    band: initial
+    title_es: Distinguir unidades y decenas
+    instruction_es: Reconoce cuántas decenas completas y cuántas unidades forman un número de dos cifras.
+    prerequisite_ids: [count-to-20]
+    activity_families: [place-value]
+    known_error_pattern_ids: [swaps-tens-units, reads-digits-as-counts]
+    hints:
+      - id: group-in-tens
+        text_es: Forma grupos de diez y deja aparte las unidades sueltas.
+        order: 1
+      - id: name-place-columns
+        text_es: La cifra izquierda indica decenas y la derecha indica unidades.
+        order: 2
+
+  - id: compose-two-digit
+    band: initial
+    title_es: Componer números de dos cifras
+    instruction_es: Construye un número a partir de sus decenas y unidades.
+    prerequisite_ids: [units-tens]
+    activity_families: [composition]
+    known_error_pattern_ids: [concatenates-values, swaps-composed-digits]
+    hints:
+      - id: convert-tens-to-units
+        text_es: Cada decena vale diez unidades.
+        order: 1
+      - id: place-tens-before-units
+        text_es: Escribe primero la cifra de las decenas y después la de las unidades.
+        order: 2
+
+  - id: decompose-two-digit
+    band: initial
+    title_es: Descomponer números de dos cifras
+    instruction_es: Separa un número de dos cifras en decenas completas y unidades sueltas.
+    prerequisite_ids: [units-tens]
+    activity_families: [decomposition]
+    known_error_pattern_ids: [drops-zero-value, swaps-decomposed-parts]
+    hints:
+      - id: read-each-place
+        text_es: Mira por separado la cifra de las decenas y la de las unidades.
+        order: 1
+      - id: expand-tens-value
+        text_es: Convierte la cifra de las decenas en diez, veinte, treinta y así sucesivamente.
+        order: 2
+
+  - id: number-line-within-20
+    band: initial
+    title_es: Moverse en la recta hasta veinte
+    instruction_es: Avanza y retrocede por una recta numérica contando cada salto una vez.
+    prerequisite_ids: [number-sequence-within-20]
+    activity_families: [number-line]
+    known_error_pattern_ids: [counts-start-as-step, moves-wrong-direction]
+    hints:
+      - id: mark-start-before-moving
+        text_es: Coloca primero el dedo en el número de salida sin contarlo como salto.
+        order: 1
+      - id: match-direction-to-operation
+        text_es: Hacia la derecha aumentan los números y hacia la izquierda disminuyen.
+        order: 2
+
+  - id: add-within-10
+    band: initial
+    title_es: Sumar hasta diez
+    instruction_es: Une, completa y cuenta cantidades cuyo total no supera diez.
+    prerequisite_ids: [count-to-20]
+    activity_families: [addition]
+    known_error_pattern_ids: [counts-one-addend-only, adds-one-extra]
+    hints:
+      - id: join-small-groups
+        text_es: Junta los dos grupos antes de contar el total.
+        order: 1
+      - id: count-on-from-larger
+        text_es: Empieza por el número mayor y cuenta hacia delante el otro sumando.
+        order: 2
+
+  - id: add-within-20
+    band: initial
+    title_es: Sumar hasta veinte
+    instruction_es: Calcula sumas hasta veinte usando agrupaciones, la decena o conteo hacia delante.
+    prerequisite_ids: [add-within-10, compose-two-digit]
+    activity_families: [addition]
+    known_error_pattern_ids: [loses-count-across-ten, treats-addition-as-concatenation]
+    hints:
+      - id: bridge-through-ten
+        text_es: Completa primero diez y añade después lo que queda.
+        order: 1
+      - id: separate-tens-and-units
+        text_es: Suma las unidades y conserva la decena completa.
+        order: 2
+      - id: verify-by-counting-on
+        text_es: Comprueba el resultado contando hacia delante desde el primer sumando.
+        order: 3
+  - id: subtract-within-20
+    band: initial
+    title_es: Restar hasta veinte
+    instruction_es: Quita o compara cantidades sin obtener resultados negativos.
+    prerequisite_ids: [add-within-20, number-line-within-20]
+    activity_families: [subtraction]
+    known_error_pattern_ids: [adds-instead-of-subtracts, reverses-minuend-subtrahend]
+    hints:
+      - id: remove-from-starting-set
+        text_es: Empieza con la cantidad mayor y retira la cantidad indicada.
+        order: 1
+      - id: count-back-carefully
+        text_es: Retrocede un salto por cada unidad que quitas.
+        order: 2
+      - id: verify-with-addition
+        text_es: Suma el resultado y lo que quitaste para comprobar la cantidad inicial.
+        order: 3

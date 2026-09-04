@@ -28,6 +28,8 @@ def _require_trimmed(value: object, *, label: str) -> None:
 
 
 def _validated_ids(values: Iterable[str], *, label: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise InvalidCurriculum(f"{label} ids must be a non-scalar sequence")
     result = tuple(values)
     for value in result:
         _require_trimmed(value, label=label)
