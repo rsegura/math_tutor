@@ -10,7 +10,10 @@ make test-live-llm                         # opt-in real-provider smokes (keys +
 docker compose --profile dev run --rm tooling uv run pytest <anything>   # canonical form
 ```
 
-The pytest configuration registers `live_llm` and applies `-m "not live_llm"` by default, including for the canonical Docker command. `make test-live-llm` explicitly selects that marker and requires provider credentials plus network access. Two live smokes exist, each at the bottom of its adapter's own unit-test file and each skipped when its key is absent: `test_live_responses_smoke` (`OPENAI_API_KEY`) in `tests/unit/infrastructure/test_openai_responses_adapter.py`, and `test_live_gemini_chat_completions_smoke` (`GEMINI_API_KEY`) in `tests/unit/infrastructure/test_chat_completions_adapter.py`.
+The pytest configuration registers `live_llm` and applies `-m "not live_llm"`
+by default, including for the canonical Docker command. `make test-live-llm`
+selects that marker and is ready for future opt-in provider smokes, but the
+bootstrap scaffold does not contain any live-provider tests yet.
 
 ## TDD protocol (Red → Green → Refactor)
 
@@ -47,6 +50,6 @@ STT/LLM/TTS flows. Persistence tests build every temporary database under
 | Live-LLM (optional) | marker `live_llm` | Real provider calls; excluded by default and run explicitly with `make test-live-llm`. Requires keys in `.env` and network access. |
 | Evals | `evals/` | Phase 7. Offline scenario runner with behavioral assertions, never exact text. |
 
-Mock policy: fake only what crosses the process boundary — model providers (`FakeModelAdapter`), STT/TTS plugins, clock where needed. Everything inside `src/domain/` runs real in every test.
+Mock policy: fake only what crosses the process boundary — model providers (`FakeModelAdapter`), STT/TTS plugins, clock where needed. Everything inside `src/math_tutor/domain/` runs real in every test.
 
 Async tests: `pytest-asyncio` is configured with `asyncio_mode = "auto"` — write `async def test_...` directly, no decorator needed.
