@@ -133,38 +133,46 @@ git commit -m "feat: model tutoring curriculum graph"
 ### Task 3: Load the first reviewed curriculum slice from YAML
 
 **Files:**
+- Create: `src/math_tutor/domain/templates.py`
 - Create: `src/math_tutor/infrastructure/curriculum_loader.py`
 - Create: `src/math_tutor/curricula/primary-math-v1.yaml`
+- Create: `src/math_tutor/curricula/activity-templates-v1.yaml`
 - Create: `tests/unit/math_tutor/infrastructure/test_curriculum_loader.py`
+- Create: `tests/unit/math_tutor/infrastructure/test_template_catalog.py`
 
 **Step 1: Write failing tests**
 
 Test strict unknown-key rejection, exact version loading, duplicate objectives,
 missing Spanish wording, invalid prerequisite references, and a successful
 load containing `units-tens`, `compose-two-digit`, `add-within-20`, and
-`subtract-within-20`.
+`subtract-within-20`. Add catalog gates requiring 30–50 reviewed,
+parameterised templates, at least one template for every objective in the
+vertical slice, and resolvable references to each objective's known error
+patterns and ordered hints.
 
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/math_tutor/infrastructure/test_curriculum_loader.py -v"
+make test ARGS="tests/unit/math_tutor/infrastructure/test_curriculum_loader.py tests/unit/math_tutor/infrastructure/test_template_catalog.py -v"
 ```
 
 **Step 3: Implement loader and minimal content**
 
 Use `yaml.safe_load`; validate exact keys before constructing domain objects.
-The YAML must contain objective metadata and reviewed hints, not generated
-student data. Start with 8–12 objectives that form the prerequisite chain for
-the first vertical slice.
+The curriculum YAML contains 8–12 objectives, reviewed Spanish wording, known
+error patterns, and ordered hints. The separate activity catalog contains
+30–50 reviewed template definitions with objective ID, activity family,
+parameter bounds, difficulty bounds, expected-answer specification, applicable
+error-pattern IDs, and hint IDs. It contains no generated learner data.
 
 **Step 4: Verify GREEN**
 
-Run the test file; expected: PASS.
+Run both test files; expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add src/math_tutor/curricula src/math_tutor/infrastructure tests/unit/math_tutor/infrastructure
+git add src/math_tutor/domain/templates.py src/math_tutor/curricula src/math_tutor/infrastructure tests/unit/math_tutor/infrastructure
 git commit -m "feat: load primary math curriculum slice"
 ```
 
@@ -181,7 +189,10 @@ git commit -m "feat: load primary math curriculum slice"
 Cover deterministic generation from `(template_id, seed, difficulty)`, exact
 place-value checking, addition/subtraction bounds, rejection of negative
 subtraction when the template forbids it, and separation of `CORRECT`,
-`INCORRECT`, `AMBIGUOUS`, and `NOT_EVALUABLE`.
+`INCORRECT`, `AMBIGUOUS`, and `NOT_EVALUABLE`. Add a corpus gate that generates
+an activity from every one of the 30–50 catalog entries and proves that its
+objective, error-pattern references, hints, operands, and expected answer stay
+inside the reviewed definition.
 
 Example:
 
@@ -201,9 +212,10 @@ make test ARGS="tests/unit/math_tutor/domain/test_activities.py tests/unit/math_
 **Step 3: Implement minimum deterministic engine**
 
 Create immutable `Activity`, `ActivityTemplate`, `StructuredAnswer`, and
-`AnswerCheck`. Keep natural-language interpretation outside this module.
-Every generated activity carries the expected structured answer and objective
-ID.
+`AnswerCheck`. The generator consumes the reviewed template catalog rather
+than hardcoding a few example activities. Keep natural-language interpretation
+outside this module. Every generated activity carries the expected structured
+answer, objective ID, template ID, and applicable error-pattern and hint IDs.
 
 **Step 4: Verify GREEN**
 
@@ -445,22 +457,36 @@ git commit -m "feat: add evidence-linked tutoring review"
 - Create: `src/math_tutor/agent/runtime_factory.py`
 - Create: `src/math_tutor/agent/worker.py`
 - Create: `src/math_tutor/infrastructure/dispatch.py`
+- Modify: `docker/Dockerfile.agent`
+- Modify: `docker-compose.yml`
+- Modify: `Makefile`
 - Create: `web/app.py`
+- Create: `web/token_api.py`
+- Create: `web/review_api.py`
+- Create: `web/static/index.html`
+- Create: `web/static/app.js`
 - Create: `tests/unit/math_tutor/agent/test_voice_agent.py`
 - Create: `tests/contract/math_tutor/test_worker_contract.py`
 - Create: `tests/contract/math_tutor/test_token_endpoint.py`
+- Create: `tests/contract/math_tutor/test_review_endpoint.py`
+- Create: `tests/contract/math_tutor/test_web_app.py`
+- Create: `tests/contract/math_tutor/test_voice_client.py`
 - Create: `tests/integration/math_tutor/test_voice_boundary.py`
 
 **Step 1: Write failing tests**
 
 Test math-tutor-tagged dispatch metadata, strict provider configuration with no
 silent fallback, turn correlation, interruption cancellation, low-confidence
-confirmation, and stop priority.
+confirmation, and stop priority. Contract tests must prove that the agent image
+`CMD` and `make agent` start `math_tutor.agent.worker`, Compose starts the web
+service with `uvicorn web.app:app`, the FastAPI app exposes token and review
+routes, and the served client requests a room token before connecting to
+LiveKit.
 
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/math_tutor/agent/test_voice_agent.py tests/contract/math_tutor/test_worker_contract.py tests/contract/math_tutor/test_token_endpoint.py tests/integration/math_tutor/test_voice_boundary.py -v"
+make test ARGS="tests/unit/math_tutor/agent/test_voice_agent.py tests/contract/math_tutor tests/integration/math_tutor/test_voice_boundary.py -v"
 ```
 
 **Step 3: Implement composition**
@@ -469,7 +495,11 @@ Create the math-tutor worker and composition root. In this task only, copy or
 adapt the required STT correlation, TTS watchdog, terminal closer, provider
 factory, and active-generation patterns from `audio_poc`; place them under
 `src/math_tutor/`, remove all source-product semantics, and pin their behaviour
-with local tests. The standalone worker has no product-mode branch.
+with local tests. The standalone worker has no product-mode branch. Replace the
+scaffold image `CMD`, Compose commands, and Make target so none remains a
+placeholder: the agent launches the real worker and the web service launches
+the FastAPI application through Uvicorn. Implement the minimum token and review
+APIs plus a static voice client that obtains a token and connects to LiveKit.
 
 **Step 4: Verify GREEN**
 
@@ -478,16 +508,23 @@ Run the task tests and all math-tutor agent and contract tests; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/math_tutor/agent src/math_tutor/infrastructure/dispatch.py web/app.py tests/unit/math_tutor/agent tests/contract/math_tutor tests/integration/math_tutor/test_voice_boundary.py
+git add src/math_tutor/agent src/math_tutor/infrastructure/dispatch.py docker/Dockerfile.agent docker-compose.yml Makefile web tests/unit/math_tutor/agent tests/contract/math_tutor tests/integration/math_tutor/test_voice_boundary.py
 git commit -m "feat: route voice sessions to tutoring runtime"
 ```
 
 ### Task 11: Capture short evidence clips without retaining full audio
 
 **Files:**
+- Create: `src/math_tutor/domain/audio_consent.py`
 - Create: `src/math_tutor/infrastructure/evidence_clips.py`
+- Create: `src/math_tutor/infrastructure/clip_retention.py`
+- Create: `src/math_tutor/infrastructure/persistence/migrations/0002_audio_consent.sql`
+- Modify: `src/math_tutor/infrastructure/persistence/migrator.py`
+- Modify: `src/math_tutor/infrastructure/persistence/repositories.py`
 - Modify: `src/math_tutor/agent/voice_agent.py`
+- Modify: `.env.example`
 - Create: `tests/unit/math_tutor/infrastructure/test_evidence_clips.py`
+- Create: `tests/unit/math_tutor/infrastructure/test_clip_retention.py`
 - Create: `tests/integration/math_tutor/test_selective_audio_retention.py`
 
 **Step 1: Write failing tests**
@@ -495,20 +532,32 @@ git commit -m "feat: route voice sessions to tutoring runtime"
 Use fake audio frames and a fake clock to prove that the rolling in-memory
 buffer is bounded, non-selected frames are discarded, selected clips contain
 only the configured context window, clip duration cannot exceed the cap, and
-session close removes pending buffers.
+session close removes pending buffers. Prove that capture is disabled by
+default, no encoded audio can be persisted without an active explicit consent
+record for that learner and session, revocation blocks further persistence,
+retention cannot exceed the 30-day hard ceiling, expired clips are deleted, and
+an authorised explicit-delete command removes both file and metadata without
+leaving an accessible orphan.
 
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/math_tutor/infrastructure/test_evidence_clips.py tests/integration/math_tutor/test_selective_audio_retention.py -v"
+make test ARGS="tests/unit/math_tutor/infrastructure/test_evidence_clips.py tests/unit/math_tutor/infrastructure/test_clip_retention.py tests/integration/math_tutor/test_selective_audio_retention.py -v"
 ```
 
 **Step 3: Implement clip capture**
 
 Maintain a short per-session ring buffer in memory. Persist encoded audio only
-after the harness commits an evidence-selection decision. Store files under a
-configured tutoring evidence directory with opaque IDs; store no transcript in
-filenames or logs.
+when `AUDIO_EVIDENCE_ENABLED=true`, the harness commits an evidence-selection
+decision, and an unexpired explicit `AudioConsent` authorises capture for the
+learner and session. The feature is default-off. Require a configurable
+retention period of 1–30 days when enabled, record `expires_at`, delete expired
+clips on startup and periodic sweep, and expose an idempotent explicit-delete
+operation for the review API. Consent revocation prevents new clips and queues
+existing clips from that consent scope for deletion. Store files under a
+configured math-tutor evidence directory with opaque IDs; store no transcript
+in filenames or logs. Persist consent scope, revocation, clip expiry, and
+deletion audit data through migration `0002_audio_consent.sql`.
 
 **Step 4: Verify GREEN**
 
@@ -517,14 +566,14 @@ Run task tests; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/math_tutor/agent/voice_agent.py src/math_tutor/infrastructure/evidence_clips.py tests/unit/math_tutor/infrastructure/test_evidence_clips.py tests/integration/math_tutor/test_selective_audio_retention.py
+git add src/math_tutor/domain/audio_consent.py src/math_tutor/agent/voice_agent.py src/math_tutor/infrastructure/evidence_clips.py src/math_tutor/infrastructure/clip_retention.py src/math_tutor/infrastructure/persistence .env.example tests/unit/math_tutor/infrastructure tests/integration/math_tutor/test_selective_audio_retention.py
 git commit -m "feat: retain only selected tutoring audio evidence"
 ```
 
 ### Task 12: Add therapist review UI and API
 
 **Files:**
-- Create: `web/tutoring_review.py`
+- Modify: `web/review_api.py`
 - Create: `web/static/tutoring-review.html`
 - Create: `web/static/tutoring-review.js`
 - Modify: `web/app.py`
@@ -533,9 +582,10 @@ git commit -m "feat: retain only selected tutoring audio evidence"
 
 **Step 1: Write failing contract tests**
 
-Cover learner/session list, evidence-linked detail, authorised clip access,
-structured correction commands, optimistic concurrency, immutable history,
-no-store headers, and absence of diagnostic labels.
+Cover learner/session list, evidence-linked detail, authorised access to
+unexpired clips, idempotent explicit clip deletion, structured correction
+commands, optimistic concurrency, immutable history, no-store headers, and
+absence of diagnostic labels.
 
 **Step 2: Verify RED**
 

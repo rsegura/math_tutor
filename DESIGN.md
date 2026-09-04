@@ -172,7 +172,9 @@ or use labels such as “low level.”
 ## 6. Evidence and privacy
 
 The system does not retain full-session audio. It stores structured
-transcription and short optional audio clips only for selected evidence.
+transcription and, only when explicitly enabled, short optional audio clips for
+selected evidence. Clip capture is default-off and requires an active consent
+record scoped to the learner and session.
 
 An evidence record includes the objective, activity, expected answer,
 transcribed response, optional clip, STT confidence, interpreted answer,
@@ -181,6 +183,12 @@ for retention, and the minimum neighbouring context required to interpret it.
 
 Typical clips span the prompt or hint, the learner response, and an immediate
 clarification—normally 10–30 seconds.
+
+When clip capture is enabled, retention is configurable from 1 to 30 days and
+cannot exceed that hard ceiling. Each clip records its expiry. Startup and
+periodic sweeps delete expired files and metadata, the review surface supports
+idempotent explicit deletion, and consent revocation blocks new capture and
+queues clips in that consent scope for deletion.
 
 The LLM may propose evidence, but mechanical rules decide what is retained.
 Retention candidates include:

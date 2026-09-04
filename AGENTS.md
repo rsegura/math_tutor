@@ -53,9 +53,11 @@ voice -> LLM -> pedagogical harness -> educational domain
 5. Learner-facing language is descriptive and educational. The system must not
    issue diagnoses, assign medical labels, compare a child with peers, or
    promise improvement.
-6. Full-session audio must never be retained. If selective evidence clips are
-   introduced, they must be short, justified, consent-aware, and governed by a
-   retention policy.
+6. Full-session audio must never be retained. Selective evidence clips are
+   default-off and require explicit, active consent scoped to the learner and
+   session. When enabled, clips must be short and justified, use a configured
+   retention period of 1–30 days, expire automatically, support explicit
+   deletion, and become ineligible for new capture immediately on revocation.
 7. The educational domain and pedagogical harness must be testable offline,
    without network access, voice providers, or a real model.
 
