@@ -20,6 +20,49 @@ from math_tutor.domain.learning import (
 class PersistedTutoringState:
     session: LearningSession
     profile_version: int
+    activity_progress: tuple[ActivityProgress, ...] = ()
+
+    def __post_init__(self) -> None:
+        progress = tuple(self.activity_progress)
+        if not all(isinstance(item, ActivityProgress) for item in progress):
+            raise TypeError("activity progress must contain ActivityProgress values")
+        if len({item.activity_id for item in progress}) != len(progress):
+            raise ValueError("activity progress ids must be unique")
+        object.__setattr__(self, "activity_progress", progress)
+
+    def progress_for(self, activity_id: str) -> ActivityProgress | None:
+        return next((item for item in self.activity_progress if item.activity_id == activity_id), None)
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityProgress:
+    """Authoritative, optimistic-locked pedagogical counters."""
+
+    activity_id: str
+    attempts_used: int
+    hints_used: int
+    difficulty: int
+    consecutive_correct: int = 0
+    consecutive_incorrect: int = 0
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.activity_id, str) or not self.activity_id.strip():
+            raise ValueError("activity id must be nonempty")
+        for name in ("attempts_used", "hints_used", "consecutive_correct", "consecutive_incorrect"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if isinstance(self.difficulty, bool) or not isinstance(self.difficulty, int):
+            raise ValueError("difficulty must be an integer")
+        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
+            raise ValueError("progress version must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityProgressExpectation:
+    activity_id: str
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +111,8 @@ class MutationBatch:
     profile_change_proposals: tuple[ProposedProfileChange, ...] = ()
     events: tuple[TutoringEvent, ...] = ()
     expected_observations: tuple[ObservationExpectation, ...] = ()
+    activity_progress: tuple[ActivityProgress, ...] = ()
+    expected_activity_progress: tuple[ActivityProgressExpectation, ...] = ()
 
 
 class CommitOutcome(Enum):
@@ -106,7 +151,8 @@ class TutoringRepository(Protocol):
 
     ``commit_once`` performs, in one transaction: command-id lookup and
     fingerprint comparison, all expected-version checks (including observation
-    snapshots), every write in ``MutationBatch``, and storage of its result.
+    snapshots and activity-progress counters), every write in ``MutationBatch``,
+    and storage of its result.
     It returns APPLIED for a new write, REPLAYED only for the same fingerprint,
     COLLISION for the same id with a different fingerprint, or CONFLICT for a
     failed optimistic-lock expectation. No partial write may escape.

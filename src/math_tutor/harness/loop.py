@@ -12,9 +12,11 @@ class HarnessBudgetExceeded(RuntimeError): pass
 def _parse(output: object) -> ToolProposal | ConversationReply:
     if not isinstance(output, Mapping): raise ValueError("model-output-must-be-object")
     if output.get("type") == "tool":
+        if set(output) != {"type", "name", "arguments"}: raise ValueError("invalid-tool-output")
         try: return ToolProposal(ToolName(output["name"]), output.get("arguments", {}))
         except (KeyError, TypeError, ValueError): raise ValueError("invalid-tool-output") from None
     if output.get("type") == "reply":
+        if set(output) != {"type", "speech", "speech_kind"}: raise ValueError("invalid-reply-output")
         try: speech, kind = output["speech"], SpeechKind(output["speech_kind"])
         except (KeyError, TypeError, ValueError): raise ValueError("invalid-reply-output") from None
         if not isinstance(speech, str) or not speech.strip(): raise ValueError("invalid-reply-output")
@@ -28,13 +30,26 @@ class PedagogicalHarness:
     def run(self, context: HarnessContext, *, stop_requested: bool=False) -> HarnessDecision:
         if stop_requested: return self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason":"stop-requested"}), context)
         last_error = None
+        tool_steps = 0
         for call_index in range(self._limits.max_model_calls):
             repair = call_index > 0
             try:
                 action = _parse(self._model.complete(prompt=REPAIR_PROMPT if repair else SYSTEM_PROMPT, context=context, repair=repair))
                 if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
-                return self._registry.execute(action, context)
-            except (ValueError, ToolRejected) as exc: last_error = exc
-        if self._limits.max_model_calls < 2: raise HarnessBudgetExceeded("model-call-budget-exhausted") from last_error
+                if tool_steps >= self._limits.max_tool_steps:
+                    raise HarnessBudgetExceeded("tool-step-budget-exhausted")
+                try:
+                    decision = self._registry.execute(action, context)
+                    tool_steps += 1
+                    return decision
+                except ToolRejected as exc:
+                    if exc.crossed_fence:
+                        tool_steps += 1
+                        raise
+                    last_error = exc
+            except ToolRejected:
+                raise
+            except ValueError as exc:
+                last_error = exc
         assert last_error is not None
-        raise last_error
+        raise HarnessBudgetExceeded("model-call-budget-exhausted") from last_error

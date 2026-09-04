@@ -91,7 +91,10 @@ def service(repository, runtime, progression_policy=None):
                 CompetencyState.GENERALIZED,
             )
         ))
-    return TutoringService(repository, runtime, catalog, TranscriptionReliabilityPolicy(.75), progression_policy)
+    return TutoringService(
+        repository, runtime, catalog, TranscriptionReliabilityPolicy(.75), progression_policy,
+        reviewed_hint_texts={"hint-1": "Cuenta las unidades.", "hint-2": "Separa decenas y unidades."},
+    )
 
 
 def test_record_answer_atomically_writes_observation_evidence_and_event():

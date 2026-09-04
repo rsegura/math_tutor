@@ -3,6 +3,8 @@ from dataclasses import replace
 import pytest
 
 from math_tutor.application.results import CommandResult, CommandStatus
+from math_tutor.application.service import CanonicalHintResult, RecordAnswerResult
+from math_tutor.domain.evidence import ObservationOutcome
 from math_tutor.domain.activities import AnswerInputStatus
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.harness.contracts import ToolName, ToolProposal
@@ -21,12 +23,12 @@ class CapturingService:
 
     def record_answer(self, command):
         check = AnswerCheck(AnswerOutcome.CORRECT, "exact-match")
-        return self._apply(command, check)
+        return self._apply(command, RecordAnswerResult(check, ObservationOutcome.CORRECT))
 
-    def commit_hint(self, command): return self._apply(command)
+    def commit_hint(self, command): return self._apply(command, CanonicalHintResult(command.hint_id, "Pista uno"))
     def select_next_activity(self, command): return self._apply(command)
     def propose_profile_change(self, command): return self._apply(command, "proposal")
-    def end_session(self, command): return self._apply(command)
+    def stop_now(self, command): return self._apply(command)
 
 
 @pytest.fixture
@@ -67,13 +69,12 @@ def test_record_answer_releases_only_deterministically_verified_speech(context):
     assert result.speech == "Sí, esa respuesta es correcta."
 
 
-def test_record_answer_respects_attempt_cap(context):
+def test_context_attempt_counter_cannot_short_circuit_authoritative_service(context):
     exhausted = replace(context, activity=replace(context.activity, attempts_used=3))
-    with pytest.raises(ToolRejected, match="attempt-cap"):
-        PedagogicalToolRegistry(CapturingService(), HarnessLimits(max_attempts_per_activity=3)).execute(
-            ToolProposal(ToolName.RECORD_ANSWER, {"turn_id": "turn-1", "answer": {"kind": "integer", "values": {"value": 4}}}),
-            exhausted,
-        )
+    service = CapturingService()
+    PedagogicalToolRegistry(service, HarnessLimits(max_attempts_per_activity=3)).execute(
+        ToolProposal(ToolName.RECORD_ANSWER, {"turn_id": "turn-1", "answer": {"kind": "integer", "values": {"value": 4}}}), exhausted)
+    assert len(service.commands) == 1
 
 
 def test_hint_is_next_reviewed_hint_and_cap_is_enforced(context):

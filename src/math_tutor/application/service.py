@@ -10,6 +10,8 @@ import json
 
 from math_tutor.application.ports import (
     CommitOutcome,
+    ActivityProgress,
+    ActivityProgressExpectation,
     MutationBatch,
     ObservationExpectation,
     StoredActivity,
@@ -23,9 +25,10 @@ from math_tutor.domain.evidence import (
     EvidenceRecord,
     Observation,
     TranscriptionReliabilityPolicy,
+    ObservationOutcome,
 )
 from math_tutor.domain.learning import ProgressionPolicy
-from math_tutor.domain.mathematics import verify_answer
+from math_tutor.domain.mathematics import AnswerCheck, verify_answer
 from math_tutor.domain.templates import ActivityTemplateCatalog, InvalidActivityTemplate
 
 
@@ -65,6 +68,32 @@ class SelectNextActivity(Command):
     template_id: str
     seed: int
     difficulty: int
+    source_activity_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PedagogicalMutationPolicy:
+    max_attempts_per_activity: int = 3
+    max_hints_per_activity: int = 3
+    min_repeated_outcomes_for_adaptation: int = 2
+
+    def __post_init__(self) -> None:
+        for name in ("max_attempts_per_activity", "max_hints_per_activity", "min_repeated_outcomes_for_adaptation"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class RecordAnswerResult:
+    mathematical_check: AnswerCheck
+    observation_outcome: ObservationOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalHintResult:
+    hint_id: str
+    speech: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -93,6 +122,8 @@ class TutoringService:
         template_catalog: ActivityTemplateCatalog,
         transcription_policy: TranscriptionReliabilityPolicy,
         progression_policy: ProgressionPolicy,
+        pedagogical_policy: PedagogicalMutationPolicy | None = None,
+        reviewed_hint_texts: Mapping[str, str] | None = None,
     ) -> None:
         if not isinstance(template_catalog, ActivityTemplateCatalog):
             raise TypeError("template_catalog must be an ActivityTemplateCatalog")
@@ -105,6 +136,21 @@ class TutoringService:
         self._template_catalog = template_catalog
         self._transcription_policy = transcription_policy
         self._progression_policy = progression_policy
+        self._pedagogical_policy = pedagogical_policy or PedagogicalMutationPolicy()
+        self._reviewed_hint_texts = dict(reviewed_hint_texts or {})
+
+    @staticmethod
+    def _progress(state, activity_id: str, difficulty: int) -> tuple[ActivityProgress, bool]:
+        stored = state.progress_for(activity_id)
+        return (stored, True) if stored is not None else (
+            ActivityProgress(activity_id, 0, 0, difficulty), False
+        )
+
+    @staticmethod
+    def _progress_changes(progress: ActivityProgress, existed: bool, **changes):
+        updated = replace(progress, version=progress.version + 1 if existed else 1, **changes)
+        expected = (ActivityProgressExpectation(progress.activity_id, progress.version),) if existed else ()
+        return updated, expected
 
     @staticmethod
     def _canonical(value: object) -> object:
@@ -230,6 +276,9 @@ class TutoringService:
         if activity is None: return self._rejected(command, "activity-not-found")
         if activity.objective_id not in state.session.authorised_objective_ids:
             return self._rejected(command, "objective-not-authorised")
+        progress, existed = self._progress(state, command.activity_id, activity.difficulty)
+        if progress.attempts_used >= self._pedagogical_policy.max_attempts_per_activity:
+            return self._rejected(command, "attempt-cap-reached")
         check = verify_answer(activity, command.answer)
         try:
             observation = Observation.from_answer(
@@ -240,7 +289,7 @@ class TutoringService:
                 activity_id=command.activity_id,
                 answer_outcome=check.outcome,
                 stt_confidence=command.stt_confidence,
-                assistance_level=command.assistance_level,
+                assistance_level=progress.hints_used,
                 response_text=command.response_text,
                 transcription_policy=self._transcription_policy,
             )
@@ -259,10 +308,19 @@ class TutoringService:
                 ),)
             except (TypeError, ValueError):
                 return self._rejected(command, "domain-validation-error")
+        correct = observation.outcome is ObservationOutcome.CORRECT
+        incorrect = observation.outcome is ObservationOutcome.INCORRECT
+        progress, expected_progress = self._progress_changes(
+            progress, existed,
+            attempts_used=progress.attempts_used + 1,
+            consecutive_correct=progress.consecutive_correct + 1 if correct else 0,
+            consecutive_incorrect=progress.consecutive_incorrect + 1 if incorrect else 0,
+        )
         session = replace(state.session, version=state.session.version + 1)
         return self._commit(command, session=session, observations=(observation,), evidence=evidence,
             events=(TutoringEvent("answer-recorded", command.session_id, activity.objective_id, command.activity_id, check.reason),),
-            payload=check)
+            activity_progress=(progress,), expected_activity_progress=expected_progress,
+            payload=RecordAnswerResult(check, observation.outcome))
 
     def commit_hint(self, command: CommitHint) -> CommandResult:
         state, error = self._state(command)
@@ -272,10 +330,24 @@ class TutoringService:
         if activity is None: return self._rejected(command, "activity-not-found")
         if activity.objective_id not in state.session.authorised_objective_ids:
             return self._rejected(command, "objective-not-authorised")
+        progress, existed = self._progress(state, command.activity_id, activity.difficulty)
+        if progress.hints_used >= self._pedagogical_policy.max_hints_per_activity:
+            return self._rejected(command, "hint-cap-reached")
+        if command.hint_index != progress.hints_used:
+            return self._rejected(command, "hint-not-next")
         if command.hint_index < 0 or command.hint_index >= len(activity.hint_ids) or activity.hint_ids[command.hint_index] != command.hint_id:
             return self._rejected(command, "hint-not-reviewed-at-index")
+        speech = self._reviewed_hint_texts.get(command.hint_id)
+        if not isinstance(speech, str) or not speech.strip():
+            return self._rejected(command, "canonical-hint-text-missing")
+        progress, expected_progress = self._progress_changes(
+            progress, existed, hints_used=progress.hints_used + 1
+        )
         session = replace(state.session, version=state.session.version + 1)
-        return self._commit(command, session=session, events=(TutoringEvent("hint-committed", command.session_id, activity.objective_id, command.activity_id, command.hint_id),))
+        return self._commit(command, session=session,
+            activity_progress=(progress,), expected_activity_progress=expected_progress,
+            events=(TutoringEvent("hint-committed", command.session_id, activity.objective_id, command.activity_id, command.hint_id),),
+            payload=CanonicalHintResult(command.hint_id, speech))
 
     def select_next_activity(self, command: SelectNextActivity) -> CommandResult:
         state, error = self._state(command)
@@ -290,13 +362,33 @@ class TutoringService:
             return self._rejected(command, "template-not-found")
         if template.objective_id != command.objective_id:
             return self._rejected(command, "template-objective-mismatch")
+        source_id = command.source_activity_id
+        if source_id is not None:
+            try: source_activity = self._repository.load_activity(command.session_id, source_id)
+            except Exception: return self._failed(command, "persistence-unavailable")
+            if source_activity is None: return self._rejected(command, "source-activity-not-found")
+            progress, existed = self._progress(state, source_id, source_activity.difficulty)
+            if command.difficulty - progress.difficulty not in (-1, 1):
+                return self._rejected(command, "difficulty-step-must-be-one")
+            repeated = progress.consecutive_correct if command.difficulty > progress.difficulty else progress.consecutive_incorrect
+            if repeated < self._pedagogical_policy.min_repeated_outcomes_for_adaptation:
+                return self._rejected(command, "insufficient-repeated-evidence")
+            expected_progress = (ActivityProgressExpectation(source_id, progress.version),) if existed else ()
+            reason = "repeated-correct" if command.difficulty > progress.difficulty else "repeated-incorrect"
+        else:
+            expected_progress, reason = (), "initial-selection"
         try:
             activity = generate_activity(template, seed=command.seed, difficulty=command.difficulty)
         except (InvalidActivity, TypeError, ValueError):
             return self._rejected(command, "activity-generation-invalid")
         session = replace(state.session, version=state.session.version + 1)
+        next_progress = ActivityProgress(
+            command.activity_id, 0, 0, activity.difficulty,
+            version=progress.version + 1 if source_id is not None else 1,
+        )
         return self._commit(command, session=session, activities=(StoredActivity(command.activity_id, activity),),
-            events=(TutoringEvent("activity-selected", command.session_id, activity.objective_id, command.activity_id, activity.template_id),), payload=activity)
+            activity_progress=(next_progress,), expected_activity_progress=expected_progress,
+            events=(TutoringEvent("activity-selected", command.session_id, activity.objective_id, command.activity_id, f"{activity.template_id}:{reason}:{source_activity.difficulty if source_id else activity.difficulty}->{activity.difficulty}"),), payload=activity)
 
     def propose_evidence(self, command: ProposeEvidence) -> CommandResult:
         state, error = self._state(command)
@@ -363,3 +455,31 @@ class TutoringService:
         except (TypeError, ValueError):
             return self._rejected(command, "domain-validation-error")
         return self._commit(command, session=session, events=(TutoringEvent("session-ended", command.session_id, detail=command.reason),))
+
+    def stop_now(self, command: EndSession) -> CommandResult:
+        """Cancel locally first, then attempt the durable terminal transition."""
+
+        self._runtime.cancel_generation(command.session_id)
+        try:
+            state = self._repository.load_state(command.session_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if state is None:
+            return self._rejected(command, "session-not-found")
+        try:
+            session = state.session.request_stop(reason=command.reason)
+            result = CommandResult(command.command_id, CommandStatus.APPLIED, "applied")
+            batch = MutationBatch(
+                command_id=command.command_id, command_fingerprint=self._fingerprint(command),
+                session_id=command.session_id, expected_session_version=state.session.version,
+                expected_profile_version=state.profile_version, result=result, session=session,
+                events=(TutoringEvent("session-stop-requested", command.session_id, detail=command.reason),),
+            )
+            decision = self._repository.commit_once(batch)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if decision.outcome is CommitOutcome.APPLIED and decision.result is not None:
+            return decision.result
+        if decision.outcome is CommitOutcome.REPLAYED and decision.result is not None:
+            return decision.result.as_replay()
+        return self._rejected(command, decision.reason or "stop-persistence-conflict")

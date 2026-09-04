@@ -11,7 +11,7 @@ from math_tutor.harness.registry import PedagogicalToolRegistry
 
 class FakeService:
     def __init__(self): self.commands = []
-    def end_session(self, command):
+    def stop_now(self, command):
         self.commands.append(command)
         return CommandResult(command.command_id, CommandStatus.APPLIED, "applied")
 
@@ -51,14 +51,16 @@ def test_invalid_output_gets_exactly_one_bounded_repair(context):
 
 def test_unverified_mathematical_speech_is_never_released(context):
     model = FakeModel([{"type": "reply", "speech": "Cuatro más cuatro son ocho.", "speech_kind": "mathematical"}] * 2)
-    with pytest.raises(ValueError, match="mathematical-speech-requires-fence"):
+    with pytest.raises(HarnessBudgetExceeded) as caught:
         PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits()).run(context)
+    assert "mathematical-speech-requires-fence" in str(caught.value.__cause__)
 
 
 def test_model_cannot_bypass_math_fence_by_mislabeling_speech_as_social(context):
     model = FakeModel([{"type": "reply", "speech": "Cuatro más cuatro son ocho.", "speech_kind": "social"}] * 2)
-    with pytest.raises(ValueError, match="reply-not-reviewed"):
+    with pytest.raises(HarnessBudgetExceeded) as caught:
         PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits()).run(context)
+    assert "reply-not-reviewed" in str(caught.value.__cause__)
 
 
 def test_explicit_model_budget_is_hard(context):

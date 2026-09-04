@@ -3,7 +3,8 @@ from collections.abc import Mapping
 from itertools import count
 from typing import Protocol
 from math_tutor.application.results import CommandStatus
-from math_tutor.application.service import CommitHint, EndSession, ProposeProfileChange, RecordAnswer, SelectNextActivity
+from math_tutor.application.service import CanonicalHintResult, CommitHint, EndSession, ProposeProfileChange, RecordAnswer, RecordAnswerResult, SelectNextActivity
+from math_tutor.domain.evidence import ObservationOutcome
 from math_tutor.domain.activities import AnswerInputStatus, StructuredAnswer
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.domain.templates import ExpectedAnswerKind
@@ -11,14 +12,17 @@ from math_tutor.harness.context import HarnessContext
 from math_tutor.harness.contracts import HarnessDecision, ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
 
-class ToolRejected(ValueError): pass
+class ToolRejected(ValueError):
+    def __init__(self, reason: str, *, crossed_fence: bool = False) -> None:
+        super().__init__(reason)
+        self.crossed_fence = crossed_fence
 
 class TutoringMutationService(Protocol):
     def record_answer(self, command: RecordAnswer): ...
     def commit_hint(self, command: CommitHint): ...
     def select_next_activity(self, command: SelectNextActivity): ...
     def propose_profile_change(self, command: ProposeProfileChange): ...
-    def end_session(self, command: EndSession): ...
+    def stop_now(self, command: EndSession): ...
 
 class PedagogicalToolRegistry:
     def __init__(self, service: TutoringMutationService, limits: HarnessLimits) -> None:
@@ -27,7 +31,8 @@ class PedagogicalToolRegistry:
         return dict(command_id=f"{context.current_turn.turn_id}:{tool.value}:{next(self._sequence)}", session_id=context.session_id, expected_session_version=context.expected_session_version, expected_profile_version=context.expected_profile_version, generation_id=context.generation_id)
     @staticmethod
     def _applied(result: object) -> None:
-        if getattr(result, "status", None) is not CommandStatus.APPLIED: raise ToolRejected(getattr(result, "reason", "mutation-rejected"))
+        if getattr(result, "status", None) is not CommandStatus.APPLIED:
+            raise ToolRejected(getattr(result, "reason", "mutation-rejected"), crossed_fence=True)
     @staticmethod
     def _keys(arguments: object, *, required: set[str], optional: frozenset[str] = frozenset()) -> None:
         if not isinstance(arguments, Mapping): raise ToolRejected("tool-arguments-invalid")
@@ -37,7 +42,6 @@ class PedagogicalToolRegistry:
         args, name, base = proposal.arguments, proposal.name, self._base(context, proposal.name)
         if name is ToolName.RECORD_ANSWER:
             self._keys(args, required={"turn_id", "answer"})
-            if context.activity.attempts_used >= self._limits.max_attempts_per_activity: raise ToolRejected("attempt-cap-reached")
             if args.get("turn_id") != context.current_turn.turn_id: raise ToolRejected("current-turn-evidence-required")
             raw = args.get("answer")
             if not isinstance(raw, dict) or not isinstance(raw.get("values"), dict): raise ToolRejected("structured-answer-required")
@@ -47,15 +51,21 @@ class PedagogicalToolRegistry:
             except (KeyError, TypeError, ValueError): raise ToolRejected("structured-answer-invalid") from None
             command = RecordAnswer(**base, activity_id=context.activity.activity_id, answer=answer, response_text=context.current_turn.transcript, stt_confidence=context.current_turn.stt_confidence, assistance_level=context.activity.hints_used, observation_id=f"obs-{context.current_turn.turn_id}", evidence_id=None, retain_evidence=False, reason_for_retention=None)
             result = self._service.record_answer(command); self._applied(result)
-            if not isinstance(result.payload, AnswerCheck): raise ToolRejected("verification-result-missing")
-            speech = {AnswerOutcome.CORRECT:"Sí, esa respuesta es correcta.", AnswerOutcome.INCORRECT:"Esa respuesta todavía no es correcta. Vamos paso a paso.", AnswerOutcome.AMBIGUOUS:"No estoy seguro de haber entendido. ¿Puedes repetirlo?", AnswerOutcome.NOT_EVALUABLE:"No he podido comprobar la respuesta. ¿Puedes decirla de otra forma?"}[result.payload.outcome]
+            if not isinstance(result.payload, RecordAnswerResult) or not isinstance(result.payload.mathematical_check, AnswerCheck):
+                raise ToolRejected("verification-result-missing", crossed_fence=True)
+            if result.payload.observation_outcome is ObservationOutcome.NOT_EVALUABLE:
+                speech = "No estoy seguro de haber oído bien. ¿Puedes repetirlo?"
+            else:
+                speech = {AnswerOutcome.CORRECT:"Sí, esa respuesta es correcta.", AnswerOutcome.INCORRECT:"Esa respuesta todavía no es correcta. Vamos paso a paso.", AnswerOutcome.AMBIGUOUS:"No estoy seguro de haber entendido. ¿Puedes repetirlo?", AnswerOutcome.NOT_EVALUABLE:"No he podido comprobar la respuesta. ¿Puedes decirla de otra forma?"}[result.payload.mathematical_check.outcome]
             return HarnessDecision(speech=speech, applied_tool=name)
         if name is ToolName.GIVE_HINT:
             self._keys(args, required=set())
             index = context.activity.hints_used
             if index >= self._limits.max_hints_per_activity or index >= len(context.activity.hint_ids): raise ToolRejected("hint-cap-reached")
             result = self._service.commit_hint(CommitHint(**base, activity_id=context.activity.activity_id, hint_id=context.activity.hint_ids[index], hint_index=index)); self._applied(result)
-            return HarnessDecision(speech=context.activity.hint_texts[index], applied_tool=name)
+            if not isinstance(result.payload, CanonicalHintResult) or result.payload.hint_id != context.activity.hint_ids[index] or not result.payload.speech:
+                raise ToolRejected("canonical-hint-result-missing", crossed_fence=True)
+            return HarnessDecision(speech=result.payload.speech, applied_tool=name)
         if name is ToolName.ADAPT_DIFFICULTY:
             self._keys(args, required={"objective_id", "difficulty", "seed", "activity_id"})
             objective, difficulty = args.get("objective_id"), args.get("difficulty")
@@ -64,7 +74,7 @@ class PedagogicalToolRegistry:
             if not self._limits.min_difficulty <= difficulty <= self._limits.max_difficulty: raise ToolRejected("difficulty-out-of-range")
             activity_id, seed = args.get("activity_id"), args.get("seed")
             if not isinstance(activity_id, str) or not activity_id.strip() or isinstance(seed, bool) or not isinstance(seed, int): raise ToolRejected("adaptation-arguments-invalid")
-            try: command = SelectNextActivity(**base, activity_id=activity_id, objective_id=str(objective), template_id=context.activity.template_id, seed=seed, difficulty=difficulty)
+            try: command = SelectNextActivity(**base, activity_id=activity_id, source_activity_id=context.activity.activity_id, objective_id=str(objective), template_id=context.activity.template_id, seed=seed, difficulty=difficulty)
             except (KeyError, TypeError, ValueError): raise ToolRejected("adaptation-arguments-invalid") from None
             result = self._service.select_next_activity(command); self._applied(result)
             return HarnessDecision(applied_tool=name)
@@ -78,6 +88,7 @@ class PedagogicalToolRegistry:
             self._keys(args, required=set(), optional={"reason"})
             reason = args.get("reason", "stop-requested")
             if not isinstance(reason, str) or not reason.strip(): raise ToolRejected("end-reason-invalid")
-            result = self._service.end_session(EndSession(**base, reason=reason)); self._applied(result)
-            return HarnessDecision(terminal=True, applied_tool=name)
+            result = self._service.stop_now(EndSession(**base, reason=reason))
+            durable = getattr(result, "status", None) is CommandStatus.APPLIED
+            return HarnessDecision(terminal=True, applied_tool=name, reason="accepted" if durable else "stop-persistence-pending")
         raise ToolRejected("unknown-tool")
