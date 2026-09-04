@@ -11,6 +11,9 @@ from types import MappingProxyType
 from typing import Any
 
 
+_MAX_SATISFIABILITY_ASSIGNMENTS = 100_000
+
+
 class InvalidActivityTemplate(ValueError):
     """Raised when a reviewed activity template violates its contract."""
 
@@ -79,6 +82,32 @@ class ParameterRelationKind(Enum):
     EQUALS_TENS_DIGIT = "equals-tens-digit"
     OFFSET_EQUALS = "offset-equals"
     MULTIPLE_OF = "multiple-of"
+
+
+_ANSWER_KIND_CARDINALITY = {
+    ExpectedAnswerKind.INTEGER: 1,
+    ExpectedAnswerKind.INTEGER_PAIR: 2,
+    ExpectedAnswerKind.RELATION: 1,
+    ExpectedAnswerKind.INTEGER_SEQUENCE: 1,
+}
+_DERIVATION_RESULT_KIND = {
+    AnswerDerivationOperation.VALUE: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.SUM: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.DIFFERENCE: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.DOUBLE: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.MINIMUM: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.MAXIMUM: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.RELATION: ExpectedAnswerKind.RELATION,
+    AnswerDerivationOperation.SUCCESSOR: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.PREDECESSOR: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.FOLLOWING_SEQUENCE: (
+        ExpectedAnswerKind.INTEGER_SEQUENCE
+    ),
+    AnswerDerivationOperation.TENS_DIGIT: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.UNITS_DIGIT: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.TENS_VALUE: ExpectedAnswerKind.INTEGER,
+    AnswerDerivationOperation.COMPOSE_TENS_UNITS: ExpectedAnswerKind.INTEGER,
+}
 
 
 def _require_trimmed(value: object, *, label: str) -> str:
@@ -314,6 +343,28 @@ class ExpectedAnswerSpec:
                 "expected answer derivation fields must exactly match answer fields"
             )
 
+        expected_cardinality = _ANSWER_KIND_CARDINALITY[self.kind]
+        if len(fields) != expected_cardinality:
+            raise InvalidActivityTemplate(
+                f"answer kind '{self.kind.value}' requires "
+                f"{expected_cardinality} field(s)"
+            )
+        required_field_kind = (
+            ExpectedAnswerKind.INTEGER
+            if self.kind is ExpectedAnswerKind.INTEGER_PAIR
+            else self.kind
+        )
+        incompatible = tuple(
+            item.operation
+            for item in derivations
+            if _DERIVATION_RESULT_KIND[item.operation] is not required_field_kind
+        )
+        if incompatible:
+            raise InvalidActivityTemplate(
+                f"answer kind '{self.kind.value}' is incompatible with derivation "
+                f"operation '{incompatible[0].value}'"
+            )
+
         object.__setattr__(self, "fields", fields)
         object.__setattr__(self, "constraints", constraints)
         object.__setattr__(self, "derivations", derivations)
@@ -427,6 +478,10 @@ class ActivityTemplate:
                 "parameter relation references unknown parameter "
                 f"'{unknown_relation_parameters[0]}'"
             )
+        if relations and not _has_satisfying_assignment(parameters, relations):
+            raise InvalidActivityTemplate(
+                "no parameter assignment within bounds satisfies all relations"
+            )
 
         errors = _validated_ids(self.error_pattern_ids, label="error pattern")
         hints = _validated_ids(self.hint_ids, label="hint")
@@ -458,6 +513,54 @@ class ActivityTemplate:
         return all(
             relation.is_satisfied(values) for relation in self.parameter_relations
         )
+
+
+def _has_satisfying_assignment(
+    bounds_by_name: Mapping[str, ParameterBounds],
+    relations: tuple[ParameterRelation, ...],
+) -> bool:
+    """Solve the small reviewed constraint set with a hard work limit."""
+
+    related_names = {name for relation in relations for name in relation.parameters}
+    ordered_names = tuple(
+        sorted(
+            related_names,
+            key=lambda name: (
+                bounds_by_name[name].maximum - bounds_by_name[name].minimum,
+                name,
+            ),
+        )
+    )
+    candidates_checked = 0
+    assigned: dict[str, int] = {}
+
+    def search(index: int) -> bool:
+        nonlocal candidates_checked
+        if index == len(ordered_names):
+            return all(relation.is_satisfied(assigned) for relation in relations)
+
+        name = ordered_names[index]
+        bounds = bounds_by_name[name]
+        for value in range(bounds.minimum, bounds.maximum + 1):
+            candidates_checked += 1
+            if candidates_checked > _MAX_SATISFIABILITY_ASSIGNMENTS:
+                raise InvalidActivityTemplate(
+                    "parameter relation satisfiability exceeds safe validation limit"
+                )
+            assigned[name] = value
+            resolved = tuple(
+                relation
+                for relation in relations
+                if set(relation.parameters) <= assigned.keys()
+            )
+            if all(relation.is_satisfied(assigned) for relation in resolved) and search(
+                index + 1
+            ):
+                return True
+        assigned.pop(name, None)
+        return False
+
+    return search(0)
 
 
 @dataclass(frozen=True, slots=True)

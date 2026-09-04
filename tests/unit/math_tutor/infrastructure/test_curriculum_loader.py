@@ -337,6 +337,35 @@ def test_wraps_malformed_yaml_with_a_clear_loader_error(tmp_path: Path) -> None:
         load_curriculum_catalogs(curriculum_path, templates_path)
 
 
+def test_rejects_duplicate_top_level_yaml_keys(tmp_path: Path) -> None:
+    _, templates = _documents()
+    curriculum_path, templates_path = _write_documents(tmp_path, {}, templates)
+    curriculum_path.write_text(
+        "schema_version: primary-math/v1\n"
+        "schema_version: primary-math/v1\n"
+        "objectives: []\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CurriculumLoadError, match="duplicate YAML key.*schema_version"):
+        load_curriculum_catalogs(curriculum_path, templates_path)
+
+
+def test_rejects_duplicate_nested_yaml_keys(tmp_path: Path) -> None:
+    curriculum, _ = _documents()
+    curriculum_path, templates_path = _write_documents(tmp_path, curriculum, {})
+    templates_path.write_text(
+        "schema_version: activity-templates/v1\n"
+        "templates:\n"
+        "  - id: duplicate-id\n"
+        "    id: duplicate-id-again\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CurriculumLoadError, match="duplicate YAML key.*id"):
+        load_curriculum_catalogs(curriculum_path, templates_path)
+
+
 def test_explicit_paths_do_not_depend_on_the_current_working_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

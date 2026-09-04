@@ -261,6 +261,123 @@ def test_template_checks_bounds_and_cross_parameter_relations() -> None:
     assert not definition.allows_parameter_values({"left": 2})
 
 
+def test_template_rejects_unsatisfiable_distinct_singleton_bounds() -> None:
+    relation = ParameterRelation(
+        kind=ParameterRelationKind.DISTINCT,
+        parameters=("left", "right"),
+        value=None,
+    )
+
+    with pytest.raises(InvalidActivityTemplate, match="no parameter assignment"):
+        template(
+            parameters={
+                "left": ParameterBounds(2, 2),
+                "right": ParameterBounds(2, 2),
+            },
+            parameter_relations=(relation,),
+        )
+
+
+def test_template_rejects_incompatible_offset_relation_bounds() -> None:
+    relation = ParameterRelation(
+        kind=ParameterRelationKind.OFFSET_EQUALS,
+        parameters=("left", "right"),
+        value=5,
+    )
+
+    with pytest.raises(InvalidActivityTemplate, match="no parameter assignment"):
+        template(
+            parameters={
+                "left": ParameterBounds(1, 3),
+                "right": ParameterBounds(7, 9),
+            },
+            parameter_relations=(relation,),
+        )
+
+
+def test_template_bounds_relation_validation_work() -> None:
+    relation = ParameterRelation(
+        kind=ParameterRelationKind.MULTIPLE_OF,
+        parameters=("left",),
+        value=1_000_001,
+    )
+    answer = ExpectedAnswerSpec(
+        kind=ExpectedAnswerKind.INTEGER,
+        fields=("answer",),
+        constraints=(),
+        derivations=(
+            AnswerDerivation(
+                field="answer",
+                operation=AnswerDerivationOperation.VALUE,
+                parameters=("left",),
+            ),
+        ),
+    )
+
+    with pytest.raises(InvalidActivityTemplate, match="safe validation limit"):
+        template(
+            parameters={"left": ParameterBounds(1, 1_000_000)},
+            prompt="Usa {left}.",
+            answer=answer,
+            parameter_relations=(relation,),
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "operations"),
+    [
+        (ExpectedAnswerKind.INTEGER, (AnswerDerivationOperation.RELATION,)),
+        (
+            ExpectedAnswerKind.RELATION,
+            (AnswerDerivationOperation.FOLLOWING_SEQUENCE,),
+        ),
+        (
+            ExpectedAnswerKind.INTEGER_SEQUENCE,
+            (AnswerDerivationOperation.VALUE,),
+        ),
+        (
+            ExpectedAnswerKind.INTEGER_PAIR,
+            (AnswerDerivationOperation.VALUE,),
+        ),
+        (
+            ExpectedAnswerKind.INTEGER_PAIR,
+            (
+                AnswerDerivationOperation.VALUE,
+                AnswerDerivationOperation.RELATION,
+            ),
+        ),
+    ],
+)
+def test_expected_answer_rejects_kind_cardinality_or_result_kind_mismatch(
+    kind: ExpectedAnswerKind,
+    operations: tuple[AnswerDerivationOperation, ...],
+) -> None:
+    fields = tuple(f"field-{index}" for index in range(len(operations)))
+    parameter_counts = {
+        AnswerDerivationOperation.RELATION: 2,
+        AnswerDerivationOperation.FOLLOWING_SEQUENCE: 2,
+    }
+    derivations = tuple(
+        AnswerDerivation(
+            field=field,
+            operation=operation,
+            parameters=tuple(
+                f"parameter-{parameter_index}"
+                for parameter_index in range(parameter_counts.get(operation, 1))
+            ),
+        )
+        for field, operation in zip(fields, operations, strict=True)
+    )
+
+    with pytest.raises(InvalidActivityTemplate, match="answer kind"):
+        ExpectedAnswerSpec(
+            kind=kind,
+            fields=fields,
+            constraints=(),
+            derivations=derivations,
+        )
+
+
 @pytest.mark.parametrize("field", ["id", "objective_id", "prompt"])
 @pytest.mark.parametrize("bad_value", ["", " ", " leading", "trailing "])
 def test_template_requires_trimmed_nonempty_identity_and_spanish_prompt(
