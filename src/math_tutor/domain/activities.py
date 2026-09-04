@@ -173,37 +173,137 @@ def _integer_values(answer: StructuredAnswer) -> tuple[int, ...]:
     return tuple(flattened)
 
 
-def _answer_satisfies_constraints(
-    template: ActivityTemplate, answer: StructuredAnswer
+def _referenced_parameter_values(
+    template: ActivityTemplate, parameters: Mapping[str, int]
+) -> tuple[int, ...]:
+    return tuple(
+        parameters[name]
+        for derivation in template.expected_answer.derivations
+        for name in derivation.parameters
+    )
+
+
+def _is_two_digit_contract_satisfied(
+    template: ActivityTemplate,
+    parameters: Mapping[str, int],
+    answer: StructuredAnswer,
 ) -> bool:
-    constraints = set(template.expected_answer.constraints)
+    """Recognise a two-digit quantity from declarative derivation structure."""
+
+    answer_integers = _integer_values(answer)
+    if any(10 <= value <= 99 for value in answer_integers):
+        return True
+
+    referenced = _referenced_parameter_values(template, parameters)
+    if any(10 <= value <= 99 for value in referenced):
+        return True
+
+    derivations = template.expected_answer.derivations
+    return (
+        len(derivations) == 2
+        and all(
+            derivation.operation is AnswerDerivationOperation.VALUE
+            and len(derivation.parameters) == 1
+            for derivation in derivations
+        )
+        and 1 <= referenced[0] <= 9
+        and 0 <= referenced[1] <= 9
+    )
+
+
+def _has_no_carry(
+    template: ActivityTemplate, parameters: Mapping[str, int]
+) -> bool:
+    additions = tuple(
+        derivation
+        for derivation in template.expected_answer.derivations
+        if derivation.operation is AnswerDerivationOperation.SUM
+    )
+    return bool(additions) and all(
+        sum(parameters[name] % 10 for name in derivation.parameters) <= 9
+        for derivation in additions
+    )
+
+
+def _has_no_borrow(
+    template: ActivityTemplate, parameters: Mapping[str, int]
+) -> bool:
+    subtractions = tuple(
+        derivation
+        for derivation in template.expected_answer.derivations
+        if derivation.operation is AnswerDerivationOperation.DIFFERENCE
+    )
+    return bool(subtractions) and all(
+        parameters[derivation.parameters[0]] % 10
+        >= parameters[derivation.parameters[1]] % 10
+        for derivation in subtractions
+    )
+
+
+def _answer_satisfies_constraints(
+    template: ActivityTemplate,
+    parameters: Mapping[str, int],
+    answer: StructuredAnswer,
+) -> bool:
+    raw_constraints = template.expected_answer.constraints
+    unsupported = tuple(
+        constraint
+        for constraint in raw_constraints
+        if not isinstance(constraint, AnswerConstraint)
+    )
+    if unsupported:
+        name = repr(unsupported[0])
+        raise InvalidActivity(f"unsupported answer constraint '{name}'")
+    constraints = set(raw_constraints)
+
     values = _integer_values(answer)
+    contextual_values = values or _referenced_parameter_values(template, parameters)
     if AnswerConstraint.NON_NEGATIVE in constraints and any(
-        value < 0 for value in values
+        value < 0 for value in contextual_values
     ):
         return False
     if AnswerConstraint.WITHIN_10 in constraints and any(
-        not 0 <= value <= 10 for value in values
+        not 0 <= value <= 10 for value in contextual_values
     ):
         return False
     if AnswerConstraint.WITHIN_20 in constraints and any(
-        not 0 <= value <= 20 for value in values
+        not 0 <= value <= 20 for value in contextual_values
+    ):
+        return False
+    if AnswerConstraint.TWO_DIGIT in constraints and not _is_two_digit_contract_satisfied(
+        template, parameters, answer
+    ):
+        return False
+    if AnswerConstraint.NO_CARRY in constraints and not _has_no_carry(
+        template, parameters
+    ):
+        return False
+    if AnswerConstraint.NO_BORROW in constraints and not _has_no_borrow(
+        template, parameters
     ):
         return False
     sequence = next(
         (value for value in answer.values.values() if isinstance(value, tuple)),
         None,
     )
-    if AnswerConstraint.ASCENDING in constraints and sequence is not None:
-        if any(left >= right for left, right in zip(sequence, sequence[1:])):
-            return False
-    if AnswerConstraint.DESCENDING in constraints and sequence is not None:
-        if any(left <= right for left, right in zip(sequence, sequence[1:])):
-            return False
-    if AnswerConstraint.ADJACENT in constraints and sequence is not None:
-        if any(abs(left - right) != 1 for left, right in zip(sequence, sequence[1:])):
-            return False
-    if AnswerConstraint.DISTINCT in constraints and len(values) != len(set(values)):
+    if AnswerConstraint.ASCENDING in constraints and (
+        sequence is None
+        or any(left >= right for left, right in zip(sequence, sequence[1:]))
+    ):
+        return False
+    if AnswerConstraint.DESCENDING in constraints and (
+        sequence is None
+        or any(left <= right for left, right in zip(sequence, sequence[1:]))
+    ):
+        return False
+    if AnswerConstraint.ADJACENT in constraints and (
+        sequence is None
+        or any(abs(left - right) != 1 for left, right in zip(sequence, sequence[1:]))
+    ):
+        return False
+    if AnswerConstraint.DISTINCT in constraints and len(contextual_values) != len(
+        set(contextual_values)
+    ):
         return False
     return True
 
@@ -222,7 +322,7 @@ def _valid_candidates(
         if not template.allows_parameter_values(parameters):
             continue
         answer = _derive_answer(template, parameters)
-        if _answer_satisfies_constraints(template, answer):
+        if _answer_satisfies_constraints(template, parameters, answer):
             candidates.append((parameters, answer))
     candidates.sort(
         key=lambda item: (
@@ -281,4 +381,3 @@ def generate_activity(
         error_pattern_ids=template.error_pattern_ids,
         hint_ids=template.hint_ids,
     )
-
