@@ -193,6 +193,7 @@ class SkillEstimate:
     state: CompetencyState
     version: int = 1
     supporting_evidence_ids: tuple[str, ...] = ()
+    supporting_observation_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_id(self.learner_id, "learner id")
@@ -201,7 +202,47 @@ class SkillEstimate:
             raise InvalidLearningState("state must be a CompetencyState")
         if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
             raise InvalidLearningState("estimate version must be a positive integer")
-        object.__setattr__(self, "supporting_evidence_ids", _ids(self.supporting_evidence_ids, "evidence id"))
+        evidence_ids = _ids(self.supporting_evidence_ids, "evidence id")
+        observation_ids = _ids(
+            self.supporting_observation_ids, "observation id"
+        )
+        if len(evidence_ids) != len(observation_ids):
+            raise InvalidLearningState(
+                "supporting evidence and observation ids must be aligned"
+            )
+        object.__setattr__(self, "supporting_evidence_ids", evidence_ids)
+        object.__setattr__(self, "supporting_observation_ids", observation_ids)
+
+    def apply(self, proposal: ProposedProfileChange) -> SkillEstimate:
+        """Consolidate an exact proposal while retaining consumed identities."""
+
+        if not isinstance(proposal, ProposedProfileChange):
+            raise InvalidLearningState("estimate update requires a ProposedProfileChange")
+        if proposal.learner_id != self.learner_id:
+            raise InvalidLearningState("proposal learner must match estimate learner")
+        if proposal.objective_id != self.objective_id:
+            raise InvalidLearningState("proposal objective must match estimate objective")
+        if proposal.from_state is not self.state:
+            raise InvalidLearningState("proposal source state must match estimate state")
+        if proposal.estimate_version != self.version:
+            raise InvalidLearningState("proposal version must match estimate version")
+        if set(proposal.evidence_ids) & set(self.supporting_evidence_ids):
+            raise InvalidLearningState("proposal reuses consumed evidence")
+        if set(proposal.observation_ids) & set(self.supporting_observation_ids):
+            raise InvalidLearningState("proposal reuses consumed observation")
+        return replace(
+            self,
+            state=proposal.to_state,
+            version=self.version + 1,
+            supporting_evidence_ids=(
+                *self.supporting_evidence_ids,
+                *proposal.evidence_ids,
+            ),
+            supporting_observation_ids=(
+                *self.supporting_observation_ids,
+                *proposal.observation_ids,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +254,7 @@ class ProposedProfileChange:
     from_state: CompetencyState
     to_state: CompetencyState
     evidence_ids: tuple[str, ...]
+    observation_ids: tuple[str, ...]
     estimate_version: int
     policy_version: str
 
@@ -231,8 +273,13 @@ class ProposedProfileChange:
         ):
             raise InvalidLearningState("estimate version must be a positive integer")
         evidence_ids = _ids(self.evidence_ids, "evidence id")
+        observation_ids = _ids(self.observation_ids, "observation id")
         if not evidence_ids:
             raise InvalidLearningState("proposal requires evidence")
+        if len(evidence_ids) != len(observation_ids):
+            raise InvalidLearningState(
+                "proposal evidence and observation ids must be aligned"
+            )
         normal_step = (
             self.from_state in _PROGRESSION[:-1]
             and self.to_state is _PROGRESSION[_PROGRESSION.index(self.from_state) + 1]
@@ -244,6 +291,7 @@ class ProposedProfileChange:
         if not (normal_step or explicit_review):
             raise InvalidLearningState("proposal must represent exactly one allowed transition")
         object.__setattr__(self, "evidence_ids", evidence_ids)
+        object.__setattr__(self, "observation_ids", observation_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,12 +380,14 @@ class ProgressionPolicy:
         if any(record.learner_id != estimate.learner_id for record in records):
             raise InvalidLearningState("evidence learner must match estimate learner")
         consumed = set(estimate.supporting_evidence_ids)
+        consumed_observations = set(estimate.supporting_observation_ids)
 
         relevant = tuple(
             record
             for record in records
             if record.observation.objective_id == estimate.objective_id
             and record.evidence_id not in consumed
+            and record.observation.observation_id not in consumed_observations
             and record.observation.stt_confidence >= self.min_stt_confidence
             and record.observation.outcome is not ObservationOutcome.NOT_EVALUABLE
         )
@@ -358,6 +408,9 @@ class ProgressionPolicy:
                 from_state=estimate.state,
                 to_state=CompetencyState.NEEDS_REVIEW,
                 evidence_ids=tuple(record.evidence_id for record in failures),
+                observation_ids=tuple(
+                    record.observation.observation_id for record in failures
+                ),
                 estimate_version=estimate.version,
                 policy_version=self.version,
             )
@@ -399,6 +452,9 @@ class ProgressionPolicy:
             from_state=estimate.state,
             to_state=next_state,
             evidence_ids=tuple(record.evidence_id for record in successes),
+            observation_ids=tuple(
+                record.observation.observation_id for record in successes
+            ),
             estimate_version=estimate.version,
             policy_version=self.version,
         )

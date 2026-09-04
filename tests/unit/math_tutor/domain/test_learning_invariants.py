@@ -61,6 +61,7 @@ def test_proposal_rejects_invalid_types_versions_ids_and_transitions() -> None:
         from_state=CompetencyState.EXPLORING,
         to_state=CompetencyState.WITH_INTENSIVE_HELP,
         evidence_ids=("e-1",),
+        observation_ids=("o-1",),
         estimate_version=1,
         policy_version="p1",
     )
@@ -70,6 +71,8 @@ def test_proposal_rejects_invalid_types_versions_ids_and_transitions() -> None:
         {"estimate_version": 0},
         {"evidence_ids": ("",)},
         {"evidence_ids": ("e-1", "e-1")},
+        {"observation_ids": ()},
+        {"observation_ids": ("o-1", "o-1")},
         {"to_state": CompetencyState.INDEPENDENT},
     ):
         with pytest.raises(InvalidLearningState):
@@ -83,10 +86,19 @@ def test_review_is_an_explicit_allowed_downgrade() -> None:
         from_state=CompetencyState.INDEPENDENT,
         to_state=CompetencyState.NEEDS_REVIEW,
         evidence_ids=("e-1",),
+        observation_ids=("o-1",),
         estimate_version=1,
         policy_version="p1",
     )
     assert proposal.to_state is CompetencyState.NEEDS_REVIEW
+
+
+def test_estimate_rejects_unaligned_consumed_identity_history() -> None:
+    with pytest.raises(InvalidLearningState, match="must be aligned"):
+        estimate_fixture(
+            supporting_evidence_ids=("e-1",),
+            supporting_observation_ids=(),
+        )
 
 
 def test_failures_before_any_observation_do_not_create_an_invalid_review_transition() -> None:
@@ -99,10 +111,47 @@ def test_failures_before_any_observation_do_not_create_an_invalid_review_transit
 
 
 def test_consumed_evidence_cannot_be_replayed() -> None:
-    estimate = estimate_fixture(supporting_evidence_ids=("e-1",))
+    estimate = estimate_fixture(
+        supporting_evidence_ids=("e-1",),
+        supporting_observation_ids=("o-e-1",),
+    )
     assert policy().propose_change(
         estimate, (evidence("e-1", "a-1"), evidence("e-2", "a-2"))
     ) is None
+
+
+def test_consumed_observation_cannot_be_replayed_under_a_new_evidence_id() -> None:
+    current = estimate_fixture()
+    first_batch = (
+        evidence("e-old", "a-1", observation_id="obs-1"),
+        evidence("e-2", "a-2", observation_id="obs-2"),
+    )
+    transition = policy().propose_change(current, first_batch)
+
+    assert transition is not None
+    updated = current.apply(transition)
+    assert updated.version == current.version + 1
+    assert updated.supporting_evidence_ids == ("e-old", "e-2")
+    assert updated.supporting_observation_ids == ("obs-1", "obs-2")
+    replayed = (
+        evidence("e-alias", "a-1", observation_id="obs-1"),
+        evidence("e-3", "a-3", observation_id="obs-3"),
+    )
+
+    assert policy().propose_change(updated, replayed) is None
+
+
+def test_estimate_rejects_stale_or_replayed_proposals() -> None:
+    current = estimate_fixture()
+    transition = policy().propose_change(
+        current,
+        (evidence("e-1", "a-1"), evidence("e-2", "a-2")),
+    )
+    assert transition is not None
+    updated = current.apply(transition)
+
+    with pytest.raises(InvalidLearningState, match="source state|version"):
+        updated.apply(transition)
 
 
 def test_identical_duplicate_evidence_is_counted_once() -> None:
@@ -193,8 +242,19 @@ def policy() -> ProgressionPolicy:
     )
 
 
-def estimate_fixture(*, state: CompetencyState = CompetencyState.EXPLORING, supporting_evidence_ids: tuple[str, ...] = ()) -> SkillEstimate:
-    return SkillEstimate("learner-1", "units-tens", state, supporting_evidence_ids=supporting_evidence_ids)
+def estimate_fixture(
+    *,
+    state: CompetencyState = CompetencyState.EXPLORING,
+    supporting_evidence_ids: tuple[str, ...] = (),
+    supporting_observation_ids: tuple[str, ...] = (),
+) -> SkillEstimate:
+    return SkillEstimate(
+        "learner-1",
+        "units-tens",
+        state,
+        supporting_evidence_ids=supporting_evidence_ids,
+        supporting_observation_ids=supporting_observation_ids,
+    )
 
 
 def evidence(evidence_id: str, activity_id: str, **kwargs: object) -> EvidenceRecord:

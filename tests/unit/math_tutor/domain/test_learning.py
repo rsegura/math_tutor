@@ -86,6 +86,7 @@ def test_varied_repeated_success_can_propose_exactly_one_step() -> None:
     assert proposal.from_state is CompetencyState.EXPLORING
     assert proposal.to_state is CompetencyState.WITH_INTENSIVE_HELP
     assert proposal.evidence_ids == ("e-1", "e-2")
+    assert proposal.observation_ids == ("o-e-1", "o-e-2")
 
 
 def test_low_confidence_stt_cannot_lower_competency() -> None:
