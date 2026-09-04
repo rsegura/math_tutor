@@ -10,7 +10,12 @@ from math_tutor.domain.learning import (
     ProposedProfileChange, SkillEstimate,
 )
 from math_tutor.domain.activities import Activity, StructuredAnswer
-from math_tutor.domain.evidence import Observation, ObservationOutcome, TranscriptionReliabilityPolicy
+from math_tutor.domain.evidence import (
+    EvidenceRecord,
+    Observation,
+    ObservationOutcome,
+    TranscriptionReliabilityPolicy,
+)
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.application.ports import ActivityProgress, MutationBatch, TutoringEvent
 from math_tutor.application.results import CommandResult, CommandStatus
@@ -24,6 +29,7 @@ LEGACY_PROGRESS_JSON = '{"$dataclass":"math_tutor.application.ports:ActivityProg
 LEGACY_ESTIMATE_JSON = '{"$dataclass":"math_tutor.domain.learning:SkillEstimate","fields":{"learner_id":"learner-1","objective_id":"objective-1","state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"not-observed"},"supporting_evidence_ids":{"$tuple":[]},"supporting_observation_ids":{"$tuple":[]},"version":1}}'
 LEGACY_PROPOSAL_JSON = '{"$dataclass":"math_tutor.domain.learning:ProposedProfileChange","fields":{"evidence_ids":{"$tuple":["evidence-1"]},"from_state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"not-observed"},"learner_id":"learner-1","objective_id":"objective-1","observation_ids":{"$tuple":["observation-1"]},"policy_version":"policy-v1","to_state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"exploring"},"estimate_version":1}}'
 LEGACY_COMMAND_RESULT_JSON = '{"$dataclass":"math_tutor.application.results:CommandResult","fields":{"command_id":"legacy-command","payload":{"$mapping":[["spoken","Muy bien"],["score",5]]},"reason":"stored","replayed":false,"status":{"$enum":"math_tutor.application.results:CommandStatus","value":"applied"}}}'
+LEGACY_GENERALIZED_PROPOSAL_JSON = '{"$dataclass":"math_tutor.domain.learning:ProposedProfileChange","fields":{"evidence_ids":{"$tuple":["evidence-1","evidence-2"]},"from_state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"independent"},"learner_id":"learner-1","objective_id":"objective-1","observation_ids":{"$tuple":["observation-1","observation-2"]},"policy_version":"policy-v1","to_state":{"$enum":"math_tutor.domain.learning:CompetencyState","value":"generalized"},"estimate_version":1}}'
 
 
 def test_failing_migration_does_not_leave_schema_or_version(tmp_path):
@@ -107,6 +113,127 @@ def test_v1_database_is_upgraded_without_rewriting_history_or_losing_data(tmp_pa
         assert [row[0] for row in upgraded.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3]
         assert "session_id" in {row[1] for row in upgraded.execute("PRAGMA table_info(profile_change_proposals)")}
         assert "source_session_id" in {row[1] for row in upgraded.execute("PRAGMA table_info(proposal_evidence)")}
+        assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_frozen_v1_multisession_proposal_preserves_current_and_source_sessions(tmp_path):
+    database = tmp_path / "legacy-multisession.db"
+    original_v1 = Path(
+        "src/math_tutor/infrastructure/persistence/migrations/0001_initial.sql"
+    ).read_text()
+    connection = sqlite3.connect(database)
+    connection.executescript(original_v1)
+    connection.execute("INSERT INTO schema_migrations(version) VALUES(1)")
+    connection.execute(
+        "INSERT INTO learners(learner_id,curriculum_snapshot,curriculum_version) "
+        "VALUES('learner-1','old','v1')"
+    )
+    connection.execute(
+        "INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version) "
+        "VALUES('plan-1',1,'learner-1',?,'policy-v1')",
+        (LEGACY_PLAN_JSON,),
+    )
+    for number in (1, 2):
+        session_json = LEGACY_SESSION_JSON.replace("session-1", f"session-{number}")
+        activity_json = LEGACY_ACTIVITY_JSON.replace("activity-1", f"activity-{number}")
+        observation_json = (
+            LEGACY_OBSERVATION_JSON
+            .replace("session-1", f"session-{number}")
+            .replace("activity-1", f"activity-{number}")
+            .replace("observation-1", f"observation-{number}")
+        )
+        connection.execute(
+            "INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) "
+            "VALUES(?, 'learner-1','plan-1',1,?,1,1)",
+            (f"session-{number}", session_json),
+        )
+        connection.execute(
+            "INSERT INTO activities(session_id,activity_id,activity_json) VALUES(?,?,?)",
+            (f"session-{number}", f"activity-{number}", activity_json),
+        )
+        connection.execute(
+            "INSERT INTO observations(observation_id,session_id,learner_id,objective_id,observation_json) "
+            "VALUES(?,?,'learner-1','objective-1',?)",
+            (f"observation-{number}", f"session-{number}", observation_json),
+        )
+        connection.execute(
+            "INSERT INTO evidence_records(evidence_id,observation_id,learner_id,objective_id,reason_for_retention) "
+            "VALUES(?,?,'learner-1','objective-1','legacy')",
+            (f"evidence-{number}", f"observation-{number}"),
+        )
+    estimate_json = LEGACY_ESTIMATE_JSON.replace("not-observed", "independent")
+    connection.execute(
+        "INSERT INTO skill_estimates(learner_id,objective_id,estimate_json,version) "
+        "VALUES('learner-1','objective-1',?,1)",
+        (estimate_json,),
+    )
+    connection.execute(
+        "INSERT INTO profile_change_proposals(learner_id,objective_id,proposal_json,estimate_version,policy_version) "
+        "VALUES('learner-1','objective-1',?,1,'policy-v1')",
+        (LEGACY_GENERALIZED_PROPOSAL_JSON,),
+    )
+    connection.commit()
+    connection.close()
+
+    migrate(database)
+
+    repository = SQLiteTutoringRepository(database)
+    expected_plan = LearningPlan(
+        "learner-1", ("objective-1",), ("objective-1",),
+        PresentationProfile.for_age(8), "plan-1",
+    )
+    expected_activity = Activity(
+        "template-1", "objective-1", 1, "2 + 3", {"a": 2, "b": 3},
+        StructuredAnswer.evaluable(ExpectedAnswerKind.INTEGER, {"answer": 5}),
+        (), (),
+    )
+    expected_observations = tuple(
+        Observation(
+            f"observation-{number}", "learner-1", f"session-{number}",
+            "objective-1", f"activity-{number}", ObservationOutcome.CORRECT,
+            .95, 0, TranscriptionReliabilityPolicy(.7), "cinco",
+        )
+        for number in (1, 2)
+    )
+    assert repository.load_plan("plan-1", 1) == expected_plan
+    for number, expected_observation in zip((1, 2), expected_observations, strict=True):
+        assert repository.load_state(f"session-{number}").session == LearningSession.start(
+            session_id=f"session-{number}", plan=expected_plan
+        )
+        assert repository.load_activity(
+            f"session-{number}", f"activity-{number}"
+        ) == expected_activity
+        assert repository.load_observation(
+            f"session-{number}", f"observation-{number}"
+        ).observation == expected_observation
+    assert repository.load_evidence("learner-1", "objective-1") == tuple(
+        EvidenceRecord(
+            f"evidence-{number}", "learner-1", observation, "legacy"
+        )
+        for number, observation in zip((1, 2), expected_observations, strict=True)
+    )
+    assert repository.load_estimate("learner-1", "objective-1") == SkillEstimate(
+        "learner-1", "objective-1", CompetencyState.INDEPENDENT
+    )
+    expected = ProposedProfileChange(
+        "learner-1", "objective-1", CompetencyState.INDEPENDENT,
+        CompetencyState.GENERALIZED, ("evidence-1", "evidence-2"),
+        ("observation-1", "observation-2"), 1, "policy-v1",
+    )
+    assert repository.load_profile_change_proposals(
+        "learner-1", "objective-1"
+    ) == (expected,)
+    with sqlite3.connect(database) as upgraded:
+        assert upgraded.execute(
+            "SELECT session_id FROM profile_change_proposals"
+        ).fetchone() == ("session-2",)
+        assert upgraded.execute(
+            "SELECT evidence_id,source_session_id FROM proposal_evidence "
+            "ORDER BY evidence_id"
+        ).fetchall() == [
+            ("evidence-1", "session-1"),
+            ("evidence-2", "session-2"),
+        ]
         assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
