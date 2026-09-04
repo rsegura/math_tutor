@@ -137,6 +137,7 @@ git commit -m "feat: model tutoring curriculum graph"
 - Create: `src/math_tutor/infrastructure/curriculum_loader.py`
 - Create: `src/math_tutor/curricula/primary-math-v1.yaml`
 - Create: `src/math_tutor/curricula/activity-templates-v1.yaml`
+- Create: `tests/unit/math_tutor/domain/test_templates.py`
 - Create: `tests/unit/math_tutor/infrastructure/test_curriculum_loader.py`
 - Create: `tests/unit/math_tutor/infrastructure/test_template_catalog.py`
 
@@ -150,29 +151,37 @@ parameterised templates, at least one template for every objective in the
 vertical slice, and resolvable references to each objective's known error
 patterns and ordered hints.
 
+Define the canonical template API through tests: immutable `ActivityTemplate`,
+`ActivityTemplateCatalog`, `ActivityFamily`, `ParameterBounds`, and
+`ExpectedAnswerSpec`. The infrastructure loader must return that catalog with
+typed `ActivityTemplate` entries and must never expose raw YAML dictionaries to
+the domain or generator.
+
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/math_tutor/infrastructure/test_curriculum_loader.py tests/unit/math_tutor/infrastructure/test_template_catalog.py -v"
+make test ARGS="tests/unit/math_tutor/domain/test_templates.py tests/unit/math_tutor/infrastructure/test_curriculum_loader.py tests/unit/math_tutor/infrastructure/test_template_catalog.py -v"
 ```
 
 **Step 3: Implement loader and minimal content**
 
-Use `yaml.safe_load`; validate exact keys before constructing domain objects.
-The curriculum YAML contains 8–12 objectives, reviewed Spanish wording, known
-error patterns, and ordered hints. The separate activity catalog contains
-30–50 reviewed template definitions with objective ID, activity family,
-parameter bounds, difficulty bounds, expected-answer specification, applicable
+Implement the canonical template types in `math_tutor.domain.templates`. Use
+`yaml.safe_load` only at the infrastructure boundary, validate exact keys, and
+construct `ActivityTemplateCatalog` before returning. The curriculum YAML
+contains 8–12 objectives, reviewed Spanish wording, known error patterns, and
+ordered hints. The separate activity catalog contains 30–50 reviewed template
+definitions with objective ID, activity family, typed parameter bounds,
+difficulty bounds, typed expected-answer specification, applicable
 error-pattern IDs, and hint IDs. It contains no generated learner data.
 
 **Step 4: Verify GREEN**
 
-Run both test files; expected: PASS.
+Run the three test files; expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add src/math_tutor/domain/templates.py src/math_tutor/curricula src/math_tutor/infrastructure tests/unit/math_tutor/infrastructure
+git add src/math_tutor/domain/templates.py src/math_tutor/curricula src/math_tutor/infrastructure tests/unit/math_tutor/domain/test_templates.py tests/unit/math_tutor/infrastructure
 git commit -m "feat: load primary math curriculum slice"
 ```
 
@@ -192,14 +201,17 @@ subtraction when the template forbids it, and separation of `CORRECT`,
 `INCORRECT`, `AMBIGUOUS`, and `NOT_EVALUABLE`. Add a corpus gate that generates
 an activity from every one of the 30–50 catalog entries and proves that its
 objective, error-pattern references, hints, operands, and expected answer stay
-inside the reviewed definition.
+inside the reviewed definition. Assert that the generation API consumes the
+canonical `ActivityTemplate` type and that `activities.py` exports no competing
+template model or raw-dictionary adapter.
 
 Example:
 
 ```python
 def test_place_value_answer_is_checked_without_the_llm():
-    activity = place_value_activity(number=34)
-    result = verify_answer(activity, StructuredAnswer(tens=3, units=4))
+    template = loaded_catalog.template("place-value-units-tens")
+    activity = generate_activity(template, seed=7, difficulty=1)
+    result = verify_answer(activity, activity.expected_answer)
     assert result.outcome is AnswerOutcome.CORRECT
 ```
 
@@ -211,11 +223,15 @@ make test ARGS="tests/unit/math_tutor/domain/test_activities.py tests/unit/math_
 
 **Step 3: Implement minimum deterministic engine**
 
-Create immutable `Activity`, `ActivityTemplate`, `StructuredAnswer`, and
-`AnswerCheck`. The generator consumes the reviewed template catalog rather
-than hardcoding a few example activities. Keep natural-language interpretation
-outside this module. Every generated activity carries the expected structured
-answer, objective ID, template ID, and applicable error-pattern and hint IDs.
+Import and consume the canonical `ActivityTemplate` and
+`ActivityTemplateCatalog` from `math_tutor.domain.templates`; do not redefine
+them or translate them into incompatible dictionaries. Create immutable
+`Activity`, `StructuredAnswer`, and `AnswerCheck`, plus deterministic generation
+and verification functions. The generator consumes the reviewed template
+catalog rather than hardcoding a few example activities. Keep natural-language
+interpretation outside this module. Every generated activity carries the
+expected structured answer, objective ID, template ID, and applicable
+error-pattern and hint IDs.
 
 **Step 4: Verify GREEN**
 
@@ -522,7 +538,10 @@ git commit -m "feat: route voice sessions to tutoring runtime"
 - Modify: `src/math_tutor/infrastructure/persistence/migrator.py`
 - Modify: `src/math_tutor/infrastructure/persistence/repositories.py`
 - Modify: `src/math_tutor/agent/voice_agent.py`
+- Modify: `src/math_tutor/agent/runtime_factory.py`
+- Modify: `src/math_tutor/agent/worker.py`
 - Modify: `.env.example`
+- Create: `tests/unit/math_tutor/agent/test_retention_sweeper_lifecycle.py`
 - Create: `tests/unit/math_tutor/infrastructure/test_evidence_clips.py`
 - Create: `tests/unit/math_tutor/infrastructure/test_clip_retention.py`
 - Create: `tests/integration/math_tutor/test_selective_audio_retention.py`
@@ -537,12 +556,17 @@ default, no encoded audio can be persisted without an active explicit consent
 record for that learner and session, revocation blocks further persistence,
 retention cannot exceed the 30-day hard ceiling, expired clips are deleted, and
 an authorised explicit-delete command removes both file and metadata without
-leaving an accessible orphan.
+leaving an accessible orphan. Add worker lifecycle tests proving an immediate
+startup sweep before jobs are accepted, periodic sweeps at a configured bounded
+interval, no overlapping sweeps, and cancellation plus awaited shutdown during
+worker teardown. Revocation tests must prove that all existing files and live
+metadata in the consent scope are deleted, and that repeating revocation,
+sweep, or explicit deletion succeeds without error or duplicate side effects.
 
 **Step 2: Verify RED**
 
 ```bash
-make test ARGS="tests/unit/math_tutor/infrastructure/test_evidence_clips.py tests/unit/math_tutor/infrastructure/test_clip_retention.py tests/integration/math_tutor/test_selective_audio_retention.py -v"
+make test ARGS="tests/unit/math_tutor/agent/test_retention_sweeper_lifecycle.py tests/unit/math_tutor/infrastructure/test_evidence_clips.py tests/unit/math_tutor/infrastructure/test_clip_retention.py tests/integration/math_tutor/test_selective_audio_retention.py -v"
 ```
 
 **Step 3: Implement clip capture**
@@ -559,6 +583,17 @@ configured math-tutor evidence directory with opaque IDs; store no transcript
 in filenames or logs. Persist consent scope, revocation, clip expiry, and
 deletion audit data through migration `0002_audio_consent.sql`.
 
+The worker runtime owns exactly one `RetentionSweeper`. Its factory validates
+`AUDIO_RETENTION_SWEEP_INTERVAL_SECONDS` in the range 60–3600 seconds (default
+300), runs `sweep_once()` after persistence startup and before accepting voice
+jobs, then starts the periodic task. Teardown signals cancellation and awaits
+the task before repositories are closed. A per-process async lock serializes
+startup, periodic, revocation, and manual sweeps. Cross-process safety uses an
+atomic repository compare-and-set from live to deleting; deleting an
+already-missing file is success, and the transaction finishes with one durable
+deletion tombstone. Sweep, revoke, and delete operations are idempotent and safe
+to retry after partial failure.
+
 **Step 4: Verify GREEN**
 
 Run task tests; expected: PASS.
@@ -566,7 +601,7 @@ Run task tests; expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/math_tutor/domain/audio_consent.py src/math_tutor/agent/voice_agent.py src/math_tutor/infrastructure/evidence_clips.py src/math_tutor/infrastructure/clip_retention.py src/math_tutor/infrastructure/persistence .env.example tests/unit/math_tutor/infrastructure tests/integration/math_tutor/test_selective_audio_retention.py
+git add src/math_tutor/domain/audio_consent.py src/math_tutor/agent src/math_tutor/infrastructure/evidence_clips.py src/math_tutor/infrastructure/clip_retention.py src/math_tutor/infrastructure/persistence .env.example tests/unit/math_tutor/agent/test_retention_sweeper_lifecycle.py tests/unit/math_tutor/infrastructure tests/integration/math_tutor/test_selective_audio_retention.py
 git commit -m "feat: retain only selected tutoring audio evidence"
 ```
 
