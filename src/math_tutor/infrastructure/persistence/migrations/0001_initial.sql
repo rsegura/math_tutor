@@ -13,12 +13,14 @@ CREATE TABLE IF NOT EXISTS curriculum_snapshots(
 CREATE TABLE IF NOT EXISTS learning_plans(
  plan_id TEXT NOT NULL, version INTEGER NOT NULL, learner_id TEXT NOT NULL REFERENCES learners(learner_id),
  plan_json TEXT NOT NULL, policy_version TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
- PRIMARY KEY(plan_id, version)
+ PRIMARY KEY(plan_id, version), UNIQUE(plan_id, version, learner_id)
 );
 CREATE TABLE IF NOT EXISTS learning_sessions(
  session_id TEXT PRIMARY KEY, learner_id TEXT NOT NULL REFERENCES learners(learner_id), plan_id TEXT NOT NULL,
  plan_version INTEGER NOT NULL, session_json TEXT NOT NULL, version INTEGER NOT NULL, profile_version INTEGER NOT NULL,
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(session_id, learner_id),
+ FOREIGN KEY(plan_id, plan_version, learner_id) REFERENCES learning_plans(plan_id, version, learner_id)
 );
 CREATE TABLE IF NOT EXISTS activities(
  session_id TEXT NOT NULL REFERENCES learning_sessions(session_id), activity_id TEXT NOT NULL, activity_json TEXT NOT NULL,
@@ -31,11 +33,15 @@ CREATE TABLE IF NOT EXISTS activity_progress(
 CREATE TABLE IF NOT EXISTS observations(
  observation_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES learning_sessions(session_id), learner_id TEXT NOT NULL,
  objective_id TEXT NOT NULL, observation_json TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(observation_id, learner_id, session_id, objective_id),
+ FOREIGN KEY(session_id, learner_id) REFERENCES learning_sessions(session_id, learner_id)
 );
 CREATE TABLE IF NOT EXISTS evidence_records(
  evidence_id TEXT PRIMARY KEY, observation_id TEXT NOT NULL UNIQUE REFERENCES observations(observation_id), learner_id TEXT NOT NULL,
- objective_id TEXT NOT NULL, reason_for_retention TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ session_id TEXT NOT NULL, objective_id TEXT NOT NULL, reason_for_retention TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(evidence_id, learner_id, session_id),
+ FOREIGN KEY(observation_id, learner_id, session_id, objective_id) REFERENCES observations(observation_id, learner_id, session_id, objective_id)
 );
 CREATE TABLE IF NOT EXISTS evidence_interpretations(
  evidence_id TEXT NOT NULL REFERENCES evidence_records(evidence_id), version INTEGER NOT NULL,
@@ -71,5 +77,6 @@ CREATE TABLE IF NOT EXISTS processed_commands(
 CREATE TABLE IF NOT EXISTS evidence_clips(
  clip_id TEXT PRIMARY KEY, evidence_id TEXT NOT NULL UNIQUE REFERENCES evidence_records(evidence_id), learner_id TEXT NOT NULL,
  session_id TEXT NOT NULL, duration_seconds REAL NOT NULL CHECK(duration_seconds > 0 AND duration_seconds <= 30),
- storage_key TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ storage_key TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(evidence_id, learner_id, session_id) REFERENCES evidence_records(evidence_id, learner_id, session_id)
 );

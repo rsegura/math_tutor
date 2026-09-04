@@ -1,4 +1,5 @@
 import sqlite3
+from dataclasses import replace
 
 from math_tutor.application.ports import (
     ActivityProgress, ActivityProgressExpectation, CommitOutcome, MutationBatch,
@@ -158,3 +159,94 @@ def test_curriculum_snapshots_are_immutable_across_catalog_updates(tmp_path):
     repo.save_learner("learner-1", curriculum_snapshot="new-yaml", curriculum_version="curriculum-v2")
     assert repo.load_curriculum_snapshot("learner-1", "curriculum-v1") == "curriculum-yaml"
     assert repo.load_curriculum_snapshot("learner-1", "curriculum-v2") == "new-yaml"
+
+
+def test_batch_rejects_cross_session_and_cross_learner_payloads(tmp_path):
+    repo = repository(tmp_path)
+    wrong_session = replace(batch(), session=replace(session(2), session_id="other"))
+    assert repo.commit_once(wrong_session).reason == "batch-session-mismatch"
+    wrong_observation = replace(batch(), observations=(replace(observation(), learner_id="other"),))
+    assert repo.commit_once(wrong_observation).reason == "batch-learner-mismatch"
+    assert repo.load_command_result("command-1") is None
+
+
+def test_every_progress_update_requires_exact_cas_expectation(tmp_path):
+    repo = repository(tmp_path)
+    repo.save_activity_progress("session-1", ActivityProgress("a", 0, 0, 1))
+    result = CommandResult("c", CommandStatus.APPLIED, "applied")
+    blind = MutationBatch("c", "fp", "session-1", 1, 1, result,
+                          activity_progress=(ActivityProgress("a", 1, 0, 1, version=2),))
+    assert repo.commit_once(blind).reason == "missing-activity-progress-expectation"
+    stale = replace(blind, expected_activity_progress=(ActivityProgressExpectation("a", 9),))
+    assert repo.commit_once(stale).reason == "stale-activity-progress-version"
+    assert repo.load_state("session-1").progress_for("a").version == 1
+
+
+def test_bootstrap_helpers_never_blindly_overwrite_versioned_state(tmp_path):
+    repo = repository(tmp_path)
+    estimate = SkillEstimate("learner-1", "objective-1", CompetencyState.EXPLORING, version=2)
+    try:
+        repo.save_estimate(estimate)
+    except ValueError as error:
+        assert "already exists" in str(error)
+    else:
+        raise AssertionError("blind estimate overwrite accepted")
+
+
+def test_clip_ownership_is_derived_from_canonical_evidence(tmp_path):
+    repo = repository(tmp_path)
+    repo.commit_once(batch())
+    repo.save_evidence_clip("clip-derived", "evidence-1", duration_seconds=20,
+                            storage_key="clips/derived.enc", expires_at="2026-09-10T00:00:00Z")
+    clip = repo.load_evidence_clip("clip-derived")
+    assert (clip.learner_id, clip.session_id) == ("learner-1", "session-1")
+    try:
+        repo.save_evidence_clip("clip-bad", "evidence-1", "other", "session-1",
+                                duration_seconds=20, storage_key="x", expires_at="2026-09-10T00:00:00Z")
+    except ValueError as error:
+        assert "ownership" in str(error)
+    else:
+        raise AssertionError("caller-controlled clip owner accepted")
+
+
+def test_interpretation_revisions_append_with_version_cas(tmp_path):
+    repo = repository(tmp_path)
+    repo.commit_once(batch())
+    repo.append_interpretation_revision("evidence-1", expected_version=1,
+                                        interpretation="corregida", reason="terapeuta")
+    assert [r.version for r in repo.load_evidence("learner-1", "objective-1")[0].interpretations] == [1, 2]
+    try:
+        repo.append_interpretation_revision("evidence-1", expected_version=1,
+                                            interpretation="stale", reason="stale")
+    except ValueError as error:
+        assert "stale" in str(error)
+    else:
+        raise AssertionError("stale interpretation append accepted")
+
+
+def test_late_failure_rolls_back_all_prior_writes_and_command(tmp_path):
+    repo = repository(tmp_path)
+    valid = batch()
+    duplicate = replace(valid.evidence[0], evidence_id="evidence-2")
+    broken = replace(valid, evidence=(valid.evidence[0], duplicate))
+    try:
+        repo.commit_once(broken)
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("late duplicate observation write did not fail")
+    assert repo.load_activity("session-1", "activity-1") is None
+    assert repo.load_observation("session-1", "observation-1") is None
+    assert repo.load_command_result("command-1") is None
+
+
+def test_session_must_reference_plan_version_owned_by_same_learner(tmp_path):
+    repo = repository(tmp_path)
+    foreign = LearningSession("foreign-session", "learner-1", "missing-plan", 1,
+                              ("objective-1",), ("objective-1",))
+    try:
+        repo.save_session(foreign, profile_version=1)
+    except ValueError as error:
+        assert "plan" in str(error)
+    else:
+        raise AssertionError("session without owned plan version accepted")
