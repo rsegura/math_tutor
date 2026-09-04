@@ -289,6 +289,105 @@ def test_unrelated_custom_version_two_migration_is_not_rewritten(tmp_path):
         ).fetchone() == ("custom_v2",)
 
 
+def test_ambiguous_legacy_proposal_events_fail_closed_without_touching_v1(tmp_path):
+    database = tmp_path / "ambiguous-provenance.db"
+    original_v1 = Path(
+        "src/math_tutor/infrastructure/persistence/migrations/0001_initial.sql"
+    ).read_text()
+    connection = sqlite3.connect(database)
+    connection.executescript(original_v1)
+    connection.execute("INSERT INTO schema_migrations(version) VALUES(1)")
+    connection.execute(
+        "INSERT INTO learners(learner_id,curriculum_snapshot,curriculum_version) "
+        "VALUES('learner-1','frozen-curriculum','v1')"
+    )
+    connection.execute(
+        "INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version) "
+        "VALUES('plan-1',1,'learner-1',?,'policy-v1')",
+        (LEGACY_PLAN_JSON,),
+    )
+    for number in (1, 2):
+        connection.execute(
+            "INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) "
+            "VALUES(?,'learner-1','plan-1',1,?,1,1)",
+            (
+                f"session-{number}",
+                LEGACY_SESSION_JSON.replace("session-1", f"session-{number}"),
+            ),
+        )
+    connection.execute(
+        "INSERT INTO activities(session_id,activity_id,activity_json) "
+        "VALUES('session-1','activity-1',?)",
+        (LEGACY_ACTIVITY_JSON,),
+    )
+    connection.execute(
+        "INSERT INTO observations(observation_id,session_id,learner_id,objective_id,observation_json) "
+        "VALUES('observation-1','session-1','learner-1','objective-1',?)",
+        (LEGACY_OBSERVATION_JSON,),
+    )
+    connection.execute(
+        "INSERT INTO evidence_records(evidence_id,observation_id,learner_id,objective_id,reason_for_retention) "
+        "VALUES('evidence-1','observation-1','learner-1','objective-1','legacy')"
+    )
+    connection.execute(
+        "INSERT INTO skill_estimates(learner_id,objective_id,estimate_json,version) "
+        "VALUES('learner-1','objective-1',?,1)",
+        (LEGACY_ESTIMATE_JSON,),
+    )
+    connection.execute(
+        "INSERT INTO profile_change_proposals(learner_id,objective_id,proposal_json,estimate_version,policy_version) "
+        "VALUES('learner-1','objective-1',?,1,'policy-v1')",
+        (LEGACY_PROPOSAL_JSON,),
+    )
+    for number in (1, 2):
+        command_id = f"proposal-command-{number}"
+        result = LEGACY_PROPOSAL_RESULT_JSON.replace(
+            '"command_id":"proposal-command"',
+            f'"command_id":"{command_id}"',
+        )
+        connection.execute(
+            "INSERT INTO tutoring_events(command_id,kind,session_id,objective_id,detail) "
+            "VALUES(?,'profile-change-proposed',?,'objective-1','exploring')",
+            (command_id, f"session-{number}"),
+        )
+        connection.execute(
+            "INSERT INTO processed_commands(command_id,command_fingerprint,result_json) "
+            "VALUES(?,?,?)",
+            (command_id, f"fingerprint-{number}", result),
+        )
+    tables = tuple(
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    )
+    before = {
+        table: connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+        for table in tables
+    }
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL constraint failed"):
+        migrate(database)
+
+    with sqlite3.connect(database) as unchanged:
+        assert unchanged.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,)]
+        assert unchanged.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_v2'"
+        ).fetchall() == []
+        after = {
+            table: unchanged.execute(
+                f'SELECT * FROM "{table}" ORDER BY rowid'
+            ).fetchall()
+            for table in tables
+        }
+    assert after == before
+
+
 def test_frozen_legacy_codec_payloads_survive_upgrade_and_replay(tmp_path):
     """Payloads emitted by ccb4071 remain durable after the codec changed."""
     database = tmp_path / "legacy-codec.db"
