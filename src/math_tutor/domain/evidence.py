@@ -25,21 +25,41 @@ def _require_id(value: object, label: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class TranscriptionReliabilityPolicy:
+    """Required boundary policy for attributing a transcription to a learner."""
+
+    min_confidence: float
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.min_confidence, bool)
+            or not isinstance(self.min_confidence, (int, float))
+            or not 0 <= self.min_confidence <= 1
+        ):
+            raise InvalidEvidence(
+                "minimum reliable STT confidence must be between 0 and 1"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class Observation:
     """Observed facts from one activity turn; never revised in place."""
 
     observation_id: str
+    learner_id: str
     session_id: str
     objective_id: str
     activity_id: str
     outcome: ObservationOutcome
     stt_confidence: float
     assistance_level: int
+    transcription_policy: TranscriptionReliabilityPolicy
     response_text: str | None = None
 
     def __post_init__(self) -> None:
         for value, label in (
             (self.observation_id, "observation id"),
+            (self.learner_id, "learner id"),
             (self.session_id, "session id"),
             (self.objective_id, "objective id"),
             (self.activity_id, "activity id"),
@@ -53,6 +73,10 @@ class Observation:
             or not 0 <= self.stt_confidence <= 1
         ):
             raise InvalidEvidence("STT confidence must be between 0 and 1")
+        if not isinstance(self.transcription_policy, TranscriptionReliabilityPolicy):
+            raise TypeError("transcription_policy must be a TranscriptionReliabilityPolicy")
+        if self.stt_confidence < self.transcription_policy.min_confidence:
+            object.__setattr__(self, "outcome", ObservationOutcome.NOT_EVALUABLE)
         if (
             isinstance(self.assistance_level, bool)
             or not isinstance(self.assistance_level, int)
@@ -67,6 +91,7 @@ class Observation:
         cls,
         *,
         observation_id: str,
+        learner_id: str,
         session_id: str,
         objective_id: str,
         activity_id: str,
@@ -74,16 +99,12 @@ class Observation:
         stt_confidence: float,
         assistance_level: int,
         response_text: str | None = None,
-        min_reliable_stt_confidence: float = 0.0,
+        transcription_policy: TranscriptionReliabilityPolicy,
     ) -> Observation:
         """Build facts while refusing to attribute unreliable STT as failure."""
 
-        if (
-            isinstance(min_reliable_stt_confidence, bool)
-            or not isinstance(min_reliable_stt_confidence, (int, float))
-            or not 0 <= min_reliable_stt_confidence <= 1
-        ):
-            raise InvalidEvidence("minimum reliable STT confidence must be between 0 and 1")
+        if not isinstance(transcription_policy, TranscriptionReliabilityPolicy):
+            raise TypeError("transcription_policy must be a TranscriptionReliabilityPolicy")
         try:
             raw_outcome = (
                 answer_outcome.value
@@ -93,16 +114,18 @@ class Observation:
             outcome = ObservationOutcome(raw_outcome)
         except (TypeError, ValueError) as error:
             raise InvalidEvidence("unknown answer outcome") from error
-        if stt_confidence < min_reliable_stt_confidence:
+        if stt_confidence < transcription_policy.min_confidence:
             outcome = ObservationOutcome.NOT_EVALUABLE
         return cls(
             observation_id=observation_id,
+            learner_id=learner_id,
             session_id=session_id,
             objective_id=objective_id,
             activity_id=activity_id,
             outcome=outcome,
             stt_confidence=stt_confidence,
             assistance_level=assistance_level,
+            transcription_policy=transcription_policy,
             response_text=response_text,
         )
 
@@ -127,14 +150,18 @@ class EvidenceRecord:
     """Retained observation plus its independent interpretation history."""
 
     evidence_id: str
+    learner_id: str
     observation: Observation
     reason_for_retention: str
     interpretations: tuple[EvidenceRevision, ...] = ()
 
     def __post_init__(self) -> None:
         _require_id(self.evidence_id, "evidence id")
+        _require_id(self.learner_id, "learner id")
         if not isinstance(self.observation, Observation):
             raise InvalidEvidence("evidence must reference an Observation")
+        if self.observation.learner_id != self.learner_id:
+            raise InvalidEvidence("evidence learner must match observation learner")
         _require_id(self.reason_for_retention, "retention reason")
         revisions = tuple(self.interpretations)
         if not all(isinstance(item, EvidenceRevision) for item in revisions):
@@ -148,6 +175,7 @@ class EvidenceRecord:
         cls,
         *,
         evidence_id: str,
+        learner_id: str,
         observation: Observation,
         interpretation: str | None = None,
         reason_for_retention: str = "progression-evidence",
@@ -155,7 +183,7 @@ class EvidenceRecord:
         revisions = ()
         if interpretation is not None:
             revisions = (EvidenceRevision(1, interpretation, "initial-proposal"),)
-        return cls(evidence_id, observation, reason_for_retention, revisions)
+        return cls(evidence_id, learner_id, observation, reason_for_retention, revisions)
 
     @property
     def current_interpretation(self) -> str | None:
