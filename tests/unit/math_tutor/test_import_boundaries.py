@@ -92,9 +92,16 @@ def _imports(path: Path, source_root: Path):
             for alias in node.names:
                 yield node.lineno, alias.name
         elif isinstance(node, ast.ImportFrom):
-            yield node.lineno, _resolve_from_import(
+            resolved = _resolve_from_import(
                 node, path=path, source_root=source_root
             )
+            if node.level == 0 and resolved == "math_tutor":
+                for alias in node.names:
+                    module = (resolved if alias.name == "*"
+                              else f"{resolved}.{alias.name}")
+                    yield node.lineno, module
+            else:
+                yield node.lineno, resolved
 
 
 def _reason_for(module: str, layer: str) -> str | None:
@@ -129,6 +136,10 @@ def _layer_violations(source_root: Path, layer: str):
                 )
 
 
+def test_src_is_only_a_source_root() -> None:
+    assert not (SOURCE_ROOT / "__init__.py").exists()
+
+
 @pytest.mark.parametrize("layer", sorted(ALLOWED_MATH_TUTOR_NAMESPACES))
 def test_each_architecture_layer_is_a_non_empty_package(layer: str) -> None:
     package_dir = SOURCE_ROOT / "math_tutor" / layer
@@ -159,6 +170,7 @@ def test_real_math_tutor_tree_respects_import_direction() -> None:
         ("application", "import openai", "openai"),
         ("application", "import sqlite3", "sqlite3"),
         ("harness", "import aiosqlite", "aiosqlite"),
+        ("domain", "import src", "src"),
         ("domain", "from src.math_tutor.domain import model", "src.math_tutor.domain"),
         ("domain", "from domain import screening", "domain"),
         ("application", "from application import screening_service", "application"),
@@ -184,6 +196,7 @@ def test_boundary_scan_rejects_forbidden_imports_in_temporary_tree(
     ("layer", "source"),
     [
         ("domain", "from dataclasses import dataclass\nfrom . import values"),
+        ("domain", "from math_tutor import domain"),
         (
             "application",
             "from math_tutor.domain import values\nfrom .ports import StorePort",
