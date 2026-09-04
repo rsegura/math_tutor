@@ -8,7 +8,7 @@ from being released while the authoritative state changes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from threading import Event, Lock
+from threading import Condition, Event, Lock
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,11 +29,15 @@ class Generation:
 class SessionRuntime:
     def __init__(self) -> None:
         self._lock = Lock()
+        self._condition = Condition(self._lock)
         self._active: dict[str, Generation] = {}
+        self._mutation_in_flight: set[str] = set()
         self._sequence = 0
 
     def start_generation(self, session_id: str) -> Generation:
-        with self._lock:
+        with self._condition:
+            while session_id in self._mutation_in_flight:
+                self._condition.wait()
             previous = self._active.get(session_id)
             if previous is not None:
                 previous._cancelled.set()
@@ -60,10 +64,18 @@ class SessionRuntime:
     def consume_generation(self, session_id: str, generation_id: str) -> bool:
         """Atomically claim the still-active generation for one mutation."""
 
-        with self._lock:
+        with self._condition:
             generation = self._active.get(session_id)
             if generation is None or generation.cancelled or generation.generation_id != generation_id:
                 return False
             generation._cancelled.set()
             del self._active[session_id]
+            self._mutation_in_flight.add(session_id)
             return True
+
+    def complete_mutation(self, session_id: str) -> None:
+        """Release generation creation after a mutation reaches a final outcome."""
+
+        with self._condition:
+            self._mutation_in_flight.discard(session_id)
+            self._condition.notify_all()

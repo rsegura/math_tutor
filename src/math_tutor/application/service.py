@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, is_dataclass, replace
+from enum import Enum
 from hashlib import sha256
+import json
 
 from math_tutor.application.ports import (
     CommitOutcome,
     MutationBatch,
+    ObservationExpectation,
     StoredActivity,
     TutoringEvent,
     TutoringRepository,
 )
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.session_runtime import SessionRuntime
-from math_tutor.domain.activities import Activity, StructuredAnswer
+from math_tutor.domain.activities import InvalidActivity, StructuredAnswer, generate_activity
 from math_tutor.domain.evidence import (
     EvidenceRecord,
     Observation,
@@ -22,6 +26,7 @@ from math_tutor.domain.evidence import (
 )
 from math_tutor.domain.learning import ProgressionPolicy
 from math_tutor.domain.mathematics import verify_answer
+from math_tutor.domain.templates import ActivityTemplateCatalog, InvalidActivityTemplate
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -44,7 +49,6 @@ class RecordAnswer(Command):
     evidence_id: str | None
     retain_evidence: bool
     reason_for_retention: str | None
-    transcription_policy: TranscriptionReliabilityPolicy
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -57,12 +61,15 @@ class CommitHint(Command):
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SelectNextActivity(Command):
     activity_id: str
-    activity: Activity
+    objective_id: str
+    template_id: str
+    seed: int
+    difficulty: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ProposeEvidence(Command):
-    observation: Observation
+    observation_id: str
     evidence_id: str
     interpretation: str
     reason_for_retention: str
@@ -71,7 +78,6 @@ class ProposeEvidence(Command):
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ProposeProfileChange(Command):
     objective_id: str
-    progression_policy: ProgressionPolicy
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -80,13 +86,64 @@ class EndSession(Command):
 
 
 class TutoringService:
-    def __init__(self, repository: TutoringRepository, runtime: SessionRuntime) -> None:
+    def __init__(
+        self,
+        repository: TutoringRepository,
+        runtime: SessionRuntime,
+        template_catalog: ActivityTemplateCatalog,
+        transcription_policy: TranscriptionReliabilityPolicy,
+        progression_policy: ProgressionPolicy,
+    ) -> None:
+        if not isinstance(template_catalog, ActivityTemplateCatalog):
+            raise TypeError("template_catalog must be an ActivityTemplateCatalog")
+        if not isinstance(transcription_policy, TranscriptionReliabilityPolicy):
+            raise TypeError("transcription_policy must be a TranscriptionReliabilityPolicy")
+        if not isinstance(progression_policy, ProgressionPolicy):
+            raise TypeError("progression_policy must be a ProgressionPolicy")
         self._repository = repository
         self._runtime = runtime
+        self._template_catalog = template_catalog
+        self._transcription_policy = transcription_policy
+        self._progression_policy = progression_policy
+
+    @staticmethod
+    def _canonical(value: object) -> object:
+        """Convert supported command values to a stable, versionable JSON tree."""
+
+        if is_dataclass(value) and not isinstance(value, type):
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "fields": {
+                    field: TutoringService._canonical(item)
+                    for field, item in sorted(
+                        (definition.name, getattr(value, definition.name))
+                        for definition in fields(value)
+                    )
+                },
+            }
+        if isinstance(value, Enum):
+            return {
+                "__enum__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "value": value.value,
+            }
+        if isinstance(value, Mapping):
+            entries = [
+                (TutoringService._canonical(key), TutoringService._canonical(item))
+                for key, item in value.items()
+            ]
+            entries.sort(key=lambda pair: json.dumps(pair[0], sort_keys=True, separators=(",", ":")))
+            return {"__mapping__": entries}
+        if isinstance(value, (tuple, list)):
+            return [TutoringService._canonical(item) for item in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        raise TypeError(f"unsupported fingerprint value: {type(value).__qualname__}")
 
     @staticmethod
     def _fingerprint(command: Command) -> str:
-        return sha256(repr(command).encode("utf-8")).hexdigest()
+        document = {"serialization_version": 1, "command": TutoringService._canonical(command)}
+        encoded = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return sha256(encoded).hexdigest()
 
     def _state(self, command: Command):
         try:
@@ -123,34 +180,45 @@ class TutoringService:
             command.session_id, command.generation_id
         ):
             return self._rejected(command, "generation-not-active")
-        result = CommandResult(
-            command.command_id,
-            CommandStatus.APPLIED,
-            "applied",
-            changes.pop("payload", None),
-        )
-        batch = MutationBatch(
-            command_id=command.command_id,
-            command_fingerprint=self._fingerprint(command),
-            session_id=command.session_id,
-            expected_session_version=command.expected_session_version,
-            expected_profile_version=command.expected_profile_version,
-            result=result,
-            **changes,
-        )
         try:
-            decision = self._repository.commit_once(batch)
-        except Exception:
-            return self._failed(command, "persistence-unavailable")
-        if decision.outcome is CommitOutcome.REPLAYED:
-            if decision.result is None:
+            result = CommandResult(
+                command.command_id,
+                CommandStatus.APPLIED,
+                "applied",
+                changes.pop("payload", None),
+            )
+            batch = MutationBatch(
+                command_id=command.command_id,
+                command_fingerprint=self._fingerprint(command),
+                session_id=command.session_id,
+                expected_session_version=command.expected_session_version,
+                expected_profile_version=command.expected_profile_version,
+                result=result,
+                **changes,
+            )
+            try:
+                decision = self._repository.commit_once(batch)
+            except Exception:
+                return self._failed(command, "persistence-unavailable")
+            if decision.outcome is CommitOutcome.COLLISION:
+                return self._rejected(command, "command-id-collision")
+            if decision.outcome is CommitOutcome.REPLAYED:
+                if decision.result is None:
+                    return self._failed(command, "invalid-persistence-response")
+                if decision.stored_fingerprint != batch.command_fingerprint:
+                    return self._rejected(command, "command-id-collision")
+                return decision.result.as_replay()
+            if decision.outcome is CommitOutcome.CONFLICT:
+                return self._rejected(command, decision.reason or "concurrent-mutation")
+            if (
+                decision.outcome is not CommitOutcome.APPLIED
+                or decision.result is None
+                or decision.stored_fingerprint != batch.command_fingerprint
+            ):
                 return self._failed(command, "invalid-persistence-response")
-            return decision.result.as_replay()
-        if decision.outcome is CommitOutcome.CONFLICT:
-            return self._rejected(command, decision.reason or "concurrent-mutation")
-        if decision.outcome is not CommitOutcome.COMMITTED or decision.result is None:
-            return self._failed(command, "invalid-persistence-response")
-        return decision.result
+            return decision.result
+        finally:
+            self._runtime.complete_mutation(command.session_id)
 
     def record_answer(self, command: RecordAnswer) -> CommandResult:
         state, error = self._state(command)
@@ -174,7 +242,7 @@ class TutoringService:
                 stt_confidence=command.stt_confidence,
                 assistance_level=command.assistance_level,
                 response_text=command.response_text,
-                transcription_policy=command.transcription_policy,
+                transcription_policy=self._transcription_policy,
             )
         except (TypeError, ValueError):
             return self._rejected(command, "domain-validation-error")
@@ -212,22 +280,46 @@ class TutoringService:
     def select_next_activity(self, command: SelectNextActivity) -> CommandResult:
         state, error = self._state(command)
         if error: return error
-        if command.activity.objective_id not in state.session.authorised_objective_ids:
+        if command.objective_id not in state.session.authorised_objective_ids:
             return self._rejected(command, "objective-not-authorised")
-        if command.activity.objective_id not in state.session.active_objective_ids:
+        if command.objective_id not in state.session.active_objective_ids:
             return self._rejected(command, "objective-not-active")
+        try:
+            template = self._template_catalog.template(command.template_id)
+        except InvalidActivityTemplate:
+            return self._rejected(command, "template-not-found")
+        if template.objective_id != command.objective_id:
+            return self._rejected(command, "template-objective-mismatch")
+        try:
+            activity = generate_activity(template, seed=command.seed, difficulty=command.difficulty)
+        except (InvalidActivity, TypeError, ValueError):
+            return self._rejected(command, "activity-generation-invalid")
         session = replace(state.session, version=state.session.version + 1)
-        return self._commit(command, session=session, activities=(StoredActivity(command.activity_id, command.activity),),
-            events=(TutoringEvent("activity-selected", command.session_id, command.activity.objective_id, command.activity_id, command.activity.template_id),), payload=command.activity)
+        return self._commit(command, session=session, activities=(StoredActivity(command.activity_id, activity),),
+            events=(TutoringEvent("activity-selected", command.session_id, activity.objective_id, command.activity_id, activity.template_id),), payload=activity)
 
     def propose_evidence(self, command: ProposeEvidence) -> CommandResult:
         state, error = self._state(command)
         if error: return error
-        observation = command.observation
+        try:
+            stored_observation = self._repository.load_observation(command.session_id, command.observation_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if stored_observation is None:
+            return self._rejected(command, "observation-not-found")
+        observation = stored_observation.observation
         if observation.session_id != command.session_id or observation.learner_id != state.session.learner_id:
             return self._rejected(command, "observation-outside-session")
         if observation.objective_id not in state.session.authorised_objective_ids:
             return self._rejected(command, "objective-not-authorised")
+        try:
+            activity = self._repository.load_activity(command.session_id, observation.activity_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if activity is None:
+            return self._rejected(command, "observation-activity-not-found")
+        if activity.objective_id != observation.objective_id:
+            return self._rejected(command, "observation-activity-mismatch")
         try:
             evidence = EvidenceRecord.initial(
                 evidence_id=command.evidence_id,
@@ -240,6 +332,7 @@ class TutoringService:
             return self._rejected(command, "domain-validation-error")
         session = replace(state.session, version=state.session.version + 1)
         return self._commit(command, session=session, evidence=(evidence,),
+            expected_observations=(ObservationExpectation(command.observation_id, stored_observation.version),),
             events=(TutoringEvent("evidence-proposed", command.session_id, observation.objective_id, observation.activity_id, command.evidence_id),), payload=evidence)
 
     def propose_profile_change(self, command: ProposeProfileChange) -> CommandResult:
@@ -254,7 +347,7 @@ class TutoringService:
             return self._failed(command, "persistence-unavailable")
         if estimate is None: return self._rejected(command, "estimate-not-found")
         try:
-            proposal = command.progression_policy.propose_change(estimate, evidence)
+            proposal = self._progression_policy.propose_change(estimate, evidence)
         except (TypeError, ValueError):
             return self._rejected(command, "domain-validation-error")
         if proposal is None: return self._rejected(command, "insufficient-evidence")

@@ -38,6 +38,20 @@ class StoredActivity:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredObservation:
+    """Canonical durable observation plus its optimistic-lock version."""
+
+    observation: Observation
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationExpectation:
+    observation_id: str
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
 class MutationBatch:
     """One indivisible durable mutation and its idempotent result."""
 
@@ -53,11 +67,13 @@ class MutationBatch:
     evidence: tuple[EvidenceRecord, ...] = ()
     profile_change_proposals: tuple[ProposedProfileChange, ...] = ()
     events: tuple[TutoringEvent, ...] = ()
+    expected_observations: tuple[ObservationExpectation, ...] = ()
 
 
 class CommitOutcome(Enum):
-    COMMITTED = "committed"
+    APPLIED = "applied"
     REPLAYED = "replayed"
+    COLLISION = "collision"
     CONFLICT = "conflict"
 
 
@@ -66,14 +82,19 @@ class CommitDecision:
     outcome: CommitOutcome
     result: CommandResult | None = None
     reason: str | None = None
+    stored_fingerprint: str | None = None
 
     @classmethod
-    def committed(cls, result: CommandResult) -> "CommitDecision":
-        return cls(CommitOutcome.COMMITTED, result=result)
+    def applied(cls, result: CommandResult, fingerprint: str) -> "CommitDecision":
+        return cls(CommitOutcome.APPLIED, result=result, stored_fingerprint=fingerprint)
 
     @classmethod
-    def replayed(cls, result: CommandResult) -> "CommitDecision":
-        return cls(CommitOutcome.REPLAYED, result=result)
+    def replayed(cls, result: CommandResult, fingerprint: str) -> "CommitDecision":
+        return cls(CommitOutcome.REPLAYED, result=result, stored_fingerprint=fingerprint)
+
+    @classmethod
+    def collision(cls, result: CommandResult, fingerprint: str) -> "CommitDecision":
+        return cls(CommitOutcome.COLLISION, result=result, stored_fingerprint=fingerprint)
 
     @classmethod
     def conflict(cls, reason: str) -> "CommitDecision":
@@ -81,7 +102,15 @@ class CommitDecision:
 
 
 class TutoringRepository(Protocol):
-    """Adapter contract; ``commit_once`` must be atomic and durable."""
+    """Adapter contract for the durable mutation fence.
+
+    ``commit_once`` performs, in one transaction: command-id lookup and
+    fingerprint comparison, all expected-version checks (including observation
+    snapshots), every write in ``MutationBatch``, and storage of its result.
+    It returns APPLIED for a new write, REPLAYED only for the same fingerprint,
+    COLLISION for the same id with a different fingerprint, or CONFLICT for a
+    failed optimistic-lock expectation. No partial write may escape.
+    """
 
     def load_command_result(
         self, command_id: str
@@ -92,6 +121,10 @@ class TutoringRepository(Protocol):
     def load_activity(
         self, session_id: str, activity_id: str
     ) -> Activity | None: ...
+
+    def load_observation(
+        self, session_id: str, observation_id: str
+    ) -> StoredObservation | None: ...
 
     def load_evidence(
         self, learner_id: str, objective_id: str
