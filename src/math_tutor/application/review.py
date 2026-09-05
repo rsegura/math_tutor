@@ -95,6 +95,9 @@ class ReviewCommandIdentity:
     source_session_id: str
     action_kind: str
     target_id: str
+    reason: str
+    expected_review_version: int
+    expected_profile_version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +131,8 @@ class ReviewMutation:
             (self.review.evidence_source_session_id
              if isinstance(self.review, DiscardEvidenceReview)
              else self.session_id),
-            action_kind, target_id,
+            action_kind, target_id, self.review.reason,
+            self.review_version - 1, self.expected_profile_version,
         )
 
 
@@ -187,6 +191,8 @@ def _command_identity(
     return ReviewCommandIdentity(
         command.command_id, fingerprint, command.review_id, command.learner_id,
         command.session_id, source_session_id, action_kind, target_id,
+        command.reason, command.expected_review_version,
+        command.expected_profile_version,
     )
 
 
@@ -220,6 +226,17 @@ class TherapistReviewService:
     def discard_evidence(self, command: DiscardEvidence) -> ReviewResult:
         source = self._repository.load_summary_source(command.session_id)
         if source is None:
+            probe_fingerprint = _canonical_command_fingerprint(
+                command, source_session_id=command.session_id
+            )
+            prior = self._repository.resolve_review_command(
+                _command_identity(
+                    command, probe_fingerprint,
+                    source_session_id=command.session_id,
+                )
+            )
+            if prior is not None:
+                return prior
             return ReviewResult(ReviewStatus.REJECTED, "session-not-found", command.review_id)
         SummaryService.validate_source(source, requested_session_id=command.session_id)
         record = next((item for item in source.evidence if item.evidence_id == command.evidence_id), None)

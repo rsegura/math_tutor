@@ -679,6 +679,10 @@ class SQLiteTutoringRepository:
                 "SELECT command_fingerprint,review_id,learner_id,session_id,source_session_id,action_kind,target_id FROM review_command_identities WHERE command_id=?",
                 (identity.command_id,),
             ).fetchone()
+            legacy = db.execute(
+                "SELECT review_id,learner_id,session_id,source_session_id,action_kind,target_id,reason,expected_review_version,expected_profile_version FROM legacy_review_command_identities WHERE command_id=?",
+                (identity.command_id,),
+            ).fetchone()
         if prior is None:
             return None
         stored = _load(prior[1])
@@ -693,6 +697,22 @@ class SQLiteTutoringRepository:
             and tuple(owner) == expected_owner
             and isinstance(stored, ReviewResult)
             and stored.review_id == identity.review_id
+        ):
+            return stored
+        expected_legacy = (
+            identity.review_id, identity.learner_id, identity.session_id,
+            identity.source_session_id, identity.action_kind,
+            identity.target_id, identity.reason,
+            identity.expected_review_version, identity.expected_profile_version,
+        )
+        if (
+            owner is None
+            and legacy is not None
+            and tuple(legacy) == expected_legacy
+            and isinstance(stored, ReviewResult)
+            and stored.review_id == identity.review_id
+            and (stored.estimate is None
+                 or stored.estimate.learner_id == identity.learner_id)
         ):
             return stored
         return ReviewResult(ReviewStatus.COLLISION, "command-id-collision", identity.review_id)

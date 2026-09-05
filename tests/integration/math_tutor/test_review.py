@@ -1,7 +1,11 @@
 from dataclasses import replace
+from pathlib import Path
 
 from math_tutor.application.review import (
     CorrectSkillEstimate,
+    DiscardEvidenceReview,
+    ProfileRecalculation,
+    ReviewResult,
     DiscardEvidence,
     ReviewStatus,
     TherapistReviewService,
@@ -24,6 +28,7 @@ from math_tutor.domain.learning import (
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
+from math_tutor.infrastructure.persistence.repositories import _dump
 
 
 def policy():
@@ -36,9 +41,9 @@ def policy():
     ), min_successes=2, min_distinct_activities=2)
 
 
-def repository(tmp_path):
+def repository(tmp_path, *, migration_dir=None):
     path = tmp_path / "review.db"
-    migrate(path)
+    migrate(path, migration_dir=migration_dir)
     repo = SQLiteTutoringRepository(path)
     repo.save_learner("learner-1", curriculum_snapshot="curriculum", curriculum_version="v1")
     plan = LearningPlan("learner-1", ("add",), ("add",), PresentationProfile.for_age(8), "plan-1")
@@ -301,5 +306,67 @@ def test_same_caller_fingerprint_cannot_spoof_owner_session_or_evidence(tmp_path
     )
     for spoofed in variants:
         collision = service.discard_evidence(spoofed)
+        assert collision.status is ReviewStatus.COLLISION
+        assert collision.estimate is None
+
+
+def test_v5_applied_review_replays_after_identity_migration_and_spoofs_collide(tmp_path):
+    migration_source = Path("src/math_tutor/infrastructure/persistence/migrations")
+    frozen_v5 = tmp_path / "frozen-v5-migrations"
+    frozen_v5.mkdir()
+    for migration in sorted(migration_source.glob("000[1-5]_*.sql")):
+        (frozen_v5 / migration.name).write_bytes(migration.read_bytes())
+    repo = repository(tmp_path, migration_dir=frozen_v5)
+    command = discard(fingerprint="legacy-caller-fingerprint")
+    current = repo.load_estimate("learner-1", "add")
+    recalculated = SkillEstimate(
+        "learner-1", "add", CompetencyState.NOT_OBSERVED,
+        version=current.version + 1,
+    )
+    review = DiscardEvidenceReview(
+        "evidence-2", "session-1", command.reason,
+        "respuesta independiente", ObservationOutcome.CORRECT.value,
+    )
+    revision = ProfileRecalculation(
+        "add", current.state, recalculated.state, ("evidence-2",),
+    )
+    stored_result = ReviewResult(
+        ReviewStatus.APPLIED, "evidence-discarded", "review-1", 1,
+        recalculated,
+    )
+    repo.append_therapist_review(
+        "review-1", 1, "learner-1", "session-1", review
+    )
+    repo.append_profile_revision(
+        "review-command:profile", "learner-1", 2, revision,
+        policy_version=policy().version,
+    )
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE skill_estimates SET estimate_json=?,version=3 WHERE learner_id='learner-1' AND objective_id='add'",
+            (_dump(recalculated),),
+        )
+        db.execute("UPDATE learner_profile_versions SET version=2 WHERE learner_id='learner-1'")
+        db.execute("UPDATE learning_sessions SET profile_version=2 WHERE learner_id='learner-1'")
+        db.execute(
+            "INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES(?,?,?)",
+            (command.command_id, command.command_fingerprint, _dump(stored_result)),
+        )
+
+    migrate(repo.database)
+    service = TherapistReviewService(SQLiteTutoringRepository(repo.database), policy())
+    exact = service.discard_evidence(replace(
+        command, command_fingerprint="different-retry-caller-value"
+    ))
+    assert exact == stored_result
+
+    for altered in (
+        replace(command, review_id="other-review"),
+        replace(command, learner_id="other-learner"),
+        replace(command, session_id="session-2"),
+        replace(command, reason="payload alterado"),
+        replace(command, evidence_id="evidence-1"),
+    ):
+        collision = service.discard_evidence(altered)
         assert collision.status is ReviewStatus.COLLISION
         assert collision.estimate is None
