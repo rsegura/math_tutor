@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
+import json
 from typing import Protocol
 
 from math_tutor.application.summary import SessionSummarySource, SummaryService
@@ -84,6 +86,18 @@ class ReviewResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewCommandIdentity:
+    command_id: str
+    command_fingerprint: str
+    review_id: str
+    learner_id: str
+    session_id: str
+    source_session_id: str
+    action_kind: str
+    target_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewMutation:
     command_id: str
     command_fingerprint: str
@@ -100,11 +114,80 @@ class ReviewMutation:
     policy_version: str
     result: ReviewResult
 
+    @property
+    def identity(self) -> ReviewCommandIdentity:
+        if isinstance(self.review, DiscardEvidenceReview):
+            action_kind = "discard-evidence"
+            target_id = self.review.evidence_id
+        else:
+            action_kind = "correct-skill-estimate"
+            target_id = self.review.objective_id
+        return ReviewCommandIdentity(
+            self.command_id, self.command_fingerprint, self.review_id,
+            self.learner_id, self.session_id,
+            (self.review.evidence_source_session_id
+             if isinstance(self.review, DiscardEvidenceReview)
+             else self.session_id),
+            action_kind, target_id,
+        )
+
 
 class ReviewCommitPort(Protocol):
     def load_summary_source(self, session_id: str) -> SessionSummarySource | None: ...
-    def resolve_review_command(self, command_id: str, command_fingerprint: str, review_id: str) -> ReviewResult | None: ...
+    def resolve_review_command(self, identity: ReviewCommandIdentity) -> ReviewResult | None: ...
     def commit_review_once(self, mutation: ReviewMutation) -> ReviewResult: ...
+
+
+def _canonical_command_fingerprint(
+    command: DiscardEvidence | CorrectSkillEstimate,
+    *,
+    source_session_id: str,
+) -> str:
+    """Bind idempotency to the full server-understood command contract."""
+    common = {
+        "schema": "therapist-review-command/v1",
+        "command_id": command.command_id,
+        "review_id": command.review_id,
+        "learner_id": command.learner_id,
+        "session_id": command.session_id,
+        "source_session_id": source_session_id,
+        "reason": command.reason,
+        "expected_review_version": command.expected_review_version,
+        "expected_profile_version": command.expected_profile_version,
+    }
+    if isinstance(command, DiscardEvidence):
+        payload = {
+            **common,
+            "kind": "discard-evidence",
+            "evidence_id": command.evidence_id,
+        }
+    else:
+        payload = {
+            **common,
+            "kind": "correct-skill-estimate",
+            "objective_id": command.objective_id,
+            "corrected_state": command.corrected_state.value,
+        }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return f"therapist-review-command/v1:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _command_identity(
+    command: DiscardEvidence | CorrectSkillEstimate,
+    fingerprint: str,
+    *,
+    source_session_id: str,
+) -> ReviewCommandIdentity:
+    if isinstance(command, DiscardEvidence):
+        action_kind, target_id = "discard-evidence", command.evidence_id
+    else:
+        action_kind, target_id = "correct-skill-estimate", command.objective_id
+    return ReviewCommandIdentity(
+        command.command_id, fingerprint, command.review_id, command.learner_id,
+        command.session_id, source_session_id, action_kind, target_id,
+    )
 
 
 def _recalculate(
@@ -135,16 +218,25 @@ class TherapistReviewService:
         self._policy = policy
 
     def discard_evidence(self, command: DiscardEvidence) -> ReviewResult:
-        prior = self._repository.resolve_review_command(
-            command.command_id, command.command_fingerprint, command.review_id
-        )
-        if prior is not None:
-            return prior
         source = self._repository.load_summary_source(command.session_id)
         if source is None:
             return ReviewResult(ReviewStatus.REJECTED, "session-not-found", command.review_id)
         SummaryService.validate_source(source, requested_session_id=command.session_id)
         record = next((item for item in source.evidence if item.evidence_id == command.evidence_id), None)
+        source_session_id = (
+            record.observation.session_id if record is not None else command.session_id
+        )
+        command_fingerprint = _canonical_command_fingerprint(
+            command, source_session_id=source_session_id
+        )
+        prior = self._repository.resolve_review_command(
+            _command_identity(
+                command, command_fingerprint,
+                source_session_id=source_session_id,
+            )
+        )
+        if prior is not None:
+            return prior
         if record is None or source.learner_id != command.learner_id:
             return ReviewResult(ReviewStatus.REJECTED, "evidence-owner-mismatch", command.review_id)
         if command.evidence_id in source.discarded_evidence_ids:
@@ -170,7 +262,7 @@ class TherapistReviewService:
             review_version, estimate,
         )
         mutation = ReviewMutation(
-            command.command_id, command.command_fingerprint, command.review_id,
+            command.command_id, command_fingerprint, command.review_id,
             review_version, command.learner_id, command.session_id,
             command.expected_profile_version, current.version,
             DiscardEvidenceReview(
@@ -185,8 +277,14 @@ class TherapistReviewService:
         return self._repository.commit_review_once(mutation)
 
     def correct_skill_estimate(self, command: CorrectSkillEstimate) -> ReviewResult:
+        command_fingerprint = _canonical_command_fingerprint(
+            command, source_session_id=command.session_id
+        )
         prior = self._repository.resolve_review_command(
-            command.command_id, command.command_fingerprint, command.review_id
+            _command_identity(
+                command, command_fingerprint,
+                source_session_id=command.session_id,
+            )
         )
         if prior is not None:
             return prior
@@ -219,7 +317,7 @@ class TherapistReviewService:
             review_version, estimate,
         )
         mutation = ReviewMutation(
-            command.command_id, command.command_fingerprint, command.review_id,
+            command.command_id, command_fingerprint, command.review_id,
             review_version, command.learner_id, command.session_id,
             command.expected_profile_version, current.version,
             CorrectSkillEstimateReview(

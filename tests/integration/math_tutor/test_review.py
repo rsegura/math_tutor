@@ -107,11 +107,11 @@ def add_second_session(repo):
     ))
 
 
-def discard(*, command_id="review-command", fingerprint="review-fp", expected_review_version=0, expected_profile_version=1, learner_id="learner-1", evidence_id="evidence-2"):
+def discard(*, command_id="review-command", fingerprint="review-fp", expected_review_version=0, expected_profile_version=1, learner_id="learner-1", evidence_id="evidence-2", review_id="review-1", session_id="session-1", reason="STT atribuido incorrectamente"):
     return DiscardEvidence(
         command_id=command_id, command_fingerprint=fingerprint,
-        review_id="review-1", learner_id=learner_id, session_id="session-1",
-        evidence_id=evidence_id, reason="STT atribuido incorrectamente",
+        review_id=review_id, learner_id=learner_id, session_id=session_id,
+        evidence_id=evidence_id, reason=reason,
         expected_review_version=expected_review_version,
         expected_profile_version=expected_profile_version,
     )
@@ -140,7 +140,9 @@ def test_review_command_collision_and_stale_versions_fail_closed(tmp_path):
     repo = repository(tmp_path)
     service = TherapistReviewService(repo, policy())
     assert service.discard_evidence(discard()).status is ReviewStatus.APPLIED
-    assert service.discard_evidence(discard(fingerprint="other")).status is ReviewStatus.COLLISION
+    collision = service.discard_evidence(discard(reason="payload cambiado"))
+    assert collision.status is ReviewStatus.COLLISION
+    assert collision.estimate is None
     assert service.discard_evidence(discard(command_id="stale", fingerprint="stale", expected_review_version=0, expected_profile_version=1, evidence_id="evidence-1")).status is ReviewStatus.CONFLICT
 
 
@@ -257,3 +259,47 @@ def test_review_integrity_race_returns_conflict_and_rolls_back(tmp_path):
     assert repo.load_estimate("learner-1", "add") == before
     assert repo.load_therapist_reviews("review-1") == ()
     assert repo.load_summary_source("session-1").profile_version == 1
+
+
+def test_caller_fingerprint_does_not_control_legitimate_replay(tmp_path):
+    repo = repository(tmp_path)
+    service = TherapistReviewService(repo, policy())
+    first = service.discard_evidence(discard(fingerprint="caller-a"))
+
+    replay = service.discard_evidence(discard(fingerprint="caller-b"))
+
+    assert replay == first
+    assert [item.version for item in repo.load_therapist_reviews("review-1")] == [1]
+
+
+def test_same_command_id_cannot_cross_review_identity_or_expose_result(tmp_path):
+    repo = repository(tmp_path)
+    service = TherapistReviewService(repo, policy())
+    applied = service.discard_evidence(discard())
+
+    collision = service.discard_evidence(discard(
+        review_id="review-other", fingerprint="review-fp",
+    ))
+
+    assert applied.estimate is not None
+    assert collision.status is ReviewStatus.COLLISION
+    assert collision.review_id == "review-other"
+    assert collision.estimate is None
+    assert repo.load_therapist_reviews("review-other") == ()
+
+
+def test_same_caller_fingerprint_cannot_spoof_owner_session_or_evidence(tmp_path):
+    repo = repository(tmp_path)
+    add_second_session(repo)
+    service = TherapistReviewService(repo, policy())
+    assert service.discard_evidence(discard()).status is ReviewStatus.APPLIED
+
+    variants = (
+        discard(learner_id="other"),
+        discard(session_id="session-2"),
+        discard(evidence_id="evidence-1"),
+    )
+    for spoofed in variants:
+        collision = service.discard_evidence(spoofed)
+        assert collision.status is ReviewStatus.COLLISION
+        assert collision.estimate is None

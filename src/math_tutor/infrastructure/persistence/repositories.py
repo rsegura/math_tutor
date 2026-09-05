@@ -11,7 +11,7 @@ from typing import Any
 
 from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, StoredCommandResult, StoredObservation)
 from math_tutor.application.results import CommandResult, CommandStatus
-from math_tutor.application.review import CorrectSkillEstimateReview, DiscardEvidenceReview, ProfileRecalculation, ReviewMutation, ReviewResult, ReviewStatus
+from math_tutor.application.review import CorrectSkillEstimateReview, DiscardEvidenceReview, ProfileRecalculation, ReviewCommandIdentity, ReviewMutation, ReviewResult, ReviewStatus
 from math_tutor.application.summary import SessionSummarySource, SummaryActivityRef
 from math_tutor.domain.activities import Activity, AnswerInputStatus, StructuredAnswer
 from math_tutor.domain.evidence import EvidenceRecord, EvidenceRevision, Observation, ObservationOutcome, TranscriptionReliabilityPolicy
@@ -668,19 +668,34 @@ class SQLiteTutoringRepository:
         )
 
     def resolve_review_command(
-        self, command_id: str, command_fingerprint: str, review_id: str
+        self, identity: ReviewCommandIdentity
     ) -> ReviewResult | None:
         with self._connect() as db:
             prior = db.execute(
                 "SELECT command_fingerprint,result_json FROM processed_commands WHERE command_id=?",
-                (command_id,),
+                (identity.command_id,),
+            ).fetchone()
+            owner = db.execute(
+                "SELECT command_fingerprint,review_id,learner_id,session_id,source_session_id,action_kind,target_id FROM review_command_identities WHERE command_id=?",
+                (identity.command_id,),
             ).fetchone()
         if prior is None:
             return None
         stored = _load(prior[1])
-        if prior[0] == command_fingerprint and isinstance(stored, ReviewResult):
+        expected_owner = (
+            identity.command_fingerprint, identity.review_id, identity.learner_id,
+            identity.session_id, identity.source_session_id,
+            identity.action_kind, identity.target_id,
+        )
+        if (
+            prior[0] == identity.command_fingerprint
+            and owner is not None
+            and tuple(owner) == expected_owner
+            and isinstance(stored, ReviewResult)
+            and stored.review_id == identity.review_id
+        ):
             return stored
-        return ReviewResult(ReviewStatus.COLLISION, "command-id-collision", review_id)
+        return ReviewResult(ReviewStatus.COLLISION, "command-id-collision", identity.review_id)
 
     def commit_review_once(self, mutation: ReviewMutation) -> ReviewResult:
         db = self._connect()
@@ -692,8 +707,25 @@ class SQLiteTutoringRepository:
             ).fetchone()
             if prior is not None:
                 stored = _load(prior[1])
+                owner = db.execute(
+                    "SELECT command_fingerprint,review_id,learner_id,session_id,source_session_id,action_kind,target_id FROM review_command_identities WHERE command_id=?",
+                    (mutation.command_id,),
+                ).fetchone()
                 db.rollback()
-                if prior[0] == mutation.command_fingerprint and isinstance(stored, ReviewResult):
+                identity = mutation.identity
+                expected_owner = (
+                    identity.command_fingerprint, identity.review_id,
+                    identity.learner_id, identity.session_id,
+                    identity.source_session_id, identity.action_kind,
+                    identity.target_id,
+                )
+                if (
+                    prior[0] == mutation.command_fingerprint
+                    and owner is not None
+                    and tuple(owner) == expected_owner
+                    and isinstance(stored, ReviewResult)
+                    and stored.review_id == mutation.review_id
+                ):
                     return stored
                 return ReviewResult(ReviewStatus.COLLISION, "command-id-collision", mutation.review_id)
 
@@ -780,6 +812,14 @@ class SQLiteTutoringRepository:
             db.execute(
                 "INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES(?,?,?)",
                 (mutation.command_id, mutation.command_fingerprint, _dump(mutation.result)),
+            )
+            identity = mutation.identity
+            db.execute(
+                "INSERT INTO review_command_identities(command_id,command_fingerprint,review_id,learner_id,session_id,source_session_id,action_kind,target_id) VALUES(?,?,?,?,?,?,?,?)",
+                (identity.command_id, identity.command_fingerprint,
+                 identity.review_id, identity.learner_id, identity.session_id,
+                 identity.source_session_id, identity.action_kind,
+                 identity.target_id),
             )
             db.commit()
             return mutation.result
