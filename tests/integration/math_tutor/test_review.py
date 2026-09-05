@@ -3,6 +3,7 @@ from pathlib import Path
 
 from math_tutor.application.review import (
     CorrectSkillEstimate,
+    CorrectSkillEstimateReview,
     DiscardEvidenceReview,
     ProfileRecalculation,
     ReviewResult,
@@ -370,3 +371,69 @@ def test_v5_applied_review_replays_after_identity_migration_and_spoofs_collide(t
         collision = service.discard_evidence(altered)
         assert collision.status is ReviewStatus.COLLISION
         assert collision.estimate is None
+
+
+def test_v5_corrected_state_is_bound_during_legacy_identity_migration(tmp_path):
+    migration_source = Path("src/math_tutor/infrastructure/persistence/migrations")
+    frozen_v5 = tmp_path / "frozen-v5-correction-migrations"
+    frozen_v5.mkdir()
+    for migration in sorted(migration_source.glob("000[1-5]_*.sql")):
+        (frozen_v5 / migration.name).write_bytes(migration.read_bytes())
+    repo = repository(tmp_path, migration_dir=frozen_v5)
+    command = CorrectSkillEstimate(
+        command_id="legacy-correct", command_fingerprint="legacy-arbitrary",
+        review_id="legacy-correct-review", learner_id="learner-1",
+        session_id="session-1", objective_id="add",
+        corrected_state=CompetencyState.NEEDS_REVIEW,
+        reason="La ayuda fue mayor", expected_review_version=0,
+        expected_profile_version=1,
+    )
+    current = repo.load_estimate("learner-1", "add")
+    corrected = SkillEstimate(
+        "learner-1", "add", CompetencyState.NEEDS_REVIEW,
+        current.version + 1, current.supporting_evidence_ids,
+        current.supporting_observation_ids,
+    )
+    review = CorrectSkillEstimateReview(
+        "add", CompetencyState.EXPLORING,
+        CompetencyState.WITH_INTENSIVE_HELP,
+        ("evidence-1", "evidence-2"), policy().version,
+        CompetencyState.NEEDS_REVIEW, command.reason,
+    )
+    revision = ProfileRecalculation(
+        "add", current.state, corrected.state, (),
+    )
+    stored_result = ReviewResult(
+        ReviewStatus.APPLIED, "skill-estimate-corrected",
+        command.review_id, 1, corrected,
+    )
+    repo.append_therapist_review(
+        command.review_id, 1, "learner-1", "session-1", review
+    )
+    repo.append_profile_revision(
+        "legacy-correct:profile", "learner-1", 2, revision,
+        policy_version=policy().version,
+    )
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE skill_estimates SET estimate_json=?,version=? WHERE learner_id='learner-1' AND objective_id='add'",
+            (_dump(corrected), corrected.version),
+        )
+        db.execute("UPDATE learner_profile_versions SET version=2 WHERE learner_id='learner-1'")
+        db.execute("UPDATE learning_sessions SET profile_version=2 WHERE learner_id='learner-1'")
+        db.execute(
+            "INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES(?,?,?)",
+            (command.command_id, command.command_fingerprint, _dump(stored_result)),
+        )
+
+    migrate(repo.database)
+    service = TherapistReviewService(SQLiteTutoringRepository(repo.database), policy())
+    assert service.correct_skill_estimate(replace(
+        command, command_fingerprint="retry-caller-value"
+    )) == stored_result
+
+    collision = service.correct_skill_estimate(replace(
+        command, corrected_state=CompetencyState.GENERALIZED,
+    ))
+    assert collision.status is ReviewStatus.COLLISION
+    assert collision.estimate is None

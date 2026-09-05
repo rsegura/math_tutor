@@ -683,6 +683,10 @@ class SQLiteTutoringRepository:
                 "SELECT review_id,learner_id,session_id,source_session_id,action_kind,target_id,reason,expected_review_version,expected_profile_version FROM legacy_review_command_identities WHERE command_id=?",
                 (identity.command_id,),
             ).fetchone()
+            legacy_payload = db.execute(
+                "SELECT corrected_state FROM legacy_review_action_payloads WHERE command_id=?",
+                (identity.command_id,),
+            ).fetchone()
         if prior is None:
             return None
         stored = _load(prior[1])
@@ -709,6 +713,14 @@ class SQLiteTutoringRepository:
             owner is None
             and legacy is not None
             and tuple(legacy) == expected_legacy
+            and (
+                (identity.corrected_state is None and legacy_payload is None)
+                or (
+                    identity.corrected_state is not None
+                    and legacy_payload is not None
+                    and legacy_payload[0] == identity.corrected_state
+                )
+            )
             and isinstance(stored, ReviewResult)
             and stored.review_id == identity.review_id
             and (stored.estimate is None

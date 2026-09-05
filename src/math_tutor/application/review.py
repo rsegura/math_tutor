@@ -98,6 +98,7 @@ class ReviewCommandIdentity:
     reason: str
     expected_review_version: int
     expected_profile_version: int
+    corrected_state: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +134,9 @@ class ReviewMutation:
              else self.session_id),
             action_kind, target_id, self.review.reason,
             self.review_version - 1, self.expected_profile_version,
+            (self.review.corrected_state.value
+             if isinstance(self.review, CorrectSkillEstimateReview)
+             else None),
         )
 
 
@@ -193,6 +197,9 @@ def _command_identity(
         command.session_id, source_session_id, action_kind, target_id,
         command.reason, command.expected_review_version,
         command.expected_profile_version,
+        (command.corrected_state.value
+         if isinstance(command, CorrectSkillEstimate)
+         else None),
     )
 
 
