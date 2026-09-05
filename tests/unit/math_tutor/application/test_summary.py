@@ -5,6 +5,7 @@ import pytest
 from math_tutor.application.summary import (
     NarrativeClaim,
     NarrativeValidationError,
+    SummaryActivityRef,
     SessionSummarySource,
     SummaryService,
 )
@@ -52,7 +53,9 @@ def source(*, discarded=()):
     return SessionSummarySource(
         "session-1", "learner-1", 2, 1, (record,),
         (SkillEstimate("learner-1", "add", CompetencyState.NOT_OBSERVED),),
-        (proposal,), tuple(discarded),
+        (proposal,), tuple(discarded), ("add",),
+        (SummaryActivityRef("learner-1", "session-1", f"activity-{record.evidence_id}", "add"),),
+        ("session-1",),
     )
 
 
@@ -85,9 +88,9 @@ def test_narrative_is_rejected_if_it_invents_claim_or_evidence_ids():
     summary = service.build("session-1")
 
     with pytest.raises(NarrativeValidationError):
-        service.validate_narrative(summary, (NarrativeClaim("invented", "Texto", ("evidence-1",)),))
+        service.validate_narrative(summary, (NarrativeClaim("invented", "observation", False, "Texto", ("evidence-1",)),))
     with pytest.raises(NarrativeValidationError):
-        service.validate_narrative(summary, (NarrativeClaim(summary.claims[0].claim_id, "Texto", ("invented",)),))
+        service.validate_narrative(summary, (NarrativeClaim(summary.claims[0].claim_id, summary.claims[0].kind, summary.claims[0].is_hypothesis, "Texto", ("invented",)),))
 
 
 def test_narrative_can_only_rephrase_the_authoritative_claim_links():
@@ -96,7 +99,7 @@ def test_narrative_can_only_rephrase_the_authoritative_claim_links():
     claim = summary.claims[0]
 
     narrative = service.validate_narrative(
-        summary, (NarrativeClaim(claim.claim_id, "Redacción revisable", claim.evidence_ids),)
+        summary, (NarrativeClaim(claim.claim_id, claim.kind, claim.is_hypothesis, "Redacción revisable", claim.evidence_ids),)
     )
 
     assert narrative[0].claim_id == claim.claim_id
@@ -116,6 +119,10 @@ def test_cross_session_support_is_linked_without_reporting_old_turn_as_current()
     )
     value = SessionSummarySource(
         "session-1", "learner-1", 1, 1, (old, current), (), (proposal,), (),
+        ("add",), (
+            SummaryActivityRef("learner-1", "session-old", "activity-old", "add"),
+            SummaryActivityRef("learner-1", "session-1", "activity-current", "add"),
+        ), ("session-1",),
     )
 
     summary = SummaryService(Source(value)).build("session-1")
@@ -124,3 +131,58 @@ def test_cross_session_support_is_linked_without_reporting_old_turn_as_current()
     proposal_claim = next(item for item in summary.claims if item.kind == "profile-proposal")
     assert [item.evidence_ids for item in observations] == [("current",)]
     assert proposal_claim.evidence_ids == ("old", "current")
+
+
+def test_narrative_cannot_launder_hypothesis_as_fact():
+    service = SummaryService(Source(source()))
+    summary = service.build("session-1")
+    hypothesis = next(item for item in summary.claims if item.is_hypothesis)
+
+    with pytest.raises(NarrativeValidationError, match="classification"):
+        service.validate_narrative(summary, (
+            NarrativeClaim(hypothesis.claim_id, hypothesis.kind, False, "Hecho", hypothesis.evidence_ids),
+        ))
+
+
+@pytest.mark.parametrize("corrupt", ["evidence-learner", "activity-reference", "activity-owner", "proposal-reference", "proposal-session", "estimate-owner"])
+def test_summary_fails_closed_on_malformed_port_source(corrupt):
+    value = source()
+    record = value.evidence[0]
+    if corrupt == "evidence-learner":
+        bad_observation = replace(record.observation, learner_id="other")
+        value = replace(value, evidence=(replace(record, learner_id="other", observation=bad_observation),))
+    elif corrupt == "activity-reference":
+        value = replace(value, activity_refs=())
+    elif corrupt == "activity-owner":
+        value = replace(value, activity_refs=(replace(value.activity_refs[0], learner_id="other"),))
+    elif corrupt == "proposal-reference":
+        value = replace(value, proposals=(replace(value.proposals[0], evidence_ids=("missing",)),))
+    elif corrupt == "proposal-session":
+        value = replace(value, proposal_session_ids=("session-other",))
+    else:
+        value = replace(value, estimates=(replace(value.estimates[0], learner_id="other"),))
+
+    with pytest.raises(ValueError, match="malformed-summary-source"):
+        SummaryService(Source(value)).build("session-1")
+
+
+def test_proposal_disappears_when_any_supporting_evidence_is_discarded():
+    first = evidence("first")
+    second = evidence("second")
+    proposal = ProposedProfileChange(
+        "learner-1", "add", CompetencyState.NOT_OBSERVED,
+        CompetencyState.EXPLORING, ("first", "second"),
+        (first.observation.observation_id, second.observation.observation_id),
+        1, "policy-v1",
+    )
+    value = SessionSummarySource(
+        "session-1", "learner-1", 1, 1, (first, second), (), (proposal,),
+        ("first",), ("add",), (
+            SummaryActivityRef("learner-1", "session-1", "activity-first", "add"),
+            SummaryActivityRef("learner-1", "session-1", "activity-second", "add"),
+        ), ("session-1",),
+    )
+
+    summary = SummaryService(Source(value)).build("session-1")
+
+    assert not [claim for claim in summary.claims if claim.kind == "profile-proposal"]

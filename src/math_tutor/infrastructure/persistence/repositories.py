@@ -12,7 +12,7 @@ from typing import Any
 from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, StoredCommandResult, StoredObservation)
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.review import CorrectSkillEstimateReview, DiscardEvidenceReview, ProfileRecalculation, ReviewMutation, ReviewResult, ReviewStatus
-from math_tutor.application.summary import SessionSummarySource
+from math_tutor.application.summary import SessionSummarySource, SummaryActivityRef
 from math_tutor.domain.activities import Activity, AnswerInputStatus, StructuredAnswer
 from math_tutor.domain.evidence import EvidenceRecord, EvidenceRevision, Observation, ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import CompetencyState, LearningPlan, LearningSession, PresentationProfile, ProposedProfileChange, SkillEstimate
@@ -202,6 +202,12 @@ class SQLiteTutoringRepository:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
+    @staticmethod
+    def _has_profile_versions(db: sqlite3.Connection) -> bool:
+        return db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='learner_profile_versions'"
+        ).fetchone() is not None
+
     def save_learner(self, learner_id: str, *, curriculum_snapshot: str, curriculum_version: str) -> None:
         with self._connect() as db:
             prior = db.execute("SELECT curriculum_snapshot FROM curriculum_snapshots WHERE learner_id=? AND curriculum_version=?", (learner_id, curriculum_version)).fetchone()
@@ -209,6 +215,8 @@ class SQLiteTutoringRepository:
                 raise ValueError("curriculum version already has a different snapshot")
             db.execute("INSERT INTO learners(learner_id,curriculum_snapshot,curriculum_version) VALUES(?,?,?) ON CONFLICT(learner_id) DO UPDATE SET curriculum_snapshot=excluded.curriculum_snapshot,curriculum_version=excluded.curriculum_version", (learner_id, curriculum_snapshot, curriculum_version))
             db.execute("INSERT INTO curriculum_snapshots(learner_id,curriculum_version,curriculum_snapshot) VALUES(?,?,?) ON CONFLICT(learner_id,curriculum_version) DO NOTHING", (learner_id, curriculum_version, curriculum_snapshot))
+            if self._has_profile_versions(db):
+                db.execute("INSERT INTO learner_profile_versions(learner_id,version) VALUES(?,1) ON CONFLICT(learner_id) DO NOTHING", (learner_id,))
 
     def load_learner(self, learner_id: str) -> LearnerRecord | None:
         with self._connect() as db:
@@ -245,7 +253,13 @@ class SQLiteTutoringRepository:
             owner = db.execute("SELECT 1 FROM learning_plans WHERE plan_id=? AND version=? AND learner_id=?", (session.plan_id, session.plan_version, session.learner_id)).fetchone()
             if owner is None:
                 raise ValueError("session plan version is not owned by learner")
-            db.execute("INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) VALUES(?,?,?,?,?,?,?)", (session.session_id, session.learner_id, session.plan_id, session.plan_version, _dump(session), session.version, profile_version))
+            canonical_profile_version = profile_version
+            if self._has_profile_versions(db):
+                current = db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?", (session.learner_id,)).fetchone()
+                canonical_profile_version = max(profile_version, current[0] if current else 1)
+                db.execute("UPDATE learner_profile_versions SET version=? WHERE learner_id=?", (canonical_profile_version, session.learner_id))
+                db.execute("UPDATE learning_sessions SET profile_version=? WHERE learner_id=?", (canonical_profile_version, session.learner_id))
+            db.execute("INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) VALUES(?,?,?,?,?,?,?)", (session.session_id, session.learner_id, session.plan_id, session.plan_version, _dump(session), session.version, canonical_profile_version))
 
     def save_estimate(self, estimate: SkillEstimate, *, expected_version: int | None = None) -> None:
         with self._connect() as db:
@@ -616,21 +630,39 @@ class SQLiteTutoringRepository:
             if isinstance(item, DiscardEvidenceReview)
         )
         proposals = tuple(item for item in aggregate.proposals if isinstance(item, ProposedProfileChange))
-        required_ids = {evidence_id for proposal in proposals for evidence_id in proposal.evidence_ids}
         evidence_by_id = {item.evidence_id: item for item in aggregate.evidence}
         for objective_id in aggregate.session.authorised_objective_ids:
             for item in self.load_evidence(aggregate.session.learner_id, objective_id):
-                if item.evidence_id in required_ids:
-                    evidence_by_id.setdefault(item.evidence_id, item)
+                evidence_by_id.setdefault(item.evidence_id, item)
+        activity_refs = []
+        for item in evidence_by_id.values():
+            activity = self.load_activity(
+                item.observation.session_id, item.observation.activity_id
+            )
+            if activity is not None:
+                activity_refs.append(SummaryActivityRef(
+                    aggregate.session.learner_id,
+                    item.observation.session_id,
+                    item.observation.activity_id,
+                    activity.objective_id,
+                ))
+        with self._connect() as db:
+            profile_row = db.execute(
+                "SELECT version FROM learner_profile_versions WHERE learner_id=?",
+                (aggregate.session.learner_id,),
+            ).fetchone()
         return SessionSummarySource(
             aggregate.session.session_id,
             aggregate.session.learner_id,
             aggregate.session.version,
-            aggregate.profile_version,
+            profile_row[0],
             tuple(evidence_by_id.values()),
             aggregate.estimates,
             proposals,
             tuple(item for item in dict.fromkeys(discarded) if item in evidence_by_id),
+            aggregate.session.authorised_objective_ids,
+            tuple(activity_refs),
+            tuple(aggregate.session.session_id for _ in proposals),
         )
 
     def resolve_review_command(
@@ -664,7 +696,7 @@ class SQLiteTutoringRepository:
                 return ReviewResult(ReviewStatus.COLLISION, "command-id-collision", mutation.review_id)
 
             session = db.execute(
-                "SELECT learner_id,profile_version FROM learning_sessions WHERE session_id=?",
+                "SELECT learner_id FROM learning_sessions WHERE session_id=?",
                 (mutation.session_id,),
             ).fetchone()
             if session is None or session[0] != mutation.learner_id:
@@ -672,8 +704,10 @@ class SQLiteTutoringRepository:
                 return ReviewResult(ReviewStatus.REJECTED, "session-owner-mismatch", mutation.review_id)
             if isinstance(mutation.review, DiscardEvidenceReview):
                 evidence = db.execute(
-                    "SELECT 1 FROM evidence_records WHERE evidence_id=? AND learner_id=? AND session_id=?",
-                    (mutation.review.evidence_id, mutation.learner_id, mutation.session_id),
+                    "SELECT 1 FROM evidence_records WHERE evidence_id=? AND learner_id=? AND session_id=? AND objective_id=?",
+                    (mutation.review.evidence_id, mutation.learner_id,
+                     mutation.review.evidence_source_session_id,
+                     mutation.estimate.objective_id),
                 ).fetchone()
                 if evidence is None:
                     db.rollback()
@@ -688,8 +722,13 @@ class SQLiteTutoringRepository:
                 "SELECT version FROM skill_estimates WHERE learner_id=? AND objective_id=?",
                 (mutation.learner_id, mutation.estimate.objective_id),
             ).fetchone()
+            profile = db.execute(
+                "SELECT version FROM learner_profile_versions WHERE learner_id=?",
+                (mutation.learner_id,),
+            ).fetchone()
             if (
-                session[1] != mutation.expected_profile_version
+                profile is None
+                or profile[0] != mutation.expected_profile_version
                 or current_review_version != expected_review_version
                 or estimate is None
                 or estimate[0] != mutation.expected_estimate_version
@@ -720,10 +759,16 @@ class SQLiteTutoringRepository:
                  mutation.estimate.objective_id, mutation.expected_estimate_version),
             )
             next_profile_version = mutation.expected_profile_version + 1
+            cursor = db.execute(
+                "UPDATE learner_profile_versions SET version=? WHERE learner_id=? AND version=?",
+                (next_profile_version, mutation.learner_id, mutation.expected_profile_version),
+            )
+            if cursor.rowcount != 1:
+                db.rollback()
+                return ReviewResult(ReviewStatus.CONFLICT, "stale-review-state", mutation.review_id)
             db.execute(
-                "UPDATE learning_sessions SET profile_version=? WHERE session_id=? AND learner_id=? AND profile_version=?",
-                (next_profile_version, mutation.session_id, mutation.learner_id,
-                 mutation.expected_profile_version),
+                "UPDATE learning_sessions SET profile_version=? WHERE learner_id=?",
+                (next_profile_version, mutation.learner_id),
             )
             db.execute(
                 "INSERT INTO profile_revisions(revision_id,learner_id,profile_version,revision_json,policy_version) VALUES(?,?,?,?,?)",
@@ -736,6 +781,11 @@ class SQLiteTutoringRepository:
             )
             db.commit()
             return mutation.result
+        except sqlite3.IntegrityError:
+            db.rollback()
+            return ReviewResult(
+                ReviewStatus.CONFLICT, "concurrent-review-conflict", mutation.review_id
+            )
         except Exception:
             db.rollback()
             raise

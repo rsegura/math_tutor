@@ -45,7 +45,11 @@ def repository(tmp_path):
     repo.save_plan(plan, policy_version=policy().version)
     session = LearningSession.start(session_id="session-1", plan=plan)
     repo.save_session(session, profile_version=1)
-    initial = SkillEstimate("learner-1", "add", CompetencyState.EXPLORING, version=2)
+    initial = SkillEstimate(
+        "learner-1", "add", CompetencyState.EXPLORING, version=2,
+        supporting_evidence_ids=("evidence-1", "evidence-2"),
+        supporting_observation_ids=("observation-1", "observation-2"),
+    )
     repo.save_estimate(initial)
     for index in (1, 2):
         activity = Activity(
@@ -77,6 +81,30 @@ def repository(tmp_path):
             expected_absent_activity_ids=(f"activity-{index}",),
         ))
     return repo
+
+
+def add_second_session(repo):
+    plan = repo.load_plan("plan-1", 1)
+    session = LearningSession.start(session_id="session-2", plan=plan)
+    repo.save_session(session, profile_version=1)
+    activity = Activity(
+        "template", "add", 1, "Suma", {"index": 3},
+        StructuredAnswer.evaluable(ExpectedAnswerKind.INTEGER, {"answer": 3}), (), (),
+    )
+    observation = Observation(
+        "observation-3", "learner-1", "session-2", "add", "activity-3",
+        ObservationOutcome.CORRECT, .95, 0, TranscriptionReliabilityPolicy(.7), "3",
+    )
+    evidence = EvidenceRecord.initial(
+        evidence_id="evidence-3", learner_id="learner-1", observation=observation,
+        interpretation="respuesta independiente", reason_for_retention="progression",
+    )
+    repo.commit_once(MutationBatch(
+        "answer-3", "fp-3", "session-2", 1, 1,
+        CommandResult("answer-3", CommandStatus.APPLIED, "saved"),
+        activities=(StoredActivity("activity-3", activity),), observations=(observation,),
+        evidence=(evidence,), expected_absent_activity_ids=("activity-3",),
+    ))
 
 
 def discard(*, command_id="review-command", fingerprint="review-fp", expected_review_version=0, expected_profile_version=1, learner_id="learner-1", evidence_id="evidence-2"):
@@ -171,3 +199,61 @@ def test_review_command_id_cannot_alias_a_tutoring_command(tmp_path):
 
     assert result.status is ReviewStatus.COLLISION
     assert repo.load_therapist_reviews("review-1") == ()
+
+
+def test_review_recalculates_from_all_learner_objective_evidence_across_sessions(tmp_path):
+    repo = repository(tmp_path)
+    add_second_session(repo)
+    source = repo.load_summary_source("session-2")
+    assert source.estimates[0].supporting_evidence_ids == ("evidence-1", "evidence-2")
+    assert {item.evidence_id for item in source.evidence} == {
+        "evidence-1", "evidence-2", "evidence-3"
+    }
+    command = replace(
+        discard(), command_id="cross-session", command_fingerprint="cross-fp",
+        review_id="review-cross", session_id="session-2", evidence_id="evidence-1",
+    )
+
+    result = TherapistReviewService(repo, policy()).discard_evidence(command)
+
+    assert result.status is ReviewStatus.APPLIED
+    assert result.estimate.state is CompetencyState.EXPLORING
+    stored = repo.load_therapist_reviews("review-cross")[0].review
+    assert stored.evidence_source_session_id == "session-1"
+    summary = SummaryService(repo).build("session-2")
+    assert "evidence-1" in summary.historical_evidence_ids
+    assert "evidence-1" in summary.discarded_evidence_ids
+
+
+def test_profile_cas_is_learner_global_across_sessions(tmp_path):
+    repo = repository(tmp_path)
+    add_second_session(repo)
+    first = TherapistReviewService(repo, policy()).discard_evidence(discard())
+    assert first.status is ReviewStatus.APPLIED
+
+    stale = TherapistReviewService(repo, policy()).discard_evidence(replace(
+        discard(), command_id="stale-other-session", command_fingerprint="stale-other",
+        review_id="review-other", session_id="session-2", evidence_id="evidence-1",
+    ))
+
+    assert stale.status is ReviewStatus.CONFLICT
+    assert repo.load_summary_source("session-1").profile_version == 2
+    assert repo.load_summary_source("session-2").profile_version == 2
+    assert repo.load_therapist_reviews("review-other") == ()
+
+
+def test_review_integrity_race_returns_conflict_and_rolls_back(tmp_path):
+    repo = repository(tmp_path)
+    before = repo.load_estimate("learner-1", "add")
+    repo.append_profile_revision(
+        "concurrent-revision", "learner-1", 2, {"external": True},
+        policy_version=policy().version,
+    )
+
+    result = TherapistReviewService(repo, policy()).discard_evidence(discard())
+
+    assert result.status is ReviewStatus.CONFLICT
+    assert result.reason == "concurrent-review-conflict"
+    assert repo.load_estimate("learner-1", "add") == before
+    assert repo.load_therapist_reviews("review-1") == ()
+    assert repo.load_summary_source("session-1").profile_version == 1

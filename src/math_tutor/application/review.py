@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
-from math_tutor.application.summary import SessionSummarySource
+from math_tutor.application.summary import SessionSummarySource, SummaryService
 from math_tutor.domain.evidence import EvidenceRecord
 from math_tutor.domain.learning import CompetencyState, ProgressionPolicy, SkillEstimate
 
@@ -49,6 +49,7 @@ class CorrectSkillEstimate:
 @dataclass(frozen=True, slots=True)
 class DiscardEvidenceReview:
     evidence_id: str
+    evidence_source_session_id: str
     reason: str
     original_interpretation: str | None
     original_outcome: str
@@ -142,6 +143,7 @@ class TherapistReviewService:
         source = self._repository.load_summary_source(command.session_id)
         if source is None:
             return ReviewResult(ReviewStatus.REJECTED, "session-not-found", command.review_id)
+        SummaryService.validate_source(source, requested_session_id=command.session_id)
         record = next((item for item in source.evidence if item.evidence_id == command.evidence_id), None)
         if record is None or source.learner_id != command.learner_id:
             return ReviewResult(ReviewStatus.REJECTED, "evidence-owner-mismatch", command.review_id)
@@ -172,7 +174,7 @@ class TherapistReviewService:
             review_version, command.learner_id, command.session_id,
             command.expected_profile_version, current.version,
             DiscardEvidenceReview(
-                command.evidence_id, command.reason, record.current_interpretation,
+                command.evidence_id, record.observation.session_id, command.reason, record.current_interpretation,
                 record.observation.outcome.value,
             ),
             estimate, f"{command.command_id}:profile", ProfileRecalculation(
@@ -191,6 +193,7 @@ class TherapistReviewService:
         source = self._repository.load_summary_source(command.session_id)
         if source is None:
             return ReviewResult(ReviewStatus.REJECTED, "session-not-found", command.review_id)
+        SummaryService.validate_source(source, requested_session_id=command.session_id)
         if source.learner_id != command.learner_id:
             return ReviewResult(ReviewStatus.REJECTED, "session-owner-mismatch", command.review_id)
         current = next(

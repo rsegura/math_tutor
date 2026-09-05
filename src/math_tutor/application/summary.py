@@ -14,6 +14,14 @@ class NarrativeValidationError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class SummaryActivityRef:
+    learner_id: str
+    session_id: str
+    activity_id: str
+    objective_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class SessionSummarySource:
     session_id: str
     learner_id: str
@@ -23,6 +31,9 @@ class SessionSummarySource:
     estimates: tuple[SkillEstimate, ...]
     proposals: tuple[ProposedProfileChange, ...]
     discarded_evidence_ids: tuple[str, ...] = ()
+    authorised_objective_ids: tuple[str, ...] = ()
+    activity_refs: tuple[SummaryActivityRef, ...] = ()
+    proposal_session_ids: tuple[str, ...] = ()
 
 
 class SummarySourcePort(Protocol):
@@ -52,6 +63,8 @@ class SessionSummary:
 @dataclass(frozen=True, slots=True)
 class NarrativeClaim:
     claim_id: str
+    kind: str
+    is_hypothesis: bool
     text: str
     evidence_ids: tuple[str, ...]
 
@@ -64,6 +77,7 @@ class SummaryService:
         source = self._source.load_summary_source(session_id)
         if source is None:
             raise LookupError("session-summary-source-not-found")
+        self.validate_source(source, requested_session_id=session_id)
         canonical = {record.evidence_id: record for record in source.evidence}
         discarded = frozenset(source.discarded_evidence_ids)
         if not discarded <= canonical.keys():
@@ -87,9 +101,9 @@ class SummaryService:
                 ))
         visible_ids = canonical.keys() - discarded
         for index, proposal in enumerate(source.proposals, start=1):
-            evidence_ids = tuple(item for item in proposal.evidence_ids if item in visible_ids)
-            if not evidence_ids:
+            if not set(proposal.evidence_ids) <= visible_ids:
                 continue
+            evidence_ids = proposal.evidence_ids
             claims.append(SummaryClaim(
                 f"profile-proposal:{proposal.objective_id}:{index}", "profile-proposal",
                 f"Se propone {proposal.to_state.value} para {proposal.objective_id}.",
@@ -100,6 +114,95 @@ class SummaryService:
             source.profile_version, tuple(claims), tuple(canonical),
             tuple(item for item in canonical if item in discarded),
         )
+
+    @staticmethod
+    def validate_source(
+        source: SessionSummarySource, *, requested_session_id: str
+    ) -> None:
+        malformed = ValueError("malformed-summary-source")
+        if (
+            source.session_id != requested_session_id
+            or not isinstance(source.learner_id, str)
+            or not source.learner_id.strip()
+            or isinstance(source.session_version, bool)
+            or not isinstance(source.session_version, int)
+            or source.session_version < 1
+            or isinstance(source.profile_version, bool)
+            or not isinstance(source.profile_version, int)
+            or source.profile_version < 1
+        ):
+            raise malformed
+        evidence_by_id = {item.evidence_id: item for item in source.evidence}
+        observation_ids = {item.observation.observation_id for item in source.evidence}
+        if (
+            len(evidence_by_id) != len(source.evidence)
+            or len(observation_ids) != len(source.evidence)
+        ):
+            raise malformed
+        authorised = set(source.authorised_objective_ids)
+        if not authorised or len(authorised) != len(source.authorised_objective_ids):
+            raise malformed
+        activity_refs = {
+            (item.learner_id, item.session_id, item.activity_id, item.objective_id)
+            for item in source.activity_refs
+        }
+        if len(activity_refs) != len(source.activity_refs):
+            raise malformed
+        if any(
+            item.learner_id != source.learner_id
+            or item.objective_id not in authorised
+            for item in source.activity_refs
+        ):
+            raise malformed
+        for record in source.evidence:
+            observation = record.observation
+            if (
+                record.learner_id != source.learner_id
+                or observation.learner_id != source.learner_id
+                or observation.objective_id not in authorised
+                or (source.learner_id, observation.session_id, observation.activity_id, observation.objective_id)
+                not in activity_refs
+            ):
+                raise malformed
+        for estimate in source.estimates:
+            if estimate.learner_id != source.learner_id or estimate.objective_id not in authorised:
+                raise malformed
+            for evidence_id, observation_id in zip(
+                estimate.supporting_evidence_ids,
+                estimate.supporting_observation_ids,
+                strict=True,
+            ):
+                record = evidence_by_id.get(evidence_id)
+                if (
+                    record is None
+                    or record.observation.observation_id != observation_id
+                    or record.observation.objective_id != estimate.objective_id
+                ):
+                    raise malformed
+        if len({item.objective_id for item in source.estimates}) != len(source.estimates):
+            raise malformed
+        if (
+            len(source.proposal_session_ids) != len(source.proposals)
+            or any(item != source.session_id for item in source.proposal_session_ids)
+        ):
+            raise malformed
+        for proposal in source.proposals:
+            if proposal.learner_id != source.learner_id or proposal.objective_id not in authorised:
+                raise malformed
+            for evidence_id, observation_id in zip(
+                proposal.evidence_ids, proposal.observation_ids, strict=True
+            ):
+                record = evidence_by_id.get(evidence_id)
+                if (
+                    record is None
+                    or record.observation.observation_id != observation_id
+                    or record.observation.objective_id != proposal.objective_id
+                ):
+                    raise malformed
+        if not set(source.discarded_evidence_ids) <= evidence_by_id.keys():
+            raise malformed
+        if len(set(source.discarded_evidence_ids)) != len(source.discarded_evidence_ids):
+            raise malformed
 
     def validate_narrative(
         self, summary: SessionSummary, claims: tuple[NarrativeClaim, ...]
@@ -112,6 +215,8 @@ class SummaryService:
                 raise NarrativeValidationError("unknown or duplicate narrative claim id")
             if tuple(claim.evidence_ids) != source.evidence_ids:
                 raise NarrativeValidationError("narrative evidence differs from authoritative claim")
+            if claim.kind != source.kind or claim.is_hypothesis is not source.is_hypothesis:
+                raise NarrativeValidationError("narrative claim classification differs from authoritative claim")
             if not isinstance(claim.text, str) or not claim.text.strip():
                 raise NarrativeValidationError("narrative claim text must be nonempty")
             seen.add(claim.claim_id)
