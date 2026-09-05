@@ -58,7 +58,7 @@ def _error(error: ProvisioningError) -> HTTPException:
         return HTTPException(status.HTTP_409_CONFLICT, reason)
     if reason.endswith("not-found"):
         return HTTPException(status.HTTP_404_NOT_FOUND, reason)
-    return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, reason)
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, reason)
 
 
 def create_therapist_router(service: ProvisioningService, token: str) -> APIRouter:

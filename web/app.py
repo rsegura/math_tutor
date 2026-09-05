@@ -15,7 +15,7 @@ from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRep
 from web.therapist_api import create_therapist_router
 
 
-_PLACEHOLDERS = {"replace-me", "changeme", "change-me", "placeholder", "secret", "token"}
+_PLACEHOLDERS = {"replace-me", "changeme", "change-me", "placeholder", "secret", "token", "weak-secret"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +25,9 @@ class WebSettings:
 
     def __post_init__(self) -> None:
         token = (self.therapist_api_token or "").strip()
-        if self.therapist_api_enabled and (len(token) < 16 or token.lower() in _PLACEHOLDERS):
+        placeholder = token.lower() in _PLACEHOLDERS or any(marker in token.lower() for marker in ("replace-with", "placeholder", "example-token"))
+        weak = len(token) < 24 or len(set(token)) < 8
+        if self.therapist_api_enabled and (placeholder or weak):
             raise ValueError("THERAPIST_API_TOKEN must be a non-placeholder server secret when therapist API is enabled")
 
     @classmethod

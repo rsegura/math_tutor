@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
-from math_tutor.application.ports import ClipPurgePort, ProvisioningRepository
+from math_tutor.application.ports import ClipPurgePort, ProvisioningConflict, ProvisioningRepository
 from math_tutor.domain.audio_consent import AudioConsent
 from math_tutor.domain.curriculum import CurriculumCatalog
 from math_tutor.domain.learning import LearningPlan, LearningSession, PresentationProfile
@@ -186,16 +186,22 @@ class ProvisioningService:
         plan = self.repository.load_current_provisioned_plan(command.learner_id)
         if plan is None: raise ProvisioningError("current-plan-not-found")
         if not plan.plan.authorised_objective_ids: raise ProvisioningError("empty-objectives")
-        consent = None
-        if command.audio_consent_id is not None:
-            consent = self.repository.load_audio_consent(command.audio_consent_id)
-            if consent is None or not consent.active or consent.learner_id != command.learner_id or (consent.plan_id, consent.plan_version) != (plan.plan_id, plan.version):
-                raise ProvisioningError("invalid-audio-consent")
         at = now or datetime.now(timezone.utc)
         session_id, join_code = secrets.token_urlsafe(18), secrets.token_urlsafe(24)
         session = LearningSession.start(session_id=session_id, plan=plan.plan)
         profile_version = self.repository.load_profile_version(command.learner_id)
         if profile_version is None:
             raise ProvisioningError("learner-profile-not-found")
-        snapshot_id = self.repository.create_provisioned_session(session, profile_version=profile_version, join_code_hash=hashlib.sha256(join_code.encode()).hexdigest(), join_expires_at=at + self.join_ttl, consent=consent)
+        try:
+            snapshot_id = self.repository.create_provisioned_session(
+                session,
+                expected_plan_id=plan.plan_id,
+                expected_plan_version=plan.version,
+                expected_profile_version=profile_version,
+                join_code_hash=hashlib.sha256(join_code.encode()).hexdigest(),
+                join_expires_at=at + self.join_ttl,
+                consent_id=command.audio_consent_id,
+            )
+        except ProvisioningConflict as error:
+            raise ProvisioningError(str(error)) from error
         return StartedSession(session_id, join_code, at + self.join_ttl, plan.plan_id, plan.version, snapshot_id)

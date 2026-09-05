@@ -11,7 +11,7 @@ import secrets
 from datetime import datetime
 from typing import Any
 
-from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, StoredCommandResult, StoredObservation)
+from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, ProvisioningConflict, StoredCommandResult, StoredObservation)
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.review import CorrectSkillEstimateReview, DiscardEvidenceReview, ProfileRecalculation, ReviewCommandIdentity, ReviewMutation, ReviewResult, ReviewStatus
 from math_tutor.application.summary import SessionSummarySource, SummaryActivityRef
@@ -327,23 +327,31 @@ class SQLiteTutoringRepository:
             db.close()
         return self.load_audio_consent(consent_id)
 
-    def create_provisioned_session(self, session: LearningSession, *, profile_version: int, join_code_hash: str, join_expires_at, consent: AudioConsent | None) -> str | None:
+    def create_provisioned_session(self, session: LearningSession, *, expected_plan_id: str, expected_plan_version: int, expected_profile_version: int, join_code_hash: str, join_expires_at, consent_id: str | None) -> str | None:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
+            if (session.plan_id, session.plan_version) != (expected_plan_id, expected_plan_version):
+                raise ProvisioningConflict("stale-plan-version")
             owner = db.execute("SELECT 1 FROM provisioned_plans WHERE plan_id=? AND version=? AND learner_id=?", (session.plan_id, session.plan_version, session.learner_id)).fetchone()
-            if owner is None: raise ValueError("session plan is not current provisioning state")
-            current = db.execute("SELECT MAX(version) FROM provisioned_plans WHERE learner_id=?", (session.learner_id,)).fetchone()[0]
-            if current != session.plan_version: raise ValueError("session plan is stale")
+            if owner is None: raise ProvisioningConflict("stale-plan-version")
+            current = db.execute("SELECT plan_id,version FROM provisioned_plans WHERE learner_id=? ORDER BY version DESC LIMIT 1", (session.learner_id,)).fetchone()
+            if current is None or tuple(current) != (expected_plan_id, expected_plan_version):
+                raise ProvisioningConflict("stale-plan-version")
             canonical_profile = db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?", (session.learner_id,)).fetchone()
-            if canonical_profile is None or canonical_profile[0] != profile_version:
-                raise ValueError("session profile version must match canonical learner profile")
-            db.execute("INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) VALUES(?,?,?,?,?,?,?)", (session.session_id, session.learner_id, session.plan_id, session.plan_version, _dump(session), session.version, profile_version))
+            if canonical_profile is None or canonical_profile[0] != expected_profile_version:
+                raise ProvisioningConflict("stale-profile-version")
+            consent = None
+            if consent_id is not None:
+                consent = db.execute("SELECT consent_id,learner_id,plan_id,plan_version,retention_days,granted_at,revoked_at FROM audio_consents WHERE consent_id=?", (consent_id,)).fetchone()
+                if consent is None or consent[6] is not None or consent[1] != session.learner_id or (consent[2], consent[3]) != (expected_plan_id, expected_plan_version):
+                    raise ProvisioningConflict("invalid-audio-consent")
+            db.execute("INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) VALUES(?,?,?,?,?,?,?)", (session.session_id, session.learner_id, session.plan_id, session.plan_version, _dump(session), session.version, expected_profile_version))
             db.execute("INSERT INTO learner_join_codes(session_id,code_hash,expires_at) VALUES(?,?,?)", (session.session_id, join_code_hash, join_expires_at.isoformat()))
             snapshot_id = None
             if consent is not None:
                 snapshot_id = secrets.token_urlsafe(18)
-                db.execute("INSERT INTO session_audio_consent_snapshots(snapshot_id,consent_id,learner_id,session_id,plan_id,plan_version,retention_days,granted_at) VALUES(?,?,?,?,?,?,?,?)", (snapshot_id,consent.consent_id,consent.learner_id,session.session_id,consent.plan_id,consent.plan_version,consent.retention_days,consent.granted_at.isoformat()))
+                db.execute("INSERT INTO session_audio_consent_snapshots(snapshot_id,consent_id,learner_id,session_id,plan_id,plan_version,retention_days,granted_at) VALUES(?,?,?,?,?,?,?,?)", (snapshot_id,consent[0],consent[1],session.session_id,consent[2],consent[3],consent[4],consent[5]))
             db.commit(); return snapshot_id
         except Exception:
             db.rollback(); raise
