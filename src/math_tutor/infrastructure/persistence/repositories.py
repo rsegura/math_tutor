@@ -7,6 +7,8 @@ from enum import Enum
 import json
 from pathlib import Path
 import sqlite3
+import secrets
+from datetime import datetime
 from typing import Any
 
 from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, StoredCommandResult, StoredObservation)
@@ -17,6 +19,8 @@ from math_tutor.domain.activities import Activity, AnswerInputStatus, Structured
 from math_tutor.domain.evidence import EvidenceRecord, EvidenceRevision, Observation, ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import CompetencyState, LearningPlan, LearningSession, PresentationProfile, ProposedProfileChange, SkillEstimate
 from math_tutor.domain.templates import ExpectedAnswerKind
+from math_tutor.domain.audio_consent import AudioConsent
+from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +226,138 @@ class SQLiteTutoringRepository:
         with self._connect() as db:
             row = db.execute("SELECT learner_id,curriculum_snapshot,curriculum_version FROM learners WHERE learner_id=?", (learner_id,)).fetchone()
         return LearnerRecord(*row) if row else None
+
+    def create_learner_profile(self, learner: LearnerProfile, *, curriculum_snapshot: str, curriculum_version: str) -> None:
+        if not isinstance(learner, LearnerProfile):
+            raise TypeError("learner must be a LearnerProfile")
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO learners(learner_id,curriculum_snapshot,curriculum_version,pseudonym,age_years) VALUES(?,?,?,?,?)",
+                (learner.learner_id, curriculum_snapshot, curriculum_version, learner.pseudonym, learner.age_years),
+            )
+            db.execute(
+                "INSERT INTO curriculum_snapshots(learner_id,curriculum_version,curriculum_snapshot) VALUES(?,?,?)",
+                (learner.learner_id, curriculum_version, curriculum_snapshot),
+            )
+            db.execute("INSERT INTO learner_profile_versions(learner_id,version) VALUES(?,1)", (learner.learner_id,))
+            db.commit()
+        except sqlite3.IntegrityError as error:
+            db.rollback()
+            raise ValueError("learner already exists") from error
+        finally:
+            db.close()
+
+    def load_learner_profile(self, learner_id: str) -> LearnerProfile | None:
+        with self._connect() as db:
+            row = db.execute("SELECT learner_id,pseudonym,age_years FROM learners WHERE learner_id=? AND pseudonym IS NOT NULL AND age_years IS NOT NULL", (learner_id,)).fetchone()
+        return LearnerProfile(*row) if row else None
+
+    def create_provisioned_plan(self, value: ProvisionedPlan) -> None:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            plan = value.plan
+            learner = db.execute("SELECT curriculum_version FROM learners WHERE learner_id=?", (plan.learner_id,)).fetchone()
+            if learner is None:
+                raise ValueError("learning plan learner does not exist")
+            if db.execute("SELECT 1 FROM provisioned_plans WHERE learner_id=?", (plan.learner_id,)).fetchone():
+                raise ValueError("learner already has a learning plan")
+            db.execute("INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version,curriculum_version) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, _dump(plan), "provisioning/v1", learner[0]))
+            db.execute("INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, json.dumps(value.adaptations), value.limits.duration_minutes, value.limits.max_activities))
+            db.commit()
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
+
+    def update_provisioned_plan(self, value: ProvisionedPlan, *, expected_version: int) -> bool:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            plan = value.plan
+            current = db.execute("SELECT plan_id,version FROM provisioned_plans WHERE learner_id=? ORDER BY version DESC LIMIT 1", (plan.learner_id,)).fetchone()
+            if current is None or current[0] != plan.plan_id or current[1] != expected_version or plan.version != expected_version + 1:
+                db.rollback(); return False
+            curriculum = db.execute("SELECT curriculum_version FROM learners WHERE learner_id=?", (plan.learner_id,)).fetchone()[0]
+            db.execute("INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version,curriculum_version) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, _dump(plan), "provisioning/v1", curriculum))
+            db.execute("INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, json.dumps(value.adaptations), value.limits.duration_minutes, value.limits.max_activities))
+            db.commit(); return True
+        except sqlite3.IntegrityError:
+            db.rollback(); return False
+        finally:
+            db.close()
+
+    def load_current_provisioned_plan(self, learner_id: str) -> ProvisionedPlan | None:
+        with self._connect() as db:
+            row = db.execute("SELECT p.plan_id,p.version,p.adaptations_json,p.duration_minutes,p.max_activities,l.plan_json FROM provisioned_plans p JOIN learning_plans l ON l.plan_id=p.plan_id AND l.version=p.version WHERE p.learner_id=? ORDER BY p.version DESC LIMIT 1", (learner_id,)).fetchone()
+        if row is None: return None
+        return ProvisionedPlan(_load(row[5]), tuple(json.loads(row[2])), SessionLimits(row[3], row[4]))
+
+    def load_profile_version(self, learner_id: str) -> int | None:
+        with self._connect() as db:
+            row = db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?", (learner_id,)).fetchone()
+        return row[0] if row else None
+
+    def save_audio_consent(self, consent: AudioConsent) -> None:
+        with self._connect() as db:
+            current = db.execute("SELECT plan_id,version FROM provisioned_plans WHERE learner_id=? ORDER BY version DESC LIMIT 1", (consent.learner_id,)).fetchone()
+            if current is None or tuple(current) != (consent.plan_id, consent.plan_version):
+                raise ValueError("consent must reference the current learner plan")
+            db.execute("INSERT INTO audio_consents(consent_id,learner_id,plan_id,plan_version,retention_days,granted_at,revoked_at,version) VALUES(?,?,?,?,?,?,?,?)", (consent.consent_id, consent.learner_id, consent.plan_id, consent.plan_version, consent.retention_days, consent.granted_at.isoformat(), None, consent.version))
+
+    def load_audio_consent(self, consent_id: str) -> AudioConsent | None:
+        with self._connect() as db:
+            row = db.execute("SELECT consent_id,learner_id,plan_id,plan_version,retention_days,granted_at,revoked_at,version FROM audio_consents WHERE consent_id=?", (consent_id,)).fetchone()
+        if row is None: return None
+        return AudioConsent(row[0], row[1], row[2], row[3], row[4], datetime.fromisoformat(row[5]), datetime.fromisoformat(row[6]) if row[6] else None, row[7])
+
+    def revoke_audio_consent(self, consent_id: str, learner_id: str, at) -> AudioConsent | None:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT consent_id,learner_id,plan_id,plan_version,retention_days,granted_at,revoked_at,version FROM audio_consents WHERE consent_id=? AND learner_id=?", (consent_id, learner_id)).fetchone()
+            if row is None: db.rollback(); return None
+            if row[6] is None:
+                db.execute("UPDATE audio_consents SET revoked_at=?,version=version+1 WHERE consent_id=? AND revoked_at IS NULL", (at.isoformat(), consent_id))
+            db.execute("INSERT INTO consent_purge_audit(consent_id,last_requested_at,request_count) VALUES(?,?,1) ON CONFLICT(consent_id) DO UPDATE SET last_requested_at=excluded.last_requested_at,request_count=request_count+1", (consent_id, at.isoformat()))
+            db.commit()
+        finally:
+            db.close()
+        return self.load_audio_consent(consent_id)
+
+    def create_provisioned_session(self, session: LearningSession, *, profile_version: int, join_code_hash: str, join_expires_at, consent: AudioConsent | None) -> str | None:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            owner = db.execute("SELECT 1 FROM provisioned_plans WHERE plan_id=? AND version=? AND learner_id=?", (session.plan_id, session.plan_version, session.learner_id)).fetchone()
+            if owner is None: raise ValueError("session plan is not current provisioning state")
+            current = db.execute("SELECT MAX(version) FROM provisioned_plans WHERE learner_id=?", (session.learner_id,)).fetchone()[0]
+            if current != session.plan_version: raise ValueError("session plan is stale")
+            canonical_profile = db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?", (session.learner_id,)).fetchone()
+            if canonical_profile is None or canonical_profile[0] != profile_version:
+                raise ValueError("session profile version must match canonical learner profile")
+            db.execute("INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) VALUES(?,?,?,?,?,?,?)", (session.session_id, session.learner_id, session.plan_id, session.plan_version, _dump(session), session.version, profile_version))
+            db.execute("INSERT INTO learner_join_codes(session_id,code_hash,expires_at) VALUES(?,?,?)", (session.session_id, join_code_hash, join_expires_at.isoformat()))
+            snapshot_id = None
+            if consent is not None:
+                snapshot_id = secrets.token_urlsafe(18)
+                db.execute("INSERT INTO session_audio_consent_snapshots(snapshot_id,consent_id,learner_id,session_id,plan_id,plan_version,retention_days,granted_at) VALUES(?,?,?,?,?,?,?,?)", (snapshot_id,consent.consent_id,consent.learner_id,session.session_id,consent.plan_id,consent.plan_version,consent.retention_days,consent.granted_at.isoformat()))
+            db.commit(); return snapshot_id
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
+
+    def list_consent_session_ids(self, consent_id: str) -> tuple[str, ...]:
+        with self._connect() as db:
+            return tuple(row[0] for row in db.execute("SELECT session_id FROM session_audio_consent_snapshots WHERE consent_id=? ORDER BY session_id", (consent_id,)))
+
+    def load_join_code_hash(self, session_id: str) -> str | None:
+        with self._connect() as db:
+            row = db.execute("SELECT code_hash FROM learner_join_codes WHERE session_id=?", (session_id,)).fetchone()
+        return row[0] if row else None
 
     def load_curriculum_snapshot(self, learner_id: str, curriculum_version: str) -> str | None:
         with self._connect() as db:
