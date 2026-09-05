@@ -2,6 +2,8 @@ import sqlite3
 import threading
 from dataclasses import replace
 
+import pytest
+
 from math_tutor.application.ports import (
     ActivityProgress, ActivityProgressExpectation, CommitOutcome, MutationBatch,
     ObservationExpectation, PersistedTutoringState, StoredActivity, TutoringEvent,
@@ -37,6 +39,54 @@ def repository(tmp_path):
     repo.save_session(session(), profile_version=1)
     repo.save_estimate(SkillEstimate("learner-1", "objective-1", CompetencyState.NOT_OBSERVED))
     return repo
+
+
+def test_session_bootstrap_cannot_promote_or_lower_canonical_profile_version(tmp_path):
+    repo = repository(tmp_path)
+    plan = repo.load_plan("plan-1", 1)
+
+    with pytest.raises(ValueError, match="profile version must match canonical learner profile"):
+        repo.save_session(
+            LearningSession.start(session_id="session-high", plan=plan),
+            profile_version=99,
+        )
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT version FROM learner_profile_versions WHERE learner_id='learner-1'"
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM learning_sessions WHERE learner_id='learner-1'"
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM profile_revisions WHERE learner_id='learner-1'"
+        ).fetchone()[0] == 0
+        db.execute(
+            "UPDATE learner_profile_versions SET version=2 WHERE learner_id='learner-1'"
+        )
+        db.execute(
+            "UPDATE learning_sessions SET profile_version=2 WHERE learner_id='learner-1'"
+        )
+
+    with pytest.raises(ValueError, match="profile version must match canonical learner profile"):
+        repo.save_session(
+            LearningSession.start(session_id="session-stale", plan=plan),
+            profile_version=1,
+        )
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT version FROM learner_profile_versions WHERE learner_id='learner-1'"
+        ).fetchone()[0] == 2
+        assert db.execute(
+            "SELECT profile_version FROM learning_sessions WHERE session_id='session-1'"
+        ).fetchone()[0] == 2
+        assert db.execute(
+            "SELECT COUNT(*) FROM learning_sessions WHERE learner_id='learner-1'"
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM profile_revisions WHERE learner_id='learner-1'"
+        ).fetchone()[0] == 0
 
 
 def batch(command_id="command-1", fingerprint="fp-1"):

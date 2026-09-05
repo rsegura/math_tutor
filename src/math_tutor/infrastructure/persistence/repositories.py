@@ -256,9 +256,11 @@ class SQLiteTutoringRepository:
             canonical_profile_version = profile_version
             if self._has_profile_versions(db):
                 current = db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?", (session.learner_id,)).fetchone()
-                canonical_profile_version = max(profile_version, current[0] if current else 1)
-                db.execute("UPDATE learner_profile_versions SET version=? WHERE learner_id=?", (canonical_profile_version, session.learner_id))
-                db.execute("UPDATE learning_sessions SET profile_version=? WHERE learner_id=?", (canonical_profile_version, session.learner_id))
+                if current is None or profile_version != current[0]:
+                    raise ValueError(
+                        "session profile version must match canonical learner profile"
+                    )
+                canonical_profile_version = current[0]
             db.execute("INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) VALUES(?,?,?,?,?,?,?)", (session.session_id, session.learner_id, session.plan_id, session.plan_version, _dump(session), session.version, canonical_profile_version))
 
     def save_estimate(self, estimate: SkillEstimate, *, expected_version: int | None = None) -> None:

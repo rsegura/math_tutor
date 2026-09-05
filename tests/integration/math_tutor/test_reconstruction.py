@@ -15,11 +15,11 @@ def test_fresh_repository_reconstructs_provisioned_plan_session_and_versions(tmp
     session = LearningSession.start(session_id="session-9", plan=plan)
     repo.save_learner("learner-9", curriculum_snapshot="objectives: [count, add]", curriculum_version="curriculum-v2")
     repo.save_plan(plan, policy_version="policy-v4")
-    repo.save_session(session, profile_version=7)
+    repo.save_session(session, profile_version=1)
     reopened = SQLiteTutoringRepository(path)
     assert reopened.load_plan("plan-9", 3) == plan
     assert reopened.load_state("session-9").session == session
-    assert reopened.load_state("session-9").profile_version == 7
+    assert reopened.load_state("session-9").profile_version == 1
     snapshot = reopened.load_learner("learner-9")
     assert snapshot.curriculum_snapshot == "objectives: [count, add]"
     assert snapshot.curriculum_version == "curriculum-v2"
@@ -34,10 +34,10 @@ def test_full_session_aggregate_survives_repository_reopen(tmp_path):
     session = LearningSession.start(session_id="session-9", plan=plan)
     repo.save_learner("learner-9", curriculum_snapshot="objectives: [count]", curriculum_version="curriculum-v2")
     repo.save_plan(plan, policy_version="policy-v4")
-    repo.save_session(session, profile_version=7)
+    repo.save_session(session, profile_version=1)
     repo.save_estimate(SkillEstimate("learner-9", "count", CompetencyState.NOT_OBSERVED))
     activity = Activity("template-1", "count", 1, "Cuenta", {"n": 1}, StructuredAnswer.evaluable(ExpectedAnswerKind.INTEGER, {"answer": 1}), (), ())
-    repo.commit_once(MutationBatch("bootstrap-activity", "fp", "session-9", 1, 7,
+    repo.commit_once(MutationBatch("bootstrap-activity", "fp", "session-9", 1, 1,
         CommandResult("bootstrap-activity", CommandStatus.APPLIED, "created"),
         activities=(StoredActivity("activity-9", activity),),
         activity_progress=(ActivityProgress("activity-9", 0, 0, 1),),
