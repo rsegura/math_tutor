@@ -16,6 +16,26 @@ class ProvisioningError(ValueError):
     pass
 
 
+def _strict_text(value: object, reason: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ProvisioningError(reason)
+    return value
+
+
+def _strict_strings(values: object, reason: str) -> tuple[str, ...]:
+    if not isinstance(values, tuple):
+        raise ProvisioningError(reason)
+    for value in values:
+        _strict_text(value, reason)
+    return values
+
+
+def _nonnegative_version(value: object, reason: str = "invalid-expected-version") -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProvisioningError(reason)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class LearnerProfile:
     learner_id: str
@@ -49,6 +69,12 @@ class CreateLearner:
     pseudonym: str
     age_years: int
 
+    def __post_init__(self) -> None:
+        _strict_text(self.learner_id, "invalid-learner")
+        _strict_text(self.pseudonym, "invalid-learner")
+        if isinstance(self.age_years, bool) or not isinstance(self.age_years, int) or not 6 <= self.age_years <= 13:
+            raise ProvisioningError("invalid-learner")
+
 
 @dataclass(frozen=True, slots=True)
 class CreateLearningPlan:
@@ -59,6 +85,15 @@ class CreateLearningPlan:
     limits: SessionLimits
     expected_version: int = 0
 
+    def __post_init__(self) -> None:
+        _strict_text(self.plan_id, "invalid-plan")
+        _strict_text(self.learner_id, "invalid-plan")
+        _strict_strings(self.objective_ids, "invalid-objective")
+        _strict_strings(self.adaptations, "invalid-adaptation")
+        if not isinstance(self.limits, SessionLimits):
+            raise ProvisioningError("invalid-session-limits")
+        _nonnegative_version(self.expected_version)
+
 
 @dataclass(frozen=True, slots=True)
 class UpdateLearningPlan:
@@ -68,6 +103,15 @@ class UpdateLearningPlan:
     adaptations: tuple[str, ...]
     limits: SessionLimits
     expected_version: int
+
+    def __post_init__(self) -> None:
+        _strict_text(self.plan_id, "invalid-plan")
+        _strict_text(self.learner_id, "invalid-plan")
+        _strict_strings(self.objective_ids, "invalid-objective")
+        _strict_strings(self.adaptations, "invalid-adaptation")
+        if not isinstance(self.limits, SessionLimits):
+            raise ProvisioningError("invalid-session-limits")
+        _nonnegative_version(self.expected_version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +134,11 @@ class StartLearningSession:
     learner_id: str
     audio_consent_id: str | None = None
 
+    def __post_init__(self) -> None:
+        _strict_text(self.learner_id, "invalid-learner")
+        if self.audio_consent_id is not None:
+            _strict_text(self.audio_consent_id, "invalid-audio-consent")
+
 
 @dataclass(frozen=True, slots=True)
 class StartedSession:
@@ -106,6 +155,10 @@ class RevokeAudioConsent:
     learner_id: str
     consent_id: str
 
+    def __post_init__(self) -> None:
+        _strict_text(self.learner_id, "invalid-learner")
+        _strict_text(self.consent_id, "invalid-audio-consent")
+
 
 class ProvisioningService:
     ALLOWED_ADAPTATIONS = frozenset({"short-instructions", "slow-pace", "extra-repetition", "concrete-examples", "reduced-choice"})
@@ -116,11 +169,7 @@ class ProvisioningService:
         self.repository, self.curriculum, self.clip_purger, self.join_ttl = repository, curriculum, clip_purger, join_ttl
 
     def create_learner(self, command: CreateLearner) -> LearnerProfile:
-        try:
-            pseudonym = command.pseudonym.strip()
-        except AttributeError as error:
-            raise ProvisioningError("invalid-learner") from error
-        learner = LearnerProfile(command.learner_id, pseudonym, command.age_years)
+        learner = LearnerProfile(command.learner_id, command.pseudonym, command.age_years)
         try:
             self.repository.create_learner_profile(learner, curriculum_snapshot="primary-math-v1", curriculum_version="primary-math/v1")
         except ValueError as error:
@@ -165,6 +214,9 @@ class ProvisioningService:
         return result
 
     def grant_audio_consent(self, learner_id: str, *, retention_days: int, now: datetime | None = None) -> AudioConsent:
+        _strict_text(learner_id, "invalid-learner")
+        if isinstance(retention_days, bool) or not isinstance(retention_days, int):
+            raise ProvisioningError("retention days must be between 1 and 30")
         plan = self.repository.load_current_provisioned_plan(learner_id)
         if plan is None: raise ProvisioningError("current-plan-not-found")
         at = now or datetime.now(timezone.utc)

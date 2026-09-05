@@ -6,7 +6,7 @@ from dataclasses import asdict
 import hmac
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from math_tutor.application.provisioning import (
     CreateLearner, CreateLearningPlan, ProvisioningError, ProvisioningService,
@@ -15,18 +15,24 @@ from math_tutor.application.provisioning import (
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class LearnerBody(StrictModel):
     learner_id: str = Field(min_length=1, max_length=128)
     pseudonym: str = Field(min_length=1, max_length=80)
-    age_years: int
+    age_years: int = Field(ge=6, le=13)
+
+    @field_validator("learner_id", "pseudonym")
+    @classmethod
+    def trimmed(cls, value: str) -> str:
+        if value != value.strip(): raise ValueError("must be trimmed and nonblank")
+        return value
 
 
 class LimitsBody(StrictModel):
-    duration_minutes: int
-    max_activities: int
+    duration_minutes: int = Field(ge=5, le=30)
+    max_activities: int = Field(ge=1, le=20)
 
 
 class PlanBody(StrictModel):
@@ -34,18 +40,36 @@ class PlanBody(StrictModel):
     objective_ids: list[str]
     adaptations: list[str]
     limits: LimitsBody
-    expected_version: int = 0
+    expected_version: int = Field(default=0, ge=0)
+
+    @field_validator("plan_id")
+    @classmethod
+    def trimmed_id(cls, value: str) -> str:
+        if value != value.strip(): raise ValueError("must be trimmed and nonblank")
+        return value
+
+    @field_validator("objective_ids", "adaptations")
+    @classmethod
+    def trimmed_items(cls, values: list[str]) -> list[str]:
+        if any(not value or value != value.strip() for value in values): raise ValueError("items must be trimmed and nonblank")
+        return values
 
 
 class PlanUpdateBody(StrictModel):
-    expected_version: int
+    expected_version: int = Field(ge=0)
     objective_ids: list[str]
     adaptations: list[str]
     limits: LimitsBody
 
+    @field_validator("objective_ids", "adaptations")
+    @classmethod
+    def trimmed_items(cls, values: list[str]) -> list[str]:
+        if any(not value or value != value.strip() for value in values): raise ValueError("items must be trimmed and nonblank")
+        return values
+
 
 class ConsentBody(StrictModel):
-    retention_days: int
+    retention_days: int = Field(ge=1, le=30)
 
 
 class SessionBody(StrictModel):

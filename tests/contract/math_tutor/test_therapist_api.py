@@ -66,3 +66,63 @@ def test_server_secret_never_leaks_to_responses_logs_static_or_child_services(tm
     assert TOKEN not in api.get('/openapi.json').text
     assert "THERAPIST_API_TOKEN" not in tooling_block
     assert "THERAPIST_API_TOKEN" not in agent_block
+
+
+@pytest.mark.parametrize(("payload", "path"), [
+    ({"learner_id":"l1","pseudonym":"Luna","age_years":True}, "/api/therapist/learners"),
+    ({"learner_id":"l1","pseudonym":"Luna","age_years":"8"}, "/api/therapist/learners"),
+    ({"learner_id":" l1","pseudonym":"Luna","age_years":8}, "/api/therapist/learners"),
+    ({"learner_id":"l1","pseudonym":" ","age_years":8}, "/api/therapist/learners"),
+])
+def test_learner_boundary_rejects_coercion_and_whitespace_without_side_effects(tmp_path, payload, path):
+    api = client(tmp_path); headers={"Authorization":f"Bearer {TOKEN}"}
+    assert api.post(path, headers=headers, json=payload).status_code == 422
+    valid={"learner_id":"l1","pseudonym":"Luna","age_years":8}
+    assert api.post(path, headers=headers, json=valid).status_code == 201
+
+
+@pytest.mark.parametrize("field,value", [
+    ("expected_version", True), ("expected_version", -1),
+    ("expected_version", "0"), ("plan_id", " plan"),
+])
+def test_plan_boundary_rejects_invalid_versions_and_ids_without_mutation(tmp_path, field, value):
+    api = client(tmp_path); headers={"Authorization":f"Bearer {TOKEN}"}
+    api.post("/api/therapist/learners",headers=headers,json={"learner_id":"l1","pseudonym":"Luna","age_years":8})
+    body={"plan_id":"p1","expected_version":0,"objective_ids":["units-tens"],"adaptations":[],"limits":{"duration_minutes":10,"max_activities":3}}
+    body[field]=value
+    assert api.post("/api/therapist/learners/l1/plans",headers=headers,json=body).status_code == 422
+    body[field] = 0 if field == "expected_version" else "p1"
+    assert api.post("/api/therapist/learners/l1/plans",headers=headers,json=body).status_code == 201
+
+
+@pytest.mark.parametrize("limits", [
+    {"duration_minutes":True,"max_activities":3},
+    {"duration_minutes":"10","max_activities":3},
+    {"duration_minutes":10,"max_activities":False},
+    {"duration_minutes":10,"max_activities":0},
+])
+def test_plan_boundary_rejects_coercive_or_out_of_range_limits(tmp_path, limits):
+    api = client(tmp_path); headers={"Authorization":f"Bearer {TOKEN}"}
+    api.post("/api/therapist/learners",headers=headers,json={"learner_id":"l1","pseudonym":"Luna","age_years":8})
+    body={"plan_id":"p1","expected_version":0,"objective_ids":["units-tens"],"adaptations":[],"limits":limits}
+    assert api.post("/api/therapist/learners/l1/plans",headers=headers,json=body).status_code == 422
+    body["limits"]={"duration_minutes":10,"max_activities":3}
+    assert api.post("/api/therapist/learners/l1/plans",headers=headers,json=body).status_code == 201
+
+
+@pytest.mark.parametrize("retention", [True, "2", 0, 31])
+def test_consent_boundary_rejects_coercive_or_out_of_range_retention(tmp_path, retention):
+    api = client(tmp_path); headers={"Authorization":f"Bearer {TOKEN}"}
+    api.post("/api/therapist/learners",headers=headers,json={"learner_id":"l1","pseudonym":"Luna","age_years":8})
+    api.post("/api/therapist/learners/l1/plans",headers=headers,json={"plan_id":"p1","objective_ids":["units-tens"],"adaptations":[],"limits":{"duration_minutes":10,"max_activities":3}})
+    assert api.post("/api/therapist/learners/l1/audio-consents",headers=headers,json={"retention_days":retention}).status_code == 422
+
+
+def test_update_and_session_boundaries_reject_boolean_version_and_non_string_consent(tmp_path):
+    api = client(tmp_path); headers={"Authorization":f"Bearer {TOKEN}"}
+    api.post("/api/therapist/learners",headers=headers,json={"learner_id":"l1","pseudonym":"Luna","age_years":8})
+    plan={"plan_id":"p1","objective_ids":["units-tens"],"adaptations":[],"limits":{"duration_minutes":10,"max_activities":3}}
+    api.post("/api/therapist/learners/l1/plans",headers=headers,json=plan)
+    update={"expected_version":True,"objective_ids":["units-tens"],"adaptations":[],"limits":plan["limits"]}
+    assert api.put("/api/therapist/learners/l1/plans/p1",headers=headers,json=update).status_code == 422
+    assert api.post("/api/therapist/learners/l1/sessions",headers=headers,json={"audio_consent_id":123}).status_code == 422

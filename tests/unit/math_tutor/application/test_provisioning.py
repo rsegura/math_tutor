@@ -44,6 +44,40 @@ def test_invalid_direct_command_values_fail_with_typed_error(tmp_path):
         svc.create_learner(CreateLearner("learner-opaque", "Luna", "eight"))
 
 
+@pytest.mark.parametrize("values", [
+    (" learner", "Luna", 8),
+    ("learner", " ", 8),
+    ("learner", "Luna", True),
+])
+def test_direct_learner_commands_reject_coercive_or_untrimmed_values_without_writes(tmp_path, values):
+    svc = service(tmp_path)
+    with pytest.raises(ProvisioningError, match="invalid-learner"):
+        svc.create_learner(CreateLearner(*values))
+    assert svc.repository.load_learner("learner") is None
+
+
+def test_direct_plan_command_rejects_invalid_ids_versions_and_scope_without_writes(tmp_path):
+    svc = service(tmp_path)
+    svc.create_learner(CreateLearner("learner", "Luna", 8))
+    invalid = (
+        lambda: CreateLearningPlan(" plan", "learner", ("units-tens",), (), SessionLimits(10, 3)),
+        lambda: CreateLearningPlan("plan", "learner", (" units-tens",), (), SessionLimits(10, 3)),
+        lambda: CreateLearningPlan("plan", "learner", ("units-tens",), (" ",), SessionLimits(10, 3)),
+        lambda: CreateLearningPlan("plan", "learner", ("units-tens",), (), SessionLimits(10, 3), expected_version=True),
+        lambda: CreateLearningPlan("plan", "learner", ("units-tens",), (), SessionLimits(10, 3), expected_version=-1),
+    )
+    for build in invalid:
+        with pytest.raises(ProvisioningError):
+            svc.create_learning_plan(build())
+    assert svc.repository.load_current_provisioned_plan("learner") is None
+
+
+@pytest.mark.parametrize("values", [(True, 3), ("10", 3), (10, False), (10, 0)])
+def test_direct_session_limits_are_strict_and_bounded(values):
+    with pytest.raises(ProvisioningError, match="invalid-session-limits"):
+        SessionLimits(*values)
+
+
 def test_plan_rejects_unknown_objectives_and_adaptations(tmp_path):
     svc = service(tmp_path)
     svc.create_learner(CreateLearner("learner-1", "Luna", 8))
@@ -89,3 +123,11 @@ def test_revoke_is_idempotent_and_purges_all_bound_sessions(tmp_path):
     first = svc.revoke_audio_consent(command); second = svc.revoke_audio_consent(command)
     assert first.version == second.version == 2
     assert purger.calls == [(consent.consent_id, (session.tutoring_session_id,))] * 2
+
+
+def test_direct_consent_retention_rejects_boolean_without_a_write(tmp_path):
+    svc = service(tmp_path)
+    svc.create_learner(CreateLearner("learner-1", "Luna", 8))
+    svc.create_learning_plan(CreateLearningPlan("plan-1", "learner-1", ("units-tens",), (), SessionLimits(10, 3)))
+    with pytest.raises(ProvisioningError, match="retention days"):
+        svc.grant_audio_consent("learner-1", retention_days=True)
