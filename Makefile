@@ -12,8 +12,8 @@ down: ## Stop and remove local services
 build: ## Build all project images from the committed lockfile
 	$(COMPOSE) build tooling agent web
 
-agent: ## Run the agent scaffold in the foreground
-	$(COMPOSE) run --rm agent
+agent: ## Run the real tutoring voice worker in the foreground
+	$(COMPOSE) run --rm agent python -m math_tutor.agent.worker start
 
 test: ## Run pytest inside the network-independent tooling container
 	$(COMPOSE) run --rm tooling uv run pytest $(ARGS)

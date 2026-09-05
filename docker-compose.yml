@@ -27,18 +27,19 @@ services:
     depends_on:
       - livekit
     network_mode: service:livekit
+    command: python -m math_tutor.agent.worker start
     environment:
       LIVEKIT_URL: ws://127.0.0.1:7880
       LIVEKIT_API_KEY: devkey
       LIVEKIT_API_SECRET: devsecret-devsecret-devsecret-0000
-      STT_PROVIDER: ${STT_PROVIDER:-deepgram}
-      STT_MODEL: ${STT_MODEL:-nova-3}
+      STT_PROVIDER: ${STT_PROVIDER:-}
+      STT_MODEL: ${STT_MODEL:-}
       STT_API_KEY: ${STT_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
-      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
-      TTS_PROVIDER: ${TTS_PROVIDER:-elevenlabs}
+      TTS_PROVIDER: ${TTS_PROVIDER:-}
       TTS_MODEL: ${TTS_MODEL:-}
       TTS_VOICE_ID: ${TTS_VOICE_ID:-}
       TTS_API_KEY: ${TTS_API_KEY:-}
@@ -61,3 +62,6 @@ services:
       DATABASE_PATH: /app/data/math_tutor.db
       THERAPIST_API_ENABLED: "true"
       THERAPIST_API_TOKEN: ${THERAPIST_API_TOKEN:-}
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: devsecret-devsecret-devsecret-0000
+      LIVEKIT_PUBLIC_URL: ws://localhost:7880

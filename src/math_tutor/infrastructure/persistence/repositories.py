@@ -21,6 +21,7 @@ from math_tutor.domain.learning import CompetencyState, LearningPlan, LearningSe
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.domain.audio_consent import AudioConsent
 from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits
+from math_tutor.infrastructure.dispatch import VoiceBootstrap, VoiceBootstrapError, verify_join_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +367,96 @@ class SQLiteTutoringRepository:
         with self._connect() as db:
             row = db.execute("SELECT code_hash FROM learner_join_codes WHERE session_id=?", (session_id,)).fetchone()
         return row[0] if row else None
+
+    def authorise_learner_join(self, session_id: str, join_code: str, *, now: datetime) -> VoiceBootstrap:
+        """Consume a short-lived join code only after every durable guard passes."""
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT s.session_json,s.version,s.profile_version,s.learner_id,s.plan_id,s.plan_version,"
+                "j.code_hash,j.expires_at,j.consumed_at,l.pseudonym,l.age_years,p.adaptations_json,p.duration_minutes,p.max_activities,lp.plan_json "
+                "FROM learning_sessions s JOIN learner_join_codes j ON j.session_id=s.session_id "
+                "JOIN learners l ON l.learner_id=s.learner_id "
+                "JOIN provisioned_plans p ON p.plan_id=s.plan_id AND p.version=s.plan_version "
+                "JOIN learning_plans lp ON lp.plan_id=s.plan_id AND lp.version=s.plan_version "
+                "WHERE s.session_id=?", (session_id,),
+            ).fetchone()
+            if row is None:
+                raise VoiceBootstrapError("session-not-found")
+            session = _load(row[0])
+            if session.ended or not session.can_continue:
+                raise VoiceBootstrapError("session-inactive")
+            current = db.execute(
+                "SELECT plan_id,version FROM provisioned_plans WHERE learner_id=? ORDER BY version DESC LIMIT 1",
+                (row[3],),
+            ).fetchone()
+            if current is None or tuple(current) != (row[4], row[5]):
+                raise VoiceBootstrapError("stale-plan-version")
+            if not session.authorised_objective_ids or set(session.active_objective_ids) - set(session.authorised_objective_ids):
+                raise VoiceBootstrapError("invalid-objective-scope")
+            expires = datetime.fromisoformat(row[7])
+            at = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+            expires = expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)
+            if row[8] is not None or expires <= at or not verify_join_code(row[6], join_code):
+                raise VoiceBootstrapError("invalid-join-code")
+            plan = _load(row[14])
+            if not isinstance(plan, LearningPlan):
+                raise VoiceBootstrapError("plan-not-found")
+            learner = LearnerProfile(row[3], row[9], row[10])
+            snapshot = db.execute(
+                "SELECT snapshot_id,consent_id FROM session_audio_consent_snapshots WHERE session_id=?", (session_id,)
+            ).fetchone()
+            clip_enabled = False
+            snapshot_id = None
+            if snapshot is not None:
+                snapshot_id = snapshot[0]
+                active = db.execute("SELECT revoked_at FROM audio_consents WHERE consent_id=?", (snapshot[1],)).fetchone()
+                clip_enabled = bool(active is not None and active[0] is None)
+            cursor = db.execute(
+                "UPDATE learner_join_codes SET consumed_at=? WHERE session_id=? AND consumed_at IS NULL",
+                (at.isoformat(), session_id),
+            )
+            if cursor.rowcount != 1:
+                raise VoiceBootstrapError("invalid-join-code")
+            db.commit()
+            return VoiceBootstrap(learner, ProvisionedPlan(plan, tuple(json.loads(row[11])), SessionLimits(row[12], row[13])), session, row[2], snapshot_id, clip_enabled)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def reconstruct_voice_runtime(self, metadata) -> VoiceBootstrap:
+        """Rebuild exact authorised state for a dispatched worker without fallback."""
+        state = self.load_state(metadata.tutoring_session_id)
+        if state is None:
+            raise VoiceBootstrapError("session-not-found")
+        session = state.session
+        if session.version != metadata.expected_session_version or session.ended or not session.can_continue:
+            raise VoiceBootstrapError("session-inactive-or-stale")
+        if (session.plan_id, session.plan_version) != (metadata.plan_id, metadata.expected_plan_version):
+            raise VoiceBootstrapError("dispatch-plan-mismatch")
+        learner = self.load_learner_profile(session.learner_id)
+        plan = self.load_current_provisioned_plan(session.learner_id)
+        profile_version = self.load_profile_version(session.learner_id)
+        if learner is None or plan is None or profile_version is None:
+            raise VoiceBootstrapError("incomplete-runtime-state")
+        if (plan.plan_id, plan.version) != (session.plan_id, session.plan_version):
+            raise VoiceBootstrapError("stale-plan-version")
+        if state.profile_version != profile_version:
+            raise VoiceBootstrapError("stale-profile-version")
+        if not session.authorised_objective_ids or session.authorised_objective_ids != plan.plan.authorised_objective_ids:
+            raise VoiceBootstrapError("invalid-objective-scope")
+        with self._connect() as db:
+            snapshot = db.execute("SELECT snapshot_id,consent_id FROM session_audio_consent_snapshots WHERE session_id=?", (session.session_id,)).fetchone()
+            enabled = False
+            snapshot_id = None
+            if snapshot:
+                snapshot_id = snapshot[0]
+                consent = db.execute("SELECT revoked_at FROM audio_consents WHERE consent_id=?", (snapshot[1],)).fetchone()
+                enabled = bool(consent and consent[0] is None)
+        return VoiceBootstrap(learner, plan, session, profile_version, snapshot_id, enabled)
 
     def load_curriculum_snapshot(self, learner_id: str, curriculum_version: str) -> str | None:
         with self._connect() as db:
