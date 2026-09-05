@@ -45,7 +45,7 @@ class Service:
 
 class Model:
     def __init__(self, outputs): self.outputs, self.calls = list(outputs), []
-    def complete(self, *, prompt, context, repair):
+    def complete(self, *, prompt, context, repair, validation_error=None):
         self.calls.append(repair)
         return self.outputs.pop(0)
 

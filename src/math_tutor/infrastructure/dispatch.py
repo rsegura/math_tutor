@@ -82,6 +82,7 @@ class VoiceBootstrap:
     profile_version: int
     audio_consent_snapshot_id: str | None
     clip_capture_enabled: bool
+    session_started_at: datetime
 
 
 class VoiceBootstrapError(ValueError):

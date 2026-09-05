@@ -30,7 +30,8 @@ def _instructions(runtime) -> str:
         "Trabajas únicamente dentro de las acciones validadas por el harness pedagógico. "
         f"Dirígete al alumno como {learner.pseudonym}. Estilo: {plan.plan.presentation.language_style}; "
         f"instrucciones: {plan.plan.presentation.instruction_length}. Objetivos autorizados: {objectives}. "
-        f"Adaptaciones: {adaptations}. Respeta inmediatamente cualquier petición de parar."
+        f"Adaptaciones: {adaptations}. Límites: {plan.limits.duration_minutes} minutos y "
+        f"{plan.limits.max_activities} actividades. Respeta inmediatamente cualquier petición de parar."
     )
 
 
@@ -45,7 +46,7 @@ async def entrypoint(ctx: JobContext) -> None:
     stt, tts = create_voice_providers(runtime.providers)
     await ctx.connect()
     session = AgentSession(stt=stt, llm=SilentLLM(), tts=tts, vad=silero.VAD.load(), preemptive_generation=False)
-    agent = HarnessVoiceAgent(instructions=_instructions(runtime), initial_prompt=engine.initial_prompt, decide=engine.decide, cancel=engine.cancel, tts_watchdog=TTSWatchdog())
+    agent = HarnessVoiceAgent(instructions=_instructions(runtime), initial_prompt=engine.initial_prompt, decide=engine.decide, cancel=engine.cancel, tts_watchdog=TTSWatchdog(), initial_terminal_reason=engine.startup_terminal_reason)
     closer = TerminalCloser(ctx, session)
     agent.bind_terminal_closer(closer)
     ctx.add_shutdown_callback(closer.aclose)

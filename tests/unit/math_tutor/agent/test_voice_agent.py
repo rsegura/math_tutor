@@ -1,6 +1,8 @@
 import asyncio
+from types import SimpleNamespace
+from threading import Event
 
-from math_tutor.agent.voice_agent import TurnCoordinator
+from math_tutor.agent.voice_agent import HarnessVoiceAgent, TurnCoordinator, VoiceDecision, VoiceTurn
 
 
 def test_low_confidence_turn_requests_confirmation_without_model_call():
@@ -41,3 +43,43 @@ def test_completion_is_correlated_to_the_active_turn():
     assert coordinator.complete_turn("one", "antiguo") is None
     assert coordinator.complete_turn("two", "actual").speech == "actual"
 
+
+def agent(decide, cancel=lambda:None):
+    return HarnessVoiceAgent(instructions="bounded",initial_prompt="Pregunta",decide=decide,cancel=cancel)
+
+
+async def output(node): return [item async for item in node]
+
+
+def chat(text): return SimpleNamespace(items=[SimpleNamespace(role="user",text_content=text)])
+
+
+async def test_harness_agent_rejects_uncorrelated_and_low_confidence_turns_without_model():
+    calls=[]; value=agent(lambda turn:calls.append(turn) or VoiceDecision("modelo"))
+    value._pending=VoiceTurn("t","uno",.9,Event())
+    assert await output(value.llm_node(chat("dos"),[],None)) == ["No estoy seguro de haberte oído bien. ¿Puedes repetirlo?"]
+    value._pending=VoiceTurn("t2","uno",.2,Event())
+    assert await output(value.llm_node(chat("uno"),[],None)) == ["No estoy seguro de haberte oído bien. ¿Puedes repetirlo?"]
+    assert calls == []
+
+
+async def test_terminal_closer_triggers_when_terminal_yield_is_interrupted():
+    reasons=[]; value=agent(lambda turn:VoiceDecision("Paramos",terminal=True,reason="stop"))
+    value.bind_terminal_closer(SimpleNamespace(trigger=lambda reason:reasons.append(reason)))
+    value._pending=VoiceTurn("t","quiero parar",.1,Event())
+    node=value.llm_node(chat("quiero parar"),[],None)
+    assert await anext(node) == "Paramos"
+    await node.aclose()
+    assert reasons == ["stop"]
+
+
+async def test_interrupted_harness_generation_cancels_authoritative_generation():
+    entered=Event(); release=Event(); cancellations=[]
+    def decide(turn): entered.set(); release.wait(1); return VoiceDecision("late")
+    value=agent(decide,lambda:cancellations.append(True)); value._pending=VoiceTurn("t","uno",.9,Event())
+    task=asyncio.create_task(anext(value.llm_node(chat("uno"),[],None)))
+    await asyncio.to_thread(entered.wait,1)
+    task.cancel()
+    with __import__('pytest').raises(asyncio.CancelledError): await task
+    release.set()
+    assert cancellations == [True]

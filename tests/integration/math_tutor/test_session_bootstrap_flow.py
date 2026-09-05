@@ -1,4 +1,8 @@
 from pathlib import Path
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import sqlite3
+from threading import Event
 
 import pytest
 
@@ -8,6 +12,9 @@ from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.dispatch import DispatchMetadata, VoiceBootstrapError
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
+from math_tutor.infrastructure.persistence.repositories import _dump
+from math_tutor.application.ports import ActivityProgress
+from math_tutor.agent.voice_agent import VoiceTurn
 
 
 class Purger:
@@ -67,3 +74,56 @@ def test_composition_selects_reviewed_initial_activity_before_voice(tmp_path):
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"))
     assert engine.initial_prompt
     assert repo.load_activity(metadata.tutoring_session_id,"activity-1").objective_id == "units-tens"
+
+
+def test_worker_rejects_empty_active_objectives_before_provider_configuration(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    state=repo.load_state(metadata.tutoring_session_id)
+    forged=replace(state.session,active_objective_ids=())
+    with sqlite3.connect(repo.database) as db:
+        db.execute("UPDATE learning_sessions SET session_json=? WHERE session_id=?",(_dump(forged),metadata.tutoring_session_id))
+    with pytest.raises(VoiceBootstrapError,match="objective"):
+        build_tutoring_runtime(metadata=metadata,repository=repo,env={})
+
+
+def test_expired_duration_cap_ends_durably_before_model_or_activity(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    with sqlite3.connect(repo.database) as db:
+        db.execute("UPDATE learning_sessions SET created_at=? WHERE session_id=?",((datetime.now(timezone.utc)-timedelta(minutes=20)).isoformat(),metadata.tutoring_session_id))
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),now=lambda:datetime.now(timezone.utc),model=SimpleModel())
+    assert engine.startup_terminal_reason == "duration-cap-reached"
+    assert repo.load_state(metadata.tutoring_session_id).session.ended
+    assert repo.load_session_aggregate(metadata.tutoring_session_id).activities == ()
+
+
+class SimpleModel:
+    def complete(self,**kwargs): raise AssertionError("model must not run")
+
+
+def test_completed_activity_cap_stops_before_next_model_call(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    with sqlite3.connect(repo.database) as db:
+        db.execute("UPDATE provisioned_plans SET max_activities=1 WHERE plan_id=?",(metadata.plan_id,))
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    with sqlite3.connect(repo.database) as db:
+        db.execute("UPDATE activity_progress SET progress_json=? WHERE session_id=?",(_dump(ActivityProgress("activity-1",1,0,1,1)),metadata.tutoring_session_id))
+    decision=engine.decide(VoiceTurn("turn","uno",.9,Event()))
+    assert decision.terminal and decision.reason == "activity-cap-reached"
+    assert repo.load_state(metadata.tutoring_session_id).session.ended
+
+
+def test_duration_rechecked_after_model_before_tool_mutation_or_speech(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    current=[runtime.bootstrap.session_started_at+timedelta(minutes=10)]
+    class CrossingModel:
+        def complete(self,**kwargs):
+            current[0] += timedelta(minutes=2)
+            return {"type":"tool","name":"give_hint","arguments":{}}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),now=lambda:current[0],model=CrossingModel())
+    decision=engine.decide(VoiceTurn("turn","una pista",.9,Event()))
+    assert decision.terminal and decision.reason == "duration-cap-reached"
+    progress=repo.load_state(metadata.tutoring_session_id).progress_for("activity-1")
+    assert progress.hints_used == 0

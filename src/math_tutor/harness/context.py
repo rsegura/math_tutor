@@ -1,6 +1,7 @@
 """Deliberately bounded, child-safe context supplied to a model."""
 from dataclasses import dataclass
 import unicodedata
+from math_tutor.domain.templates import ExpectedAnswerKind
 
 class ContextError(ValueError): pass
 
@@ -10,6 +11,7 @@ _MAX_TEXT_CHARS = 400
 _MAX_COLLECTION_ENTRIES = 20
 _MAX_HISTORY_CHARS = 1200
 _PRESENTATION_VALUES = frozenset({"concrete-and-playful", "clear-and-encouraging", "age-respectful", "short", "medium", "short-instructions"})
+_ADAPTATION_VALUES = frozenset({"short-instructions", "slow-pace", "extra-repetition", "concrete-examples", "reduced-choice"})
 
 def _clean(value: str, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or value != value.strip(): raise ContextError(f"{label} must be a trimmed nonempty string")
@@ -39,6 +41,8 @@ class ActivityContext:
     hint_texts: tuple[str, ...]
     hints_used: int
     attempts_used: int = 0
+    expected_answer_kind: ExpectedAnswerKind = ExpectedAnswerKind.INTEGER
+    expected_answer_fields: tuple[str, ...] = ("answer",)
     def __post_init__(self) -> None:
         for value, label in ((self.activity_id,"activity id"),(self.template_id,"template id"),(self.objective_id,"objective id"),(self.prompt_es,"prompt")): _clean(value,label)
         if not isinstance(self.difficulty, int) or isinstance(self.difficulty, bool): raise ContextError("difficulty must be an integer")
@@ -48,6 +52,9 @@ class ActivityContext:
         for value in self.hint_texts: _clean(value, "hint text")
         if not isinstance(self.hints_used, int) or not 0 <= self.hints_used <= len(self.hint_ids): raise ContextError("invalid hints used")
         if isinstance(self.attempts_used, bool) or not isinstance(self.attempts_used, int) or self.attempts_used < 0: raise ContextError("invalid attempts used")
+        if not isinstance(self.expected_answer_kind, ExpectedAnswerKind): raise ContextError("expected answer kind must be typed")
+        if not self.expected_answer_fields: raise ContextError("expected answer fields cannot be empty")
+        for value in self.expected_answer_fields: _clean(value, "expected answer field")
 
 @dataclass(frozen=True, slots=True)
 class LearnerState:
@@ -75,6 +82,10 @@ class HarnessContext:
     learner_state: LearnerState
     recent_history: tuple[str, ...]
     current_turn: TurnEvidence
+    adaptations: tuple[str, ...] = ()
+    duration_minutes: int = 10
+    max_activities: int = 1
+    activities_used: int = 0
     def __post_init__(self) -> None:
         if self.child_safe_policy != CHILD_SAFE_POLICY: raise ContextError("child safe policy is fixed")
         for value, label in ((self.session_id,"session id"),(self.learner_id,"learner id"),(self.generation_id,"generation id")): _clean(value,label)
@@ -86,14 +97,18 @@ class HarnessContext:
             if len(collection) > _MAX_COLLECTION_ENTRIES: raise ContextError(f"{label} exceed entry budget")
             for value in collection: _clean(value, label)
         if sum(len(value) for value in self.recent_history) > _MAX_HISTORY_CHARS: raise ContextError("history character budget exceeded")
+        if len(set(self.adaptations)) != len(self.adaptations) or any(value not in _ADAPTATION_VALUES for value in self.adaptations): raise ContextError("adaptations contain unsupported values")
+        if isinstance(self.duration_minutes, bool) or not isinstance(self.duration_minutes, int) or not 5 <= self.duration_minutes <= 30: raise ContextError("duration minutes out of range")
+        if isinstance(self.max_activities, bool) or not isinstance(self.max_activities, int) or not 1 <= self.max_activities <= 20: raise ContextError("maximum activities out of range")
+        if isinstance(self.activities_used, bool) or not isinstance(self.activities_used, int) or not 0 <= self.activities_used <= self.max_activities: raise ContextError("activities used out of range")
 
 def build_harness_context(*, max_history_turns: int, max_history_chars: int = _MAX_HISTORY_CHARS, **values: object) -> HarnessContext:
     if isinstance(max_history_turns, bool) or not isinstance(max_history_turns, int) or max_history_turns < 0: raise ContextError("max history turns must be a nonnegative integer")
     if isinstance(max_history_chars, bool) or not isinstance(max_history_chars, int) or max_history_chars < 0: raise ContextError("max history chars must be a nonnegative integer")
-    allowed = {"session_id", "learner_id", "expected_session_version", "expected_profile_version", "generation_id", "authorised_objective_ids", "active_objective_ids", "activity", "learner_state", "recent_history", "current_turn"}
+    allowed = {"session_id", "learner_id", "expected_session_version", "expected_profile_version", "generation_id", "authorised_objective_ids", "active_objective_ids", "activity", "learner_state", "recent_history", "current_turn", "adaptations", "duration_minutes", "max_activities", "activities_used"}
     unknown = set(values) - allowed
     if unknown: raise ContextError(f"unknown context field: {sorted(unknown)[0]}")
-    missing = allowed - set(values)
+    missing = allowed - {"adaptations", "duration_minutes", "max_activities", "activities_used"} - set(values)
     if missing: raise ContextError(f"missing context field: {sorted(missing)[0]}")
     history = tuple(values.pop("recent_history"))
     for item in history: _clean(item, "history")

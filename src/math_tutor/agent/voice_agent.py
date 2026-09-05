@@ -90,7 +90,7 @@ class SilentLLM(livekit_llm.LLM):
 
 class HarnessVoiceAgent(Agent):
     """LiveKit transport adapter whose generated speech comes only from the harness."""
-    def __init__(self, *, instructions: str, initial_prompt: str, decide: Callable[[VoiceTurn], VoiceDecision], cancel: Callable[[], None], confidence_threshold: float = 0.65, tts_watchdog=None) -> None:
+    def __init__(self, *, instructions: str, initial_prompt: str, decide: Callable[[VoiceTurn], VoiceDecision], cancel: Callable[[], None], confidence_threshold: float = 0.65, tts_watchdog=None, initial_terminal_reason: str | None = None) -> None:
         super().__init__(instructions=instructions)
         self._decide = decide
         self._cancel = cancel
@@ -100,12 +100,16 @@ class HarnessVoiceAgent(Agent):
         self._confidence = None
         self._closer = None
         self._tts_watchdog = tts_watchdog
+        self._initial_terminal_reason = initial_terminal_reason
+        self._tts_fallback_started = False
 
     def bind_terminal_closer(self, closer) -> None:
         self._closer = closer
 
     async def on_enter(self) -> None:
         await self.session.say(self._initial_prompt)
+        if self._initial_terminal_reason is not None and self._closer is not None:
+            self._closer.trigger(self._initial_terminal_reason)
 
     async def stt_node(self, audio, model_settings):
         async for event in Agent.default.stt_node(self, audio, model_settings):
@@ -120,8 +124,18 @@ class HarnessVoiceAgent(Agent):
             async for frame in source:
                 yield frame
             return
-        async for frame in self._tts_watchdog.iterate(source):
+        async for frame in self._tts_watchdog.iterate(source,on_terminal=self._on_tts_terminal):
             yield frame
+
+    async def _on_tts_terminal(self, reason: str, speech: str) -> None:
+        if not self._tts_fallback_started:
+            self._tts_fallback_started = True
+            try:
+                self.session.say(speech, allow_interruptions=False)
+            except RuntimeError:
+                pass
+        if self._closer is not None:
+            self._closer.trigger(reason)
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         self._cancel()
@@ -155,7 +169,9 @@ class HarnessVoiceAgent(Agent):
             except asyncio.CancelledError:
                 self._cancel()
                 raise
-        if decision.speech:
-            yield decision.speech
-        if decision.terminal and self._closer is not None:
-            self._closer.trigger(decision.reason)
+        try:
+            if decision.speech:
+                yield decision.speech
+        finally:
+            if decision.terminal and self._closer is not None:
+                self._closer.trigger(decision.reason)

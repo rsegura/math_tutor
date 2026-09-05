@@ -17,6 +17,9 @@ class ToolRejected(ValueError):
         super().__init__(reason)
         self.crossed_fence = crossed_fence
 
+class SessionCapExceeded(RuntimeError):
+    pass
+
 class TutoringMutationService(Protocol):
     def record_answer(self, command: RecordAnswer): ...
     def commit_hint(self, command: CommitHint): ...
@@ -25,8 +28,8 @@ class TutoringMutationService(Protocol):
     def stop_now(self, command: EndSession): ...
 
 class PedagogicalToolRegistry:
-    def __init__(self, service: TutoringMutationService, limits: HarnessLimits) -> None:
-        self._service, self._limits, self._sequence = service, limits, count(1)
+    def __init__(self, service: TutoringMutationService, limits: HarnessLimits, guard=None) -> None:
+        self._service, self._limits, self._sequence, self._guard = service, limits, count(1), guard
     def _base(self, context: HarnessContext, tool: ToolName) -> dict[str, object]:
         return dict(command_id=f"{context.current_turn.turn_id}:{tool.value}:{next(self._sequence)}", session_id=context.session_id, expected_session_version=context.expected_session_version, expected_profile_version=context.expected_profile_version, generation_id=context.generation_id)
     @staticmethod
@@ -39,6 +42,10 @@ class PedagogicalToolRegistry:
         keys = set(arguments)
         if not required.issubset(keys) or keys - required - optional: raise ToolRejected("tool-arguments-invalid")
     def execute(self, proposal: ToolProposal, context: HarnessContext) -> HarnessDecision:
+        if self._guard is not None and proposal.name is not ToolName.END_SESSION:
+            reason = self._guard()
+            if reason is not None:
+                raise SessionCapExceeded(reason)
         args, name, base = proposal.arguments, proposal.name, self._base(context, proposal.name)
         if name is ToolName.RECORD_ANSWER:
             self._keys(args, required={"turn_id", "answer"})
@@ -70,6 +77,7 @@ class PedagogicalToolRegistry:
             self._keys(args, required={"objective_id", "difficulty", "seed", "activity_id"})
             objective, difficulty = args.get("objective_id"), args.get("difficulty")
             if objective not in context.active_objective_ids: raise ToolRejected("objective-not-active")
+            if context.activities_used >= context.max_activities: raise ToolRejected("activity-cap-reached")
             if isinstance(difficulty, bool) or not isinstance(difficulty, int) or abs(difficulty-context.activity.difficulty) != 1: raise ToolRejected("difficulty-step-must-be-one")
             if not self._limits.min_difficulty <= difficulty <= self._limits.max_difficulty: raise ToolRejected("difficulty-out-of-range")
             activity_id, seed = args.get("activity_id"), args.get("seed")

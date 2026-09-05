@@ -34,7 +34,12 @@ class PedagogicalHarness:
         for call_index in range(self._limits.max_model_calls):
             repair = call_index > 0
             try:
-                action = _parse(self._model.complete(prompt=REPAIR_PROMPT if repair else SYSTEM_PROMPT, context=context, repair=repair))
+                action = _parse(self._model.complete(
+                    prompt=REPAIR_PROMPT if repair else SYSTEM_PROMPT,
+                    context=context,
+                    repair=repair,
+                    validation_error=None if last_error is None else str(last_error),
+                ))
                 if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
                 if tool_steps >= self._limits.max_tool_steps:
                     raise HarnessBudgetExceeded("tool-step-budget-exhausted")

@@ -375,7 +375,7 @@ class SQLiteTutoringRepository:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT s.session_json,s.version,s.profile_version,s.learner_id,s.plan_id,s.plan_version,"
-                "j.code_hash,j.expires_at,j.consumed_at,l.pseudonym,l.age_years,p.adaptations_json,p.duration_minutes,p.max_activities,lp.plan_json "
+                "j.code_hash,j.expires_at,j.consumed_at,l.pseudonym,l.age_years,p.adaptations_json,p.duration_minutes,p.max_activities,lp.plan_json,s.created_at "
                 "FROM learning_sessions s JOIN learner_join_codes j ON j.session_id=s.session_id "
                 "JOIN learners l ON l.learner_id=s.learner_id "
                 "JOIN provisioned_plans p ON p.plan_id=s.plan_id AND p.version=s.plan_version "
@@ -403,6 +403,12 @@ class SQLiteTutoringRepository:
             plan = _load(row[14])
             if not isinstance(plan, LearningPlan):
                 raise VoiceBootstrapError("plan-not-found")
+            if (
+                not session.active_objective_ids
+                or session.authorised_objective_ids != plan.authorised_objective_ids
+                or session.active_objective_ids != plan.active_objective_ids
+            ):
+                raise VoiceBootstrapError("invalid-objective-scope")
             learner = LearnerProfile(row[3], row[9], row[10])
             snapshot = db.execute(
                 "SELECT snapshot_id,consent_id FROM session_audio_consent_snapshots WHERE session_id=?", (session_id,)
@@ -420,7 +426,7 @@ class SQLiteTutoringRepository:
             if cursor.rowcount != 1:
                 raise VoiceBootstrapError("invalid-join-code")
             db.commit()
-            return VoiceBootstrap(learner, ProvisionedPlan(plan, tuple(json.loads(row[11])), SessionLimits(row[12], row[13])), session, row[2], snapshot_id, clip_enabled)
+            return VoiceBootstrap(learner, ProvisionedPlan(plan, tuple(json.loads(row[11])), SessionLimits(row[12], row[13])), session, row[2], snapshot_id, clip_enabled, datetime.fromisoformat(row[15]))
         except Exception:
             db.rollback()
             raise
@@ -446,9 +452,17 @@ class SQLiteTutoringRepository:
             raise VoiceBootstrapError("stale-plan-version")
         if state.profile_version != profile_version:
             raise VoiceBootstrapError("stale-profile-version")
-        if not session.authorised_objective_ids or session.authorised_objective_ids != plan.plan.authorised_objective_ids:
+        if (
+            not session.authorised_objective_ids
+            or not session.active_objective_ids
+            or session.authorised_objective_ids != plan.plan.authorised_objective_ids
+            or session.active_objective_ids != plan.plan.active_objective_ids
+        ):
             raise VoiceBootstrapError("invalid-objective-scope")
         with self._connect() as db:
+            started_row = db.execute("SELECT created_at FROM learning_sessions WHERE session_id=?", (session.session_id,)).fetchone()
+            if started_row is None:
+                raise VoiceBootstrapError("session-not-found")
             snapshot = db.execute("SELECT snapshot_id,consent_id FROM session_audio_consent_snapshots WHERE session_id=?", (session.session_id,)).fetchone()
             enabled = False
             snapshot_id = None
@@ -456,7 +470,7 @@ class SQLiteTutoringRepository:
                 snapshot_id = snapshot[0]
                 consent = db.execute("SELECT revoked_at FROM audio_consents WHERE consent_id=?", (snapshot[1],)).fetchone()
                 enabled = bool(consent and consent[0] is None)
-        return VoiceBootstrap(learner, plan, session, profile_version, snapshot_id, enabled)
+        return VoiceBootstrap(learner, plan, session, profile_version, snapshot_id, enabled, datetime.fromisoformat(started_row[0]))
 
     def load_curriculum_snapshot(self, learner_id: str, curriculum_version: str) -> str | None:
         with self._connect() as db:

@@ -18,7 +18,7 @@ class FakeService:
 
 class FakeModel:
     def __init__(self, outputs): self.outputs = list(outputs); self.calls = []
-    def complete(self, *, prompt, context, repair):
+    def complete(self, *, prompt, context, repair, validation_error=None):
         self.calls.append((prompt, context, repair))
         return self.outputs.pop(0)
 
