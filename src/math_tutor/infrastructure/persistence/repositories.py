@@ -11,6 +11,8 @@ from typing import Any
 
 from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, StoredCommandResult, StoredObservation)
 from math_tutor.application.results import CommandResult, CommandStatus
+from math_tutor.application.review import CorrectSkillEstimateReview, DiscardEvidenceReview, ProfileRecalculation, ReviewMutation, ReviewResult, ReviewStatus
+from math_tutor.application.summary import SessionSummarySource
 from math_tutor.domain.activities import Activity, AnswerInputStatus, StructuredAnswer
 from math_tutor.domain.evidence import EvidenceRecord, EvidenceRevision, Observation, ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import CompetencyState, LearningPlan, LearningSession, PresentationProfile, ProposedProfileChange, SkillEstimate
@@ -94,6 +96,10 @@ _WIRE_TYPES = {
     "observation/v1": Observation,
     "transcription-policy/v1": TranscriptionReliabilityPolicy,
     "activity-progress/v1": ActivityProgress,
+    "discard-evidence-review/v1": DiscardEvidenceReview,
+    "correct-skill-estimate-review/v1": CorrectSkillEstimateReview,
+    "profile-recalculation/v1": ProfileRecalculation,
+    "review-result/v1": ReviewResult,
 }
 _WIRE_ENUMS = {
     "command-status/v1": CommandStatus,
@@ -101,6 +107,7 @@ _WIRE_ENUMS = {
     "expected-answer-kind/v1": ExpectedAnswerKind,
     "observation-outcome/v1": ObservationOutcome,
     "competency-state/v1": CompetencyState,
+    "review-status/v1": ReviewStatus,
 }
 _WIRE_TAGS = {value: key for key, value in _WIRE_TYPES.items()}
 _WIRE_ENUM_TAGS = {value: key for key, value in _WIRE_ENUMS.items()}
@@ -590,3 +597,147 @@ class SQLiteTutoringRepository:
             revisions = tuple(ProfileRevisionRecord(row[0],row[1],row[2],_load(row[3]),row[4]) for row in db.execute("SELECT revision_id,learner_id,profile_version,revision_json,policy_version FROM profile_revisions WHERE learner_id=? ORDER BY profile_version", (learner_id,)))
             clips = tuple(EvidenceClipRecord(*row) for row in db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at FROM evidence_clips WHERE session_id=? ORDER BY clip_id", (session_id,)))
         return SessionAggregate(_load(session_row[0]), _load(plan_row[0]), curriculum[0], curriculum[1], plan_row[1], session_row[1], activities, observations, evidence, estimates, progress, events, proposals, reviews, revisions, clips)
+
+    def load_summary_source(self, session_id: str) -> SessionSummarySource | None:
+        aggregate = self.load_session_aggregate(session_id)
+        if aggregate is None:
+            return None
+        with self._connect() as db:
+            learner_reviews = tuple(
+                _load(row[0])
+                for row in db.execute(
+                    "SELECT review_json FROM therapist_reviews WHERE learner_id=? ORDER BY created_at,review_id,version",
+                    (aggregate.session.learner_id,),
+                )
+            )
+        discarded = tuple(
+            item.evidence_id
+            for item in learner_reviews
+            if isinstance(item, DiscardEvidenceReview)
+        )
+        proposals = tuple(item for item in aggregate.proposals if isinstance(item, ProposedProfileChange))
+        required_ids = {evidence_id for proposal in proposals for evidence_id in proposal.evidence_ids}
+        evidence_by_id = {item.evidence_id: item for item in aggregate.evidence}
+        for objective_id in aggregate.session.authorised_objective_ids:
+            for item in self.load_evidence(aggregate.session.learner_id, objective_id):
+                if item.evidence_id in required_ids:
+                    evidence_by_id.setdefault(item.evidence_id, item)
+        return SessionSummarySource(
+            aggregate.session.session_id,
+            aggregate.session.learner_id,
+            aggregate.session.version,
+            aggregate.profile_version,
+            tuple(evidence_by_id.values()),
+            aggregate.estimates,
+            proposals,
+            tuple(item for item in dict.fromkeys(discarded) if item in evidence_by_id),
+        )
+
+    def resolve_review_command(
+        self, command_id: str, command_fingerprint: str, review_id: str
+    ) -> ReviewResult | None:
+        with self._connect() as db:
+            prior = db.execute(
+                "SELECT command_fingerprint,result_json FROM processed_commands WHERE command_id=?",
+                (command_id,),
+            ).fetchone()
+        if prior is None:
+            return None
+        stored = _load(prior[1])
+        if prior[0] == command_fingerprint and isinstance(stored, ReviewResult):
+            return stored
+        return ReviewResult(ReviewStatus.COLLISION, "command-id-collision", review_id)
+
+    def commit_review_once(self, mutation: ReviewMutation) -> ReviewResult:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            prior = db.execute(
+                "SELECT command_fingerprint,result_json FROM processed_commands WHERE command_id=?",
+                (mutation.command_id,),
+            ).fetchone()
+            if prior is not None:
+                stored = _load(prior[1])
+                db.rollback()
+                if prior[0] == mutation.command_fingerprint and isinstance(stored, ReviewResult):
+                    return stored
+                return ReviewResult(ReviewStatus.COLLISION, "command-id-collision", mutation.review_id)
+
+            session = db.execute(
+                "SELECT learner_id,profile_version FROM learning_sessions WHERE session_id=?",
+                (mutation.session_id,),
+            ).fetchone()
+            if session is None or session[0] != mutation.learner_id:
+                db.rollback()
+                return ReviewResult(ReviewStatus.REJECTED, "session-owner-mismatch", mutation.review_id)
+            if isinstance(mutation.review, DiscardEvidenceReview):
+                evidence = db.execute(
+                    "SELECT 1 FROM evidence_records WHERE evidence_id=? AND learner_id=? AND session_id=?",
+                    (mutation.review.evidence_id, mutation.learner_id, mutation.session_id),
+                ).fetchone()
+                if evidence is None:
+                    db.rollback()
+                    return ReviewResult(ReviewStatus.REJECTED, "evidence-owner-mismatch", mutation.review_id)
+            series = db.execute(
+                "SELECT learner_id,session_id,latest_version FROM therapist_review_series WHERE review_id=?",
+                (mutation.review_id,),
+            ).fetchone()
+            current_review_version = 0 if series is None else series[2]
+            expected_review_version = mutation.review_version - 1
+            estimate = db.execute(
+                "SELECT version FROM skill_estimates WHERE learner_id=? AND objective_id=?",
+                (mutation.learner_id, mutation.estimate.objective_id),
+            ).fetchone()
+            if (
+                session[1] != mutation.expected_profile_version
+                or current_review_version != expected_review_version
+                or estimate is None
+                or estimate[0] != mutation.expected_estimate_version
+            ):
+                db.rollback()
+                return ReviewResult(ReviewStatus.CONFLICT, "stale-review-state", mutation.review_id)
+            if series is None:
+                db.execute(
+                    "INSERT INTO therapist_review_series(review_id,learner_id,session_id,latest_version) VALUES(?,?,?,?)",
+                    (mutation.review_id, mutation.learner_id, mutation.session_id, mutation.review_version),
+                )
+            else:
+                if (series[0], series[1]) != (mutation.learner_id, mutation.session_id):
+                    db.rollback()
+                    return ReviewResult(ReviewStatus.REJECTED, "review-owner-mismatch", mutation.review_id)
+                db.execute(
+                    "UPDATE therapist_review_series SET latest_version=? WHERE review_id=? AND latest_version=?",
+                    (mutation.review_version, mutation.review_id, expected_review_version),
+                )
+            db.execute(
+                "INSERT INTO therapist_reviews(review_id,version,learner_id,session_id,review_json) VALUES(?,?,?,?,?)",
+                (mutation.review_id, mutation.review_version, mutation.learner_id,
+                 mutation.session_id, _dump(mutation.review)),
+            )
+            db.execute(
+                "UPDATE skill_estimates SET estimate_json=?,version=? WHERE learner_id=? AND objective_id=? AND version=?",
+                (_dump(mutation.estimate), mutation.estimate.version, mutation.learner_id,
+                 mutation.estimate.objective_id, mutation.expected_estimate_version),
+            )
+            next_profile_version = mutation.expected_profile_version + 1
+            db.execute(
+                "UPDATE learning_sessions SET profile_version=? WHERE session_id=? AND learner_id=? AND profile_version=?",
+                (next_profile_version, mutation.session_id, mutation.learner_id,
+                 mutation.expected_profile_version),
+            )
+            db.execute(
+                "INSERT INTO profile_revisions(revision_id,learner_id,profile_version,revision_json,policy_version) VALUES(?,?,?,?,?)",
+                (mutation.profile_revision_id, mutation.learner_id, next_profile_version,
+                 _dump(mutation.profile_revision), mutation.policy_version),
+            )
+            db.execute(
+                "INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES(?,?,?)",
+                (mutation.command_id, mutation.command_fingerprint, _dump(mutation.result)),
+            )
+            db.commit()
+            return mutation.result
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
