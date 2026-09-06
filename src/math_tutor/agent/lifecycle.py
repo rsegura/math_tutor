@@ -19,7 +19,7 @@ class SpeechHandleTracker:
         self._latest = None
 
     def observe(self, event) -> None:
-        if getattr(event, "source", None) == "generate_reply" and not getattr(event, "user_initiated", True):
+        if getattr(event, "source", None) == "generate_reply":
             self._latest = getattr(event, "speech_handle", None)
 
     def latest(self):

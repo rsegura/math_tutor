@@ -5,6 +5,8 @@ from threading import Event
 from math_tutor.agent.voice_agent import HarnessVoiceAgent, TurnCoordinator, VoiceDecision, VoiceTurn
 from math_tutor.agent.lifecycle import SpeechHandleTracker, TerminalCloser
 from livekit.agents import Agent
+from livekit.agents.voice.events import SpeechCreatedEvent
+from livekit.agents.voice.speech_handle import SpeechHandle
 
 
 def test_low_confidence_turn_requests_confirmation_without_model_call():
@@ -91,6 +93,19 @@ async def test_normal_terminal_speech_uses_scheduler_created_exact_handle_before
     assert await anext(node) == "Paramos"
     await node.aclose(); node_advanced.set(); await closer.aclose()
     assert order == ["speech-complete","aclose","delete"]
+
+
+async def test_tracker_accepts_real_livekit_generate_reply_for_both_origins_and_excludes_say():
+    tracker=SpeechHandleTracker()
+    public_reply=SpeechHandle.create(allow_interruptions=False)
+    automatic_reply=SpeechHandle.create(allow_interruptions=False)
+    say_handle=SpeechHandle.create(allow_interruptions=False)
+    tracker.observe(SpeechCreatedEvent(user_initiated=True,source="generate_reply",speech_handle=public_reply))
+    assert tracker.latest() is public_reply
+    tracker.observe(SpeechCreatedEvent(user_initiated=False,source="generate_reply",speech_handle=automatic_reply))
+    assert tracker.latest() is automatic_reply
+    tracker.observe(SpeechCreatedEvent(user_initiated=True,source="say",speech_handle=say_handle))
+    assert tracker.latest() is None
 
 
 async def test_interrupted_harness_generation_cancels_authoritative_generation():
