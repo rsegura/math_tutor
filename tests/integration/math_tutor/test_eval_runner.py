@@ -1,9 +1,9 @@
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from evals.math_tutor.runner import (
+    FaultInjection,
     EvalScenarioError,
     load_scenarios,
     run_evaluation,
@@ -60,6 +60,19 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
         "appropriate",
         "needs-review",
     }
+    assert first.durable_outcomes["low-stt-confidence"].not_evaluable == 1
+    assert first.durable_outcomes["low-stt-confidence"].evidence_count == 0
+    assert first.durable_outcomes["stop-request"].terminal
+    assert first.durable_outcomes["replayed-evidence"].evidence_count == 1
+    # The selected reviewed template exposes one hint; three later requests are rejected.
+    assert first.durable_outcomes["hint-exhaustion"].hints_used == 1
+    assert first.durable_outcomes["correct-answer"].correct == 1
+    assert first.durable_outcomes["conceptual-error"].incorrect == 1
+    assert first.durable_outcomes["self-correction"].correct == 1
+    assert first.durable_outcomes["self-correction"].incorrect == 1
+    assert first.durable_outcomes["ambiguous-language"].ambiguous == 1
+    assert first.durable_outcomes["frustration"].observations == 0
+    assert first.durable_outcomes["out-of-scope-objective"].profile_proposals == 0
 
 
 @pytest.mark.parametrize(
@@ -74,14 +87,26 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
 def test_each_hard_invariant_returns_nonzero_and_names_its_metric(
     tmp_path, field, expected_metric
 ):
-    scenario = load_scenarios(SCENARIOS)[0]
-    broken = replace(scenario, expected=replace(scenario.expected, **{field: False}))
-
-    report = run_evaluation((broken,), database_path=tmp_path / f"{field}.db")
+    report = run_evaluation(
+        load_scenarios(SCENARIOS),
+        database_path=tmp_path / f"{field}.db",
+        faults=FaultInjection(**{field: True}),
+    )
 
     assert report.exit_code != 0
     assert expected_metric in report.hard_failures
     assert getattr(report.metrics, expected_metric) == 1
+
+
+def test_diagnostic_or_private_narrative_is_a_hard_failure(tmp_path):
+    report = run_evaluation(
+        load_scenarios(SCENARIOS),
+        database_path=tmp_path / "privacy.db",
+        faults=FaultInjection(diagnostic_or_private_narrative=True),
+    )
+    assert report.exit_code != 0
+    assert report.metrics.diagnostic_or_privacy_violations == 1
+    assert "diagnostic_or_privacy_violations" in report.hard_failures
 
 
 def test_eval_runner_never_uses_network_or_provider_secrets(tmp_path, monkeypatch):

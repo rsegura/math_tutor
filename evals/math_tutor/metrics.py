@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 
 
 HARD_METRICS = (
@@ -10,6 +11,7 @@ HARD_METRICS = (
     "unsupported_profile_updates",
     "stt_misattributions",
     "ignored_stops",
+    "diagnostic_or_privacy_violations",
 )
 
 
@@ -19,6 +21,7 @@ class EvalMetrics:
     unsupported_profile_updates: int
     stt_misattributions: int
     ignored_stops: int
+    diagnostic_or_privacy_violations: int
     intervention_ratings: tuple[str, ...]
     evidence_coverage: float
     latency_ms_p95: int
@@ -31,5 +34,19 @@ class EvalReport:
     metrics: EvalMetrics
     hard_failures: tuple[str, ...]
     exit_code: int
+    durable_outcomes: Mapping[str, DurableOutcome]
     execution_mode: str = "offline-fake-model"
 
+
+@dataclass(frozen=True, slots=True)
+class DurableOutcome:
+    observations: int
+    correct: int
+    incorrect: int
+    ambiguous: int
+    not_evaluable: int
+    evidence_count: int
+    profile_proposals: int
+    attempts_used: int
+    hints_used: int
+    terminal: bool

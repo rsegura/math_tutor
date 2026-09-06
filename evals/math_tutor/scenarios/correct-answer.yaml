@@ -3,10 +3,10 @@ scenario_id: correct-answer
 description: Una respuesta correcta se conserva como evidencia fiable.
 learner_id: learner-eval
 session_id: session-correct
-objective_id: addition-within-20
+objective_id: add-within-20
 stop_requested: false
 profile_objective: null
-authorised_objectives: [addition-within-20]
+authorised_objectives: [add-within-20]
 turns:
   - {turn_id: turn-1, response_text: "doce", stt_confidence: 0.98, outcome: correct, retain_evidence: true, evidence_id: evidence-correct, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 210}
 expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 1, terminal: false}

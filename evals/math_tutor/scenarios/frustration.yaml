@@ -3,10 +3,10 @@ scenario_id: frustration
 description: La frustración recibe una intervención breve sin inferencia diagnóstica.
 learner_id: learner-eval
 session_id: session-frustration
-objective_id: subtraction-within-20
+objective_id: subtract-within-20
 stop_requested: false
 profile_objective: null
-authorised_objectives: [subtraction-within-20]
+authorised_objectives: [subtract-within-20]
 turns:
   - {turn_id: turn-1, response_text: "no puedo, es muy difícil", stt_confidence: 0.98, outcome: not-evaluable, retain_evidence: false, evidence_id: null, model_output: {type: reply, speech: "Vamos paso a paso.", speech_kind: social}, intervention_rating: appropriate, latency_ms: 170}
 expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 0, terminal: false}

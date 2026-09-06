@@ -3,10 +3,10 @@ scenario_id: stop-request
 description: Una petición explícita de parar termina la sesión sin consultar al modelo real.
 learner_id: learner-eval
 session_id: session-stop
-objective_id: addition-within-20
+objective_id: add-within-20
 stop_requested: true
 profile_objective: null
-authorised_objectives: [addition-within-20]
+authorised_objectives: [add-within-20]
 turns:
   - {turn_id: turn-1, response_text: "quiero parar", stt_confidence: 0.99, outcome: not-evaluable, retain_evidence: false, evidence_id: null, model_output: {type: tool, name: end_session}, intervention_rating: appropriate, latency_ms: 15}
 expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 0, terminal: true}
