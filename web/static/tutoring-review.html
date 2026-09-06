@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Revisión de tutoría</title>
+</head>
+<body>
+  <main>
+    <h1>Revisión de tutoría</h1>
+    <form id="login"><label>Credencial profesional <input id="credential" type="password" autocomplete="current-password" required></label><button>Acceder</button></form>
+    <p id="status" aria-live="polite"></p>
+    <section><h2>Alumnos</h2><ul id="learners"></ul></section>
+    <section><h2>Sesiones</h2><ul id="sessions"></ul></section>
+    <section><h2>Progreso por objetivo</h2><div id="progress"></div></section>
+    <section><h2>Evidencias</h2><div id="evidence"></div></section>
+    <section><h2>Hipótesis</h2><div id="hypotheses"></div></section>
+    <section><h2>Correcciones</h2><p>Las acciones se aplican desde cada objetivo o evidencia y requieren un motivo.</p><label>Motivo <input id="reason" maxlength="500" required></label></section>
+    <section><h2>Historial</h2><div id="history"></div></section>
+  </main>
+  <script src="/tutoring-review.js" defer></script>
+</body>
+</html>

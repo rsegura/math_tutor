@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import hmac
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from math_tutor.application.provisioning import (
@@ -85,13 +85,21 @@ def _error(error: ProvisioningError) -> HTTPException:
     return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, reason)
 
 
+def therapist_authorizer(token: str | None):
+    """One fail-closed bearer boundary shared by provisioning and review."""
+    def authorised(response: Response, authorization: str | None = Header(default=None)) -> None:
+        expected = f"Bearer {token}" if token else None
+        if expected is None or authorization is None or not hmac.compare_digest(authorization, expected):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "unauthorised", headers={"WWW-Authenticate":"Bearer"})
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return authorised
+
+
 def create_therapist_router(service: ProvisioningService, token: str) -> APIRouter:
     router = APIRouter(prefix="/api/therapist")
 
-    def authorised(authorization: str | None = Header(default=None)) -> None:
-        expected = f"Bearer {token}"
-        if authorization is None or not hmac.compare_digest(authorization, expected):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "unauthorised", headers={"WWW-Authenticate": "Bearer"})
+    authorised = therapist_authorizer(token)
 
     @router.post("/learners", status_code=status.HTTP_201_CREATED, dependencies=[Depends(authorised)])
     def create_learner(body: LearnerBody):

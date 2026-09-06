@@ -15,9 +15,11 @@ from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
 from math_tutor.infrastructure.clip_retention import ClipRetentionService, RetentionSettings
 from math_tutor.infrastructure.evidence_clips import OpaqueClipStore
+from math_tutor.application.review import TherapistReviewService
+from math_tutor.domain.learning import AssistanceThreshold, CompetencyState, ProgressionPolicy
 from web.therapist_api import create_therapist_router
 from web.token_api import create_token_router
-from web.review_api import create_review_router
+from web.review_api import RetainedClipAccess, create_review_router
 
 
 _PLACEHOLDERS = {"replace-me", "changeme", "change-me", "placeholder", "secret", "token", "weak-secret"}
@@ -49,16 +51,37 @@ def create_app(settings: WebSettings | None = None, *, provisioning: Provisionin
         database = database_path or Path(os.getenv("DATABASE_PATH", "/app/data/math_tutor.db"))
         migrate(database)
         repository = SQLiteTutoringRepository(database)
+    retention_service = None
     if settings.therapist_api_enabled:
         if provisioning is None:
             base = Path(__file__).resolve().parents[1] / "src/math_tutor/curricula"
             curriculum, _ = load_curriculum_catalogs(base / "primary-math-v1.yaml", base / "activity-templates-v1.yaml")
             retention = RetentionSettings.from_environment(os.environ)
-            clip_purger = ClipRetentionService(repository, OpaqueClipStore(retention.evidence_directory), retention)
-            provisioning = ProvisioningService(repository, curriculum, clip_purger)
+            retention_service = ClipRetentionService(repository, OpaqueClipStore(retention.evidence_directory), retention)
+            provisioning = ProvisioningService(repository, curriculum, retention_service)
+        else:
+            candidate = getattr(provisioning, "clip_purger", None)
+            if isinstance(candidate, ClipRetentionService): retention_service = candidate
         result.include_router(create_therapist_router(provisioning, settings.therapist_api_token or ""))
     result.include_router(create_token_router(repository))
-    result.include_router(create_review_router(repository, settings.therapist_api_token))
+    thresholds = tuple(AssistanceThreshold(state, 3) for state in (
+        CompetencyState.EXPLORING, CompetencyState.WITH_INTENSIVE_HELP,
+        CompetencyState.WITH_LIGHT_HELP, CompetencyState.INDEPENDENT,
+        CompetencyState.GENERALIZED,
+    ))
+    review_service = TherapistReviewService(repository, ProgressionPolicy(thresholds))
+    clip_access = RetainedClipAccess(repository, retention_service) if retention_service else None
+    result.include_router(create_review_router(repository, settings.therapist_api_token,
+                                               review_service=review_service, clip_access=clip_access))
+
+    @result.middleware("http")
+    async def sensitive_response_headers(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith(("/api/review", "/api/therapist", "/tutoring-review")):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Content-Security-Policy"] = "default-src 'self'; connect-src 'self'; media-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        return response
     result.mount("/", StaticFiles(directory=Path(__file__).with_name("static"), html=True), name="static")
     return result
 

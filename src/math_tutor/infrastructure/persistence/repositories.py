@@ -218,6 +218,13 @@ class SQLiteTutoringRepository:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
+    def _connect_read_only(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(f"file:{self.database.resolve()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
     def close(self) -> None:
         """Repository connections are short-lived; retain an explicit lifecycle port."""
         return None
@@ -269,6 +276,34 @@ class SQLiteTutoringRepository:
         with self._connect() as db:
             row = db.execute("SELECT learner_id,pseudonym,age_years FROM learners WHERE learner_id=? AND pseudonym IS NOT NULL AND age_years IS NOT NULL", (learner_id,)).fetchone()
         return LearnerProfile(*row) if row else None
+
+    def list_review_learners(self) -> tuple[LearnerProfile, ...]:
+        with self._connect_read_only() as db:
+            rows = db.execute(
+                "SELECT learner_id,pseudonym,age_years FROM learners "
+                "WHERE pseudonym IS NOT NULL AND age_years IS NOT NULL ORDER BY pseudonym,learner_id"
+            ).fetchall()
+        return tuple(LearnerProfile(*row) for row in rows)
+
+    def list_review_sessions(self, learner_id: str) -> tuple[dict[str, object], ...]:
+        with self._connect_read_only() as db:
+            rows = db.execute(
+                "SELECT session_id,session_json,created_at FROM learning_sessions "
+                "WHERE learner_id=? ORDER BY created_at DESC,session_id DESC", (learner_id,),
+            ).fetchall()
+        return tuple({"session_id":row[0], "learner_id":learner_id,
+                      "active":_load(row[1]).can_continue, "created_at":row[2]} for row in rows)
+
+    def load_clip_review_scope(self, clip_id: str) -> tuple[str, str, bool] | None:
+        """Return canonical ownership and whether a clip remains live, including tombstones."""
+        with self._connect_read_only() as db:
+            row = db.execute(
+                "SELECT learner_id,session_id,1 FROM evidence_clips WHERE clip_id=? "
+                "UNION ALL SELECT e.learner_id,e.session_id,0 FROM audio_clip_deletion_tombstones t "
+                "JOIN evidence_records e ON e.evidence_id=t.evidence_id WHERE t.clip_id=? LIMIT 1",
+                (clip_id, clip_id),
+            ).fetchone()
+        return (row[0], row[1], bool(row[2])) if row else None
 
     def create_provisioned_plan(self, value: ProvisionedPlan) -> None:
         db = self._connect()
