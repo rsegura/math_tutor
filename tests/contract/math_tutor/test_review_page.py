@@ -39,3 +39,7 @@ def test_static_review_client_uses_text_content_and_never_requests_full_transcri
     assert "Eliminar clip" in script
     assert "window.confirm" in script
     assert "URL.revokeObjectURL" in script
+    assert "select.value=item.state" in script
+    assert "Aprobar objetivo" in script
+    assert "Rechazar objetivo" in script
+    assert "expected_plan_version" in script

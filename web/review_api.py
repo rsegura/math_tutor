@@ -1,6 +1,7 @@
 """Authenticated, evidence-linked therapist review boundary."""
 
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 import json
 from typing import Annotated, Literal, Protocol
 
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from math_tutor.application.review import CorrectSkillEstimate, DiscardEvidence, ReviewStatus
 from math_tutor.application.summary import SummaryService
 from math_tutor.domain.learning import CompetencyState
+from math_tutor.application.next_objectives import NextObjectiveDecision, NextObjectiveError, ProposalDecisionStatus
 from web.therapist_api import therapist_authorizer
 
 
@@ -64,6 +66,20 @@ class CorrectEstimateBody(_Command):
 CorrectionBody = Annotated[DiscardBody | CorrectEstimateBody, Field(discriminator="kind")]
 
 
+class NextObjectiveDecisionBody(StrictModel):
+    command_id: str = Field(min_length=1,max_length=128)
+    decision: Literal["approved","rejected"]
+    reason: str = Field(min_length=1,max_length=500)
+    expected_revision: int = Field(ge=0)
+    expected_plan_version: int = Field(ge=1)
+
+    @field_validator("command_id","reason")
+    @classmethod
+    def trimmed(cls,value: str) -> str:
+        if value != value.strip(): raise ValueError("must be trimmed and nonblank")
+        return value
+
+
 class ClipAccess(Protocol):
     def load(self, clip_id: str): ...
     def read(self, record) -> bytes: ...
@@ -103,7 +119,8 @@ def _wire(value):
 
 
 def create_review_router(repository, therapist_token: str | None, *, summary_service=None,
-                         review_service=None, clip_access: ClipAccess | None = None) -> APIRouter:
+                         review_service=None, clip_access: ClipAccess | None = None,
+                         next_objective_service=None) -> APIRouter:
     router = APIRouter(prefix="/api/review")
     summaries = summary_service or SummaryService(repository)
 
@@ -159,6 +176,20 @@ def create_review_router(repository, therapist_token: str | None, *, summary_ser
         material_claims = [{"claim_id":item.claim_id,"kind":item.kind,"text":item.text,
             "evidence_ids":list(item.evidence_ids),"status":"hypothesis" if item.is_hypothesis else "fact"} for item in summary.claims]
         profile_proposals = [claim for claim in material_claims if claim["kind"] == "profile-proposal"]
+        next_proposals = repository.list_next_objective_proposals(learner_id,source_session_id=session_id) if hasattr(repository,"list_next_objective_proposals") else ()
+        def next_wire(item):
+            return {"proposal_id":item.proposal_id,"objective_id":item.objective_id,"source_plan_id":item.source_plan_id,
+                "source_plan_version":item.source_plan_version,"rationale":item.rationale,"evidence_ids":list(item.evidence_ids),
+                "status":item.status.value,"revision":item.revision,"created_at":item.created_at.isoformat(),"updated_at":item.updated_at.isoformat()}
+        next_history=[]
+        if hasattr(repository,"list_next_objective_decisions"):
+            for item in next_proposals:
+                for decision in repository.list_next_objective_decisions(item.proposal_id):
+                    next_history.append({**next_wire(item),"revision":decision.revision,"status":decision.status.value,
+                        "decision_reason":decision.reason,"expected_plan_version":decision.expected_plan_version,
+                        "resulting_plan_version":decision.resulting_plan_version,"decided_at":decision.decided_at.isoformat()})
+        else:
+            next_history=[next_wire(item) for item in next_proposals if item.status is not ProposalDecisionStatus.PENDING]
         return {"learner":{"learner_id":learner.learner_id,"pseudonym":learner.pseudonym,"age_years":learner.age_years},
             "session_id":session_id,"session_version":summary.source_session_version,"profile_version":summary.source_profile_version,
             "objective_estimates":objective_estimates,"objectives":objective_estimates,
@@ -166,8 +197,31 @@ def create_review_router(repository, therapist_token: str | None, *, summary_ser
             "authoritative_claims":material_claims,"summary":material_claims,
             "hypotheses":[claim for claim in material_claims if claim["status"] == "hypothesis" and claim["kind"] != "profile-proposal"],
             "profile_change_proposals":profile_proposals,
-            "next_objective_proposals":[],
+            "next_objective_proposals":[next_wire(item) for item in next_proposals if item.status is ProposalDecisionStatus.PENDING],
+            "next_objective_history":next_history,
             "evidence":evidence,"history":[{"review_id":item.review_id,"version":item.version,"created_at":item.created_at,"action":_wire(item.review)} for item in aggregate.reviews]}
+
+    @router.post("/learners/{learner_id}/sessions/{session_id}/next-objective-proposals/generate", dependencies=auth)
+    def generate_next(learner_id: str,session_id: str):
+        owned(learner_id,session_id)
+        if next_objective_service is None: raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,"next-objective-service-unavailable")
+        try: proposal=next_objective_service.propose_available(learner_id,session_id)
+        except NextObjectiveError as error: raise HTTPException(status.HTTP_409_CONFLICT,str(error)) from error
+        return {"status":"none-available"} if proposal is None else _wire(proposal)
+
+    @router.post("/learners/{learner_id}/sessions/{session_id}/next-objective-proposals/{proposal_id}/decision", dependencies=auth)
+    def decide_next(learner_id: str,session_id: str,proposal_id: str,body: NextObjectiveDecisionBody):
+        owned(learner_id,session_id)
+        if next_objective_service is None: raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,"next-objective-service-unavailable")
+        try:
+            proposal_id=_safe_id(proposal_id)
+            stored = repository.load_next_objective_proposal(proposal_id) if hasattr(repository,"load_next_objective_proposal") else None
+            if stored is not None and stored.source_session_id != session_id: raise NextObjectiveError("proposal-owner-mismatch")
+            proposal=next_objective_service.decide(NextObjectiveDecision(body.command_id,proposal_id,learner_id,ProposalDecisionStatus(body.decision),body.reason,body.expected_revision,body.expected_plan_version,datetime.now(timezone.utc)))
+        except NextObjectiveError as error:
+            reason=str(error); code=status.HTTP_404_NOT_FOUND if reason=="proposal-owner-mismatch" else status.HTTP_409_CONFLICT
+            raise HTTPException(code,reason) from error
+        return _wire(proposal)
 
     @router.get("/learners/{learner_id}/sessions/{session_id}/clips/{clip_id}", dependencies=auth)
     def clip(learner_id: str, session_id: str, clip_id: str):

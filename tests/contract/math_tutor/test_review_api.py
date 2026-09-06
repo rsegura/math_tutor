@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -12,6 +12,7 @@ from math_tutor.application.summary import SessionSummary, SummaryClaim
 from math_tutor.domain.learning import CompetencyState, SkillEstimate
 from math_tutor.infrastructure.persistence.repositories import EvidenceClipRecord
 from web.review_api import create_review_router
+from math_tutor.application.next_objectives import NextObjectiveProposal, ProposalDecisionStatus
 from math_tutor.application.provisioning import ProvisioningService
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
@@ -55,6 +56,9 @@ class Queries:
             "estimates":(SkillEstimate("learner-1", "units-tens", CompetencyState.EXPLORING),),
             "evidence":(), "reviews":(), "clips":(),
         })()
+    def list_next_objective_proposals(self,learner_id,source_session_id=None):
+        at=datetime(2026,9,5,tzinfo=timezone.utc)
+        return (NextObjectiveProposal("next-1",learner_id,source_session_id,"plan-1",2,"add-within-10","Prerrequisito consolidado",("evidence-1",),ProposalDecisionStatus.PENDING,0,at,at),)
 
 
 class Summary:
@@ -85,8 +89,14 @@ class Clips:
         self.deleted.append(clip_id); return True
 
 
+class NextObjectives:
+    def __init__(self): self.decisions=[]
+    def propose_available(self,learner_id,session_id): return Queries().list_next_objective_proposals(learner_id,source_session_id=session_id)[0]
+    def decide(self,decision): self.decisions.append(decision); return replace(Queries().list_next_objective_proposals(decision.learner_id,source_session_id="session-1")[0],status=decision.status,revision=1,updated_at=decision.decided_at)
+
+
 def client():
-    app=FastAPI(); app.include_router(create_review_router(Queries(), TOKEN, summary_service=Summary(), review_service=Reviews(), clip_access=Clips()))
+    app=FastAPI(); app.include_router(create_review_router(Queries(), TOKEN, summary_service=Summary(), review_service=Reviews(), clip_access=Clips(), next_objective_service=NextObjectives()))
     return TestClient(app)
 
 
@@ -107,7 +117,9 @@ def test_review_reads_require_auth_and_return_business_safe_authoritative_data()
     assert body["objective_estimates"][0]["support_confidence"]["kind"]=="stt-confidence-range"
     assert body["profile_change_proposals"]==[body["authoritative_claims"][1]]
     assert body["hypotheses"]==[]
-    assert body["next_objective_proposals"]==[]
+    assert body["next_objective_proposals"][0]["objective_id"]=="add-within-10"
+    assert body["next_objective_proposals"][0]["status"]=="pending"
+    assert body["next_objective_history"]==[]
     assert all(response.headers["cache-control"]=="no-store" for response in (learners,sessions,detail))
     assert "diagnos" not in detail.text.lower()
 
@@ -137,6 +149,17 @@ def test_structured_commands_are_strict_versioned_and_map_conflicts():
     correction={"kind":"correct-skill-estimate","command_id":"cmd-2","review_id":"review-2","objective_id":"units-tens","corrected_state":"needs-review","reason":"La ayuda fue mayor","expected_review_version":0,"expected_profile_version":2}
     assert api.post(base,headers=HEADERS,json=correction).status_code==409
     assert api.post(base,headers=HEADERS,json={**discard,"unexpected":True}).status_code==422
+
+
+def test_next_objective_generation_and_decision_are_authenticated_strict_and_versioned():
+    api=client(); base="/api/review/learners/learner-1/sessions/session-1/next-objective-proposals"
+    assert api.post(f"{base}/generate").status_code==401
+    generated=api.post(f"{base}/generate",headers=HEADERS)
+    assert generated.status_code==200 and generated.json()["status"]=="pending"
+    body={"command_id":"next-command","decision":"approved","reason":"Objetivo adecuado","expected_revision":0,"expected_plan_version":2}
+    decided=api.post(f"{base}/next-1/decision",headers=HEADERS,json=body)
+    assert decided.status_code==200 and decided.json()["status"]=="approved"
+    assert api.post(f"{base}/next-1/decision",headers=HEADERS,json={**body,"extra":1}).status_code==422
 
 
 class NoClips:

@@ -28,6 +28,15 @@ async function command(payload) {
   } catch (_) { statusNode.textContent="La revisión cambió. Recarga la sesión antes de corregir."; }
 }
 
+async function decideNext(item,decision) {
+  const reason=document.querySelector("#reason").value.trim();
+  if (!reason) { statusNode.textContent="Escribe un motivo para la decisión."; return; }
+  try {
+    await request(`/api/review/learners/${encodeURIComponent(current.learner.learner_id)}/sessions/${encodeURIComponent(current.session_id)}/next-objective-proposals/${encodeURIComponent(item.proposal_id)}/decision`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({command_id:crypto.randomUUID(),decision,reason,expected_revision:item.revision,expected_plan_version:item.source_plan_version})});
+    await showSession(current.learner.learner_id,current.session_id);
+  } catch (_) { statusNode.textContent="La propuesta o el plan han cambiado. Recarga antes de decidir."; }
+}
+
 function clear(target) { while (target.firstChild) target.removeChild(target.firstChild); }
 
 function evidenceReference(evidenceId) {
@@ -52,14 +61,15 @@ async function showSession(learnerId, sessionId) {
   current=detail;
   playbackUrls.forEach(value=>URL.revokeObjectURL(value)); playbackUrls.clear();
   const progress=document.querySelector("#progress"), assistance=document.querySelector("#assistance"), evidence=document.querySelector("#evidence");
-  const claims=document.querySelector("#claims"), hypotheses=document.querySelector("#hypotheses"), profileProposals=document.querySelector("#profile-proposals"), nextObjectives=document.querySelector("#next-objectives"), history=document.querySelector("#history");
-  [progress,assistance,evidence,claims,hypotheses,profileProposals,nextObjectives,history].forEach(clear);
+  const claims=document.querySelector("#claims"), hypotheses=document.querySelector("#hypotheses"), profileProposals=document.querySelector("#profile-proposals"), nextObjectives=document.querySelector("#next-objectives"), nextHistory=document.querySelector("#next-objective-history"), history=document.querySelector("#history");
+  [progress,assistance,evidence,claims,hypotheses,profileProposals,nextObjectives,nextHistory,history].forEach(clear);
   detail.objective_estimates.forEach(item => {
     const confidence=item.support_confidence.minimum === null ? "sin soporte retenido" : `confianza STT ${item.support_confidence.minimum}–${item.support_confidence.maximum}`;
     const block=node("article",`${item.objective_id}: ${item.state} · ${item.status} · versión ${item.estimate_version} · ${confidence}`);
     item.supporting_evidence_ids.forEach(id=>block.append(evidenceReference(id)));
     const select=document.createElement("select");
     ["not-observed","exploring","with-intensive-help","with-light-help","independent","generalized","needs-review"].forEach(value=>{ const option=node("option",value); option.value=value; select.append(option); });
+    select.value=item.state;
     const button=node("button","Corregir estimación"); button.type="button";
     button.addEventListener("click",()=>command({kind:"correct-skill-estimate",command_id:crypto.randomUUID(),review_id:`estimate-${item.objective_id}`,objective_id:item.objective_id,corrected_state:select.value,expected_review_version:detail.history.filter(entry=>entry.review_id===`estimate-${item.objective_id}`).length}));
     block.append(select,button); progress.append(block);
@@ -83,8 +93,9 @@ async function showSession(learnerId, sessionId) {
   detail.authoritative_claims.forEach(item=>renderClaim(claims,item));
   detail.hypotheses.forEach(item=>renderClaim(hypotheses,item));
   detail.profile_change_proposals.forEach(item=>renderClaim(profileProposals,item));
-  if (!detail.next_objective_proposals.length) nextObjectives.append(node("p","No hay propuestas de siguiente objetivo registradas."));
-  detail.next_objective_proposals.forEach(item=>renderClaim(nextObjectives,item));
+  if (!detail.next_objective_proposals.length) nextObjectives.append(node("p","No hay propuestas pendientes."));
+  detail.next_objective_proposals.forEach(item=>{ const block=node("article",`${item.objective_id} · ${item.rationale} · plan ${item.source_plan_version}`); item.evidence_ids.forEach(id=>block.append(evidenceReference(id))); const approve=node("button","Aprobar objetivo"); approve.type="button"; approve.addEventListener("click",()=>decideNext(item,"approved")); const reject=node("button","Rechazar objetivo"); reject.type="button"; reject.addEventListener("click",()=>decideNext(item,"rejected")); block.append(approve,reject); nextObjectives.append(block); });
+  detail.next_objective_history.forEach(item=>{ const block=node("article",`${item.decided_at || item.updated_at} · ${item.objective_id} · ${item.status} · revisión ${item.revision} · motivo: ${item.decision_reason || "no disponible"} · ${item.rationale}`); item.evidence_ids.forEach(id=>block.append(evidenceReference(id))); nextHistory.append(block); });
   detail.history.forEach(item => { const action=item.action; const target=action.evidence_id || action.objective_id || "acción"; const original=action.original_proposed_state || action.original_outcome || "sin valor propuesto"; const corrected=action.corrected_state || (action.evidence_id ? "descartada" : "sin cambio"); history.append(node("p",`${item.created_at || "fecha no disponible"} · revisión ${item.version} · ${target} · original: ${original} · resultado: ${corrected} · motivo: ${action.reason}`)); });
   statusNode.textContent=`${detail.learner.pseudonym} · sesión ${detail.session_id}`;
 }
@@ -99,3 +110,5 @@ document.querySelector("#login").addEventListener("submit", async event => {
   try { const data=await request("/api/review/learners"); clear(learnersNode); data.learners.forEach(item => { const button=node("button",item.pseudonym); button.type="button"; button.addEventListener("click",()=>showSessions(item.learner_id)); const li=node("li",""); li.append(button); learnersNode.append(li); }); statusNode.textContent="Selecciona un alumno."; }
   catch (_) { credential=""; statusNode.textContent="No se pudo autorizar la revisión."; }
 });
+
+document.querySelector("#generate-next").addEventListener("click",async()=>{ if (!current) return; try { const result=await request(`/api/review/learners/${encodeURIComponent(current.learner.learner_id)}/sessions/${encodeURIComponent(current.session_id)}/next-objective-proposals/generate`,{method:"POST"}); await showSession(current.learner.learner_id,current.session_id); statusNode.textContent=result.status === "none-available" ? "No hay un siguiente objetivo desbloqueado." : "Propuesta determinista preparada para revisión."; } catch (_) { statusNode.textContent="No se pudo generar una propuesta con el estado actual."; } });

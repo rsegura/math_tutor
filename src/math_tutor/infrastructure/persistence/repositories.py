@@ -23,6 +23,7 @@ from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.domain.audio_consent import AudioConsent
 from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits
+from math_tutor.application.next_objectives import NextObjectiveDecision, NextObjectiveDecisionRevision, NextObjectiveError, NextObjectiveProposal, ProposalDecisionStatus
 from math_tutor.infrastructure.dispatch import VoiceBootstrap, VoiceBootstrapError, verify_join_code
 
 
@@ -305,6 +306,81 @@ class SQLiteTutoringRepository:
                 (clip_id, clip_id),
             ).fetchone()
         return (row[0], row[1], bool(row[2])) if row else None
+
+    def create_next_objective_proposal(self, proposal: NextObjectiveProposal) -> NextObjectiveProposal:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT proposal_id FROM next_objective_proposals WHERE learner_id=? AND source_session_id=? AND source_plan_id=? AND source_plan_version=? AND objective_id=?",(proposal.learner_id,proposal.source_session_id,proposal.source_plan_id,proposal.source_plan_version,proposal.objective_id)).fetchone()
+            if existing is not None:
+                db.rollback(); return self.load_next_objective_proposal(existing[0])
+            db.execute("INSERT INTO next_objective_proposals(proposal_id,learner_id,source_session_id,source_plan_id,source_plan_version,objective_id,rationale,created_at) VALUES(?,?,?,?,?,?,?,?)",(proposal.proposal_id,proposal.learner_id,proposal.source_session_id,proposal.source_plan_id,proposal.source_plan_version,proposal.objective_id,proposal.rationale,proposal.created_at.isoformat()))
+            for position,evidence_id in enumerate(proposal.evidence_ids):
+                owner=db.execute("SELECT session_id FROM evidence_records WHERE evidence_id=? AND learner_id=?",(evidence_id,proposal.learner_id)).fetchone()
+                if owner is None: raise NextObjectiveError("proposal-evidence-owner-mismatch")
+                db.execute("INSERT INTO next_objective_proposal_evidence(proposal_id,position,evidence_id,learner_id,evidence_session_id) VALUES(?,?,?,?,?)",(proposal.proposal_id,position,evidence_id,proposal.learner_id,owner[0]))
+            db.commit(); return proposal
+        except Exception:
+            db.rollback(); raise
+        finally: db.close()
+
+    def load_next_objective_proposal(self, proposal_id: str) -> NextObjectiveProposal | None:
+        with self._connect_read_only() as db:
+            row=db.execute("SELECT p.proposal_id,p.learner_id,p.source_session_id,p.source_plan_id,p.source_plan_version,p.objective_id,p.rationale,p.created_at,d.status,d.revision,d.decided_at FROM next_objective_proposals p LEFT JOIN next_objective_decisions d ON d.proposal_id=p.proposal_id WHERE p.proposal_id=? ORDER BY d.revision DESC LIMIT 1",(proposal_id,)).fetchone()
+            evidence=tuple(item[0] for item in db.execute("SELECT evidence_id FROM next_objective_proposal_evidence WHERE proposal_id=? ORDER BY position",(proposal_id,))) if row else ()
+        if row is None: return None
+        status_value=ProposalDecisionStatus(row[8]) if row[8] else ProposalDecisionStatus.PENDING
+        updated=datetime.fromisoformat(row[10]) if row[10] else datetime.fromisoformat(row[7])
+        return NextObjectiveProposal(row[0],row[1],row[2],row[3],row[4],row[5],row[6],evidence,status_value,row[9] or 0,datetime.fromisoformat(row[7]),updated)
+
+    def list_next_objective_proposals(self, learner_id: str, *, source_session_id: str | None = None) -> tuple[NextObjectiveProposal, ...]:
+        with self._connect_read_only() as db:
+            ids=tuple(row[0] for row in db.execute("SELECT proposal_id FROM next_objective_proposals WHERE learner_id=? AND (? IS NULL OR source_session_id=?) ORDER BY created_at,proposal_id",(learner_id,source_session_id,source_session_id)))
+        return tuple(item for proposal_id in ids if (item:=self.load_next_objective_proposal(proposal_id)) is not None)
+
+    def resolve_next_objective_decision(self, decision: NextObjectiveDecision) -> NextObjectiveProposal | None:
+        with self._connect_read_only() as db:
+            prior=db.execute("SELECT proposal_id,learner_id,status,reason,expected_revision,expected_plan_version FROM next_objective_decisions WHERE command_id=?",(decision.command_id,)).fetchone()
+        if prior is None: return None
+        expected=(decision.proposal_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version)
+        if tuple(prior)!=expected: raise NextObjectiveError("command-id-collision")
+        return self.load_next_objective_proposal(decision.proposal_id)
+
+    def list_next_objective_decisions(self, proposal_id: str) -> tuple[NextObjectiveDecisionRevision, ...]:
+        with self._connect_read_only() as db:
+            rows=db.execute("SELECT proposal_id,revision,status,reason,expected_plan_version,resulting_plan_version,decided_at FROM next_objective_decisions WHERE proposal_id=? ORDER BY revision",(proposal_id,)).fetchall()
+        return tuple(NextObjectiveDecisionRevision(row[0],row[1],ProposalDecisionStatus(row[2]),row[3],row[4],row[5],datetime.fromisoformat(row[6])) for row in rows)
+
+    def commit_next_objective_decision(self, decision: NextObjectiveDecision, new_plan: ProvisionedPlan | None) -> NextObjectiveProposal:
+        db=self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            prior=db.execute("SELECT proposal_id,learner_id,status,reason,expected_revision,expected_plan_version FROM next_objective_decisions WHERE command_id=?",(decision.command_id,)).fetchone()
+            expected=(decision.proposal_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version)
+            if prior is not None:
+                db.rollback()
+                if tuple(prior)!=expected: raise NextObjectiveError("command-id-collision")
+                return self.load_next_objective_proposal(decision.proposal_id)
+            proposal=db.execute("SELECT learner_id,source_plan_id,source_plan_version,objective_id FROM next_objective_proposals WHERE proposal_id=?",(decision.proposal_id,)).fetchone()
+            current_revision=db.execute("SELECT COALESCE(MAX(revision),0) FROM next_objective_decisions WHERE proposal_id=?",(decision.proposal_id,)).fetchone()[0]
+            current_plan=db.execute("SELECT plan_id,version FROM provisioned_plans WHERE learner_id=? ORDER BY version DESC LIMIT 1",(decision.learner_id,)).fetchone()
+            if proposal is None or proposal[0]!=decision.learner_id: raise NextObjectiveError("proposal-owner-mismatch")
+            if current_revision!=decision.expected_revision: raise NextObjectiveError("stale-proposal-revision")
+            if current_plan is None or tuple(current_plan)!=(proposal[1],decision.expected_plan_version) or proposal[2]!=decision.expected_plan_version: raise NextObjectiveError("stale-plan-version")
+            resulting=None
+            if decision.status is ProposalDecisionStatus.APPROVED:
+                if new_plan is None or new_plan.version!=decision.expected_plan_version+1: raise NextObjectiveError("invalid-approved-plan")
+                curriculum=db.execute("SELECT curriculum_version FROM learners WHERE learner_id=?",(decision.learner_id,)).fetchone()[0]
+                db.execute("INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version,curriculum_version) VALUES(?,?,?,?,?,?)",(new_plan.plan.plan_id,new_plan.version,decision.learner_id,_dump(new_plan.plan),"therapist-next-objective/v1",curriculum))
+                db.execute("INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) VALUES(?,?,?,?,?,?)",(new_plan.plan.plan_id,new_plan.version,decision.learner_id,json.dumps(new_plan.adaptations),new_plan.limits.duration_minutes,new_plan.limits.max_activities))
+                resulting=new_plan.version
+            elif new_plan is not None: raise NextObjectiveError("rejection-cannot-change-plan")
+            db.execute("INSERT INTO next_objective_decisions(proposal_id,revision,command_id,learner_id,status,reason,expected_revision,expected_plan_version,resulting_plan_version,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(decision.proposal_id,current_revision+1,decision.command_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version,resulting,decision.decided_at.isoformat()))
+            db.commit()
+        except Exception:
+            db.rollback(); raise
+        finally: db.close()
+        return self.load_next_objective_proposal(decision.proposal_id)
 
     def create_provisioned_plan(self, value: ProvisionedPlan) -> None:
         db = self._connect()

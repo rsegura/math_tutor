@@ -16,6 +16,7 @@ from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRep
 from math_tutor.infrastructure.clip_retention import ClipRetentionService, RetentionSettings
 from math_tutor.infrastructure.evidence_clips import OpaqueClipStore
 from math_tutor.application.review import TherapistReviewService
+from math_tutor.application.next_objectives import NextObjectiveService
 from math_tutor.domain.learning import AssistanceThreshold, CompetencyState, ProgressionPolicy
 from web.therapist_api import create_therapist_router
 from web.token_api import create_token_router
@@ -60,6 +61,7 @@ def create_app(settings: WebSettings | None = None, *, provisioning: Provisionin
             retention_service = ClipRetentionService(repository, OpaqueClipStore(retention.evidence_directory), retention)
             provisioning = ProvisioningService(repository, curriculum, retention_service)
         else:
+            curriculum = provisioning.curriculum
             candidate = getattr(provisioning, "clip_purger", None)
             if isinstance(candidate, ClipRetentionService): retention_service = candidate
         result.include_router(create_therapist_router(provisioning, settings.therapist_api_token or ""))
@@ -72,7 +74,8 @@ def create_app(settings: WebSettings | None = None, *, provisioning: Provisionin
     review_service = TherapistReviewService(repository, ProgressionPolicy(thresholds))
     clip_access = RetainedClipAccess(repository, retention_service) if retention_service else None
     result.include_router(create_review_router(repository, settings.therapist_api_token,
-                                               review_service=review_service, clip_access=clip_access))
+                                               review_service=review_service, clip_access=clip_access,
+                                               next_objective_service=(NextObjectiveService(repository,curriculum) if settings.therapist_api_enabled else None)))
 
     @result.middleware("http")
     async def sensitive_response_headers(request, call_next):
