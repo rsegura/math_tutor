@@ -121,15 +121,17 @@ class OpenAIHarnessAdapter:
         else:
             value_schema = {"type":"integer"}
         value_properties = {field: dict(value_schema) for field in answer_fields}
-        answer = {
-            "type":"object", "additionalProperties":False,
-            "properties":{
-                "status":{"type":"string","enum":["evaluable","ambiguous","not-evaluable"]},
-                "kind":{"type":["string","null"],"enum":[answer_kind,None]},
+        answer = {"oneOf":[
+            {"type":"object","additionalProperties":False,"properties":{
+                "status":{"const":"evaluable"}, "kind":{"const":answer_kind},
                 "values":{"type":"object","properties":value_properties,"required":answer_fields,"additionalProperties":False},
-            },
-            "required":["status","kind","values"],
-        }
+            },"required":["status","kind","values"]},
+            {"type":"object","additionalProperties":False,"properties":{
+                "status":{"type":"string","enum":["ambiguous","not-evaluable"]},
+                "kind":{"type":"null"},
+                "values":{"type":"object","properties":{},"required":[],"additionalProperties":False},
+            },"required":["status","kind","values"]},
+        ]}
         schemas = {
             "record_answer": ({"turn_id":{"type":"string"},"answer":answer}, ["turn_id","answer"]),
             "give_hint": ({}, []),
@@ -249,6 +251,10 @@ class BoundedConversationEngine:
         if getattr(result.status,"value",None) != "applied":
             raise RuntimeError(f"session cap stop rejected: {result.reason}")
 
+    def force_stop(self, reason: str) -> None:
+        """Idempotent durable terminal mutation used by transport fail-safes."""
+        self._stop(reason)
+
     def _ensure_initial_activity(self) -> None:
         aggregate = self._repository.load_session_aggregate(self._bootstrap.session.session_id)
         if aggregate is None:
@@ -318,5 +324,9 @@ class BoundedConversationEngine:
         except SessionCapExceeded as error:
             self._stop(str(error))
             return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=str(error))
+        cap = self._runtime_cap_reason()
+        if cap is not None:
+            self._stop(cap)
+            return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=cap)
         speech = "De acuerdo, paramos aquí." if decision.terminal else (decision.speech or "Vamos paso a paso.")
         return VoiceDecision(speech, terminal=decision.terminal, reason="stop-requested" if decision.terminal else decision.reason)

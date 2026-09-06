@@ -4,8 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from array import array
 
 TTS_FALLBACK_ES = "No he podido reproducir el audio. Terminamos por ahora."
+
+
+class StaticFallbackAudioPlayer:
+    """Play a bounded provider-independent alert directly as RTC PCM frames."""
+    def __init__(self, session) -> None:
+        self.session = session
+        self._played = False
+
+    async def play(self) -> None:
+        if self._played:
+            return
+        self._played = True
+        from livekit import rtc
+
+        async def frames():
+            sample_rate, frame_samples = 24_000, 2_400
+            for amplitude in (2_500, 0, 2_500):
+                pcm = array("h", (amplitude if (index // 60) % 2 == 0 else -amplitude for index in range(frame_samples)))
+                yield rtc.AudioFrame(data=pcm.tobytes(), sample_rate=sample_rate, num_channels=1, samples_per_channel=frame_samples)
+                await asyncio.sleep(0)
+
+        handle = self.session.say(TTS_FALLBACK_ES, audio=frames(), allow_interruptions=False)
+        if inspect.isawaitable(handle):
+            try:
+                async with asyncio.timeout(1.0):
+                    await handle
+            except (Exception, asyncio.CancelledError):
+                return
 
 
 async def _bounded_close(source, seconds: float = 1.0) -> None:

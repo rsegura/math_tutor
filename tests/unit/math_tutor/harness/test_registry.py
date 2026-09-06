@@ -60,7 +60,7 @@ def test_record_answer_releases_only_deterministically_verified_speech(context):
     result = PedagogicalToolRegistry(service, HarnessLimits()).execute(
         ToolProposal(ToolName.RECORD_ANSWER, {
             "turn_id": "turn-1",
-            "answer": {"kind": "integer", "values": {"value": 4}},
+            "answer": {"status":"evaluable", "kind": "integer", "values": {"answer": 4}},
         }), context
     )
     command = service.commands[-1]
@@ -73,7 +73,7 @@ def test_context_attempt_counter_cannot_short_circuit_authoritative_service(cont
     exhausted = replace(context, activity=replace(context.activity, attempts_used=3))
     service = CapturingService()
     PedagogicalToolRegistry(service, HarnessLimits(max_attempts_per_activity=3)).execute(
-        ToolProposal(ToolName.RECORD_ANSWER, {"turn_id": "turn-1", "answer": {"kind": "integer", "values": {"value": 4}}}), exhausted)
+        ToolProposal(ToolName.RECORD_ANSWER, {"turn_id": "turn-1", "answer": {"status":"evaluable", "kind": "integer", "values": {"answer": 4}}}), exhausted)
     assert len(service.commands) == 1
 
 

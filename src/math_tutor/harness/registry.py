@@ -53,7 +53,14 @@ class PedagogicalToolRegistry:
             raw = args.get("answer")
             if not isinstance(raw, dict) or not isinstance(raw.get("values"), dict): raise ToolRejected("structured-answer-required")
             try:
-                status = AnswerInputStatus(raw.get("status", "evaluable")); kind = ExpectedAnswerKind(raw["kind"]) if status is AnswerInputStatus.EVALUABLE else None
+                if set(raw) != {"status", "kind", "values"}: raise ValueError
+                status = AnswerInputStatus(raw["status"])
+                if status is AnswerInputStatus.EVALUABLE:
+                    kind = ExpectedAnswerKind(raw["kind"])
+                    if kind is not context.activity.expected_answer_kind or set(raw["values"]) != set(context.activity.expected_answer_fields): raise ValueError
+                else:
+                    if raw["kind"] is not None or raw["values"] != {}: raise ValueError
+                    kind = None
                 answer = StructuredAnswer(kind=kind, values=raw["values"], status=status)
             except (KeyError, TypeError, ValueError): raise ToolRejected("structured-answer-invalid") from None
             command = RecordAnswer(**base, activity_id=context.activity.activity_id, answer=answer, response_text=context.current_turn.transcript, stt_confidence=context.current_turn.stt_confidence, assistance_level=context.activity.hints_used, observation_id=f"obs-{context.current_turn.turn_id}", evidence_id=None, retain_evidence=False, reason_for_retention=None)

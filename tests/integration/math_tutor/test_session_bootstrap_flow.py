@@ -14,7 +14,7 @@ from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
 from math_tutor.infrastructure.persistence.repositories import _dump
 from math_tutor.application.ports import ActivityProgress
-from math_tutor.agent.voice_agent import VoiceTurn
+from math_tutor.agent.voice_agent import HarnessVoiceAgent, VoiceTurn
 
 
 class Purger:
@@ -127,3 +127,42 @@ def test_duration_rechecked_after_model_before_tool_mutation_or_speech(tmp_path)
     assert decision.terminal and decision.reason == "duration-cap-reached"
     progress=repo.load_state(metadata.tutoring_session_id).progress_for("activity-1")
     assert progress.hints_used == 0
+
+
+def test_slow_social_reply_is_suppressed_and_session_ends_durably(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    current=[runtime.bootstrap.session_started_at+timedelta(minutes=10)]
+    class SlowSocialModel:
+        def complete(self,**kwargs):
+            current[0] += timedelta(minutes=2)
+            return {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),now=lambda:current[0],model=SlowSocialModel())
+    decision=engine.decide(VoiceTurn("turn","hola",.9,Event()))
+    assert decision == __import__('math_tutor.agent.voice_agent',fromlist=['VoiceDecision']).VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason="duration-cap-reached")
+    assert repo.load_state(metadata.tutoring_session_id).session.ended
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["tts-first-audio-timeout", "tts-total-timeout", "tts-provider-error"])
+async def test_tts_fail_safe_stops_durably_then_falls_back_and_closes_once(tmp_path, reason):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    order=[]
+    class Fallback:
+        async def play(self): order.append("fallback")
+    class Closer:
+        def trigger(self, value): order.append(("close",value))
+    def stop(value):
+        engine.force_stop(value)
+        order.append(("stop",value))
+    agent=HarnessVoiceAgent(instructions="bounded",initial_prompt=engine.initial_prompt,decide=engine.decide,cancel=engine.cancel,force_stop=stop,fallback_audio=Fallback())
+    agent.bind_terminal_closer(Closer())
+    await agent._on_tts_terminal(reason,"ignored")
+    await agent._on_tts_terminal(reason,"ignored")
+    state=repo.load_state(metadata.tutoring_session_id)
+    events=repo.load_session_aggregate(metadata.tutoring_session_id).events
+    assert state.session.ended and not state.session.can_continue
+    assert [(event.kind,event.detail) for event in events if event.kind=="session-stop-requested"] == [("session-stop-requested",reason)]
+    assert order == [("stop",reason),"fallback",("close",reason)]

@@ -61,7 +61,7 @@ def context(*, confidence=.9, hint_text="texto falsificado", attempts=0, hints=0
 
 
 def answer_tool():
-    return {"type":"tool", "name":"record_answer", "arguments":{"turn_id":"turn", "answer":{"kind":"integer", "values":{"value":4}}}}
+    return {"type":"tool", "name":"record_answer", "arguments":{"turn_id":"turn", "answer":{"status":"evaluable", "kind":"integer", "values":{"answer":4}}}}
 
 
 def test_low_confidence_uses_authoritative_observation_and_never_releases_correctness():
@@ -88,7 +88,7 @@ def test_post_fence_rejection_or_bad_payload_never_gets_a_second_tool_attempt():
 
 def test_pre_fence_tool_validation_can_use_the_single_repair_then_one_tool_step():
     model = Model([
-        {"type":"tool", "name":"record_answer", "arguments":{"turn_id":"old", "answer":{"kind":"integer", "values":{"value":4}}}},
+        {"type":"tool", "name":"record_answer", "arguments":{"turn_id":"old", "answer":{"status":"evaluable", "kind":"integer", "values":{"answer":4}}}},
         answer_tool(),
     ])
     service = Service()

@@ -90,7 +90,7 @@ class SilentLLM(livekit_llm.LLM):
 
 class HarnessVoiceAgent(Agent):
     """LiveKit transport adapter whose generated speech comes only from the harness."""
-    def __init__(self, *, instructions: str, initial_prompt: str, decide: Callable[[VoiceTurn], VoiceDecision], cancel: Callable[[], None], confidence_threshold: float = 0.65, tts_watchdog=None, initial_terminal_reason: str | None = None) -> None:
+    def __init__(self, *, instructions: str, initial_prompt: str, decide: Callable[[VoiceTurn], VoiceDecision], cancel: Callable[[], None], confidence_threshold: float = 0.65, tts_watchdog=None, initial_terminal_reason: str | None = None, force_stop: Callable[[str], None] | None = None, fallback_audio=None) -> None:
         super().__init__(instructions=instructions)
         self._decide = decide
         self._cancel = cancel
@@ -101,6 +101,8 @@ class HarnessVoiceAgent(Agent):
         self._closer = None
         self._tts_watchdog = tts_watchdog
         self._initial_terminal_reason = initial_terminal_reason
+        self._force_stop = force_stop
+        self._fallback_audio = fallback_audio
         self._tts_fallback_started = False
 
     def bind_terminal_closer(self, closer) -> None:
@@ -128,14 +130,17 @@ class HarnessVoiceAgent(Agent):
             yield frame
 
     async def _on_tts_terminal(self, reason: str, speech: str) -> None:
-        if not self._tts_fallback_started:
-            self._tts_fallback_started = True
-            try:
-                self.session.say(speech, allow_interruptions=False)
-            except RuntimeError:
-                pass
-        if self._closer is not None:
-            self._closer.trigger(reason)
+        if self._tts_fallback_started:
+            return
+        self._tts_fallback_started = True
+        try:
+            if self._force_stop is not None:
+                await asyncio.to_thread(self._force_stop, reason)
+            if self._fallback_audio is not None:
+                await self._fallback_audio.play()
+        finally:
+            if self._closer is not None:
+                self._closer.trigger(reason)
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         self._cancel()

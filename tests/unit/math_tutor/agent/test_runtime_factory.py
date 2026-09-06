@@ -33,7 +33,7 @@ def test_adapter_sends_exact_bounded_tool_contract_and_canonical_answer_shape():
     call=responses.calls[0]
     assert call["model"] == "pinned"
     record=next(tool for tool in call["tools"] if tool["name"] == "record_answer")
-    values=record["parameters"]["properties"]["answer"]["properties"]["values"]
+    values=record["parameters"]["properties"]["answer"]["oneOf"][0]["properties"]["values"]
     assert values["required"] == ["tens","units"]
     assert values["additionalProperties"] is False
     assert {tool["name"] for tool in call["tools"]} == {"record_answer","give_hint","adapt_difficulty","propose_skill_update","end_session"}
@@ -55,3 +55,26 @@ def test_adapter_rejects_unstructured_or_unknown_function_output():
     response=SimpleNamespace(output=[SimpleNamespace(type="function_call",name="invented",arguments="{}")],output_text="")
     adapter=OpenAIHarnessAdapter(api_key="x",model="pinned",client=SimpleNamespace(responses=Responses(response)))
     with pytest.raises(ValueError): adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
+
+
+def test_record_answer_schema_has_evaluable_and_empty_uncertain_branches():
+    tools=OpenAIHarnessAdapter._tools(context())
+    answer=next(tool for tool in tools if tool["name"]=="record_answer")["parameters"]["properties"]["answer"]
+    assert len(answer["oneOf"]) == 2
+    evaluable,uncertain=answer["oneOf"]
+    assert evaluable["properties"]["status"]["const"] == "evaluable"
+    assert evaluable["properties"]["kind"]["const"] == "integer-pair"
+    assert evaluable["properties"]["values"]["required"] == ["tens","units"]
+    assert uncertain["properties"]["kind"]["type"] == "null"
+    assert uncertain["properties"]["status"]["enum"] == ["ambiguous","not-evaluable"]
+    assert uncertain["properties"]["values"] == {"type":"object","properties":{},"required":[],"additionalProperties":False}
+
+
+def test_adapter_roundtrips_empty_ambiguous_answer_contract():
+    payload={"turn_id":"turn-1","answer":{"status":"ambiguous","kind":None,"values":{}}}
+    output=SimpleNamespace(output=[SimpleNamespace(type="function_call",name="record_answer",arguments=json.dumps(payload))],output_text="")
+    adapter=OpenAIHarnessAdapter(api_key="x",model="pinned",client=SimpleNamespace(responses=Responses(output)))
+    result=adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
+    proposal=_parse(result)
+    assert proposal.name is ToolName.RECORD_ANSWER
+    assert proposal.arguments["answer"] == payload["answer"]
