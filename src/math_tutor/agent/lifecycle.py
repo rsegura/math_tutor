@@ -4,37 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from array import array
+import wave
+from pathlib import Path
 
 TTS_FALLBACK_ES = "No he podido reproducir el audio. Terminamos por ahora."
+FALLBACK_AUDIO_PATH = Path(__file__).parent / "assets" / "fallback_es.wav"
+FALLBACK_AUDIO_TRANSCRIPT_PATH = Path(__file__).parent / "assets" / "fallback_es.txt"
+_FRAME_SECONDS = 0.02
 
 
 class StaticFallbackAudioPlayer:
-    """Play a bounded provider-independent alert directly as RTC PCM frames."""
-    def __init__(self, session) -> None:
+    """Enqueue reviewed prerecorded audio without waiting inside ``tts_node``."""
+    def __init__(self, session, path: Path = FALLBACK_AUDIO_PATH) -> None:
         self.session = session
-        self._played = False
+        self.path = path
+        self._handle = None
 
-    async def play(self) -> None:
-        if self._played:
-            return
-        self._played = True
+    def enqueue(self):
+        if self._handle is not None:
+            return self._handle
         from livekit import rtc
 
         async def frames():
-            sample_rate, frame_samples = 24_000, 2_400
-            for amplitude in (2_500, 0, 2_500):
-                pcm = array("h", (amplitude if (index // 60) % 2 == 0 else -amplitude for index in range(frame_samples)))
-                yield rtc.AudioFrame(data=pcm.tobytes(), sample_rate=sample_rate, num_channels=1, samples_per_channel=frame_samples)
-                await asyncio.sleep(0)
+            with wave.open(str(self.path), "rb") as audio:
+                rate, channels, width = audio.getframerate(), audio.getnchannels(), audio.getsampwidth()
+                chunk_samples = max(1, int(rate * _FRAME_SECONDS))
+                while chunk := audio.readframes(chunk_samples):
+                    yield rtc.AudioFrame(chunk, rate, channels, len(chunk) // (channels * width))
 
-        handle = self.session.say(TTS_FALLBACK_ES, audio=frames(), allow_interruptions=False)
-        if inspect.isawaitable(handle):
-            try:
-                async with asyncio.timeout(1.0):
-                    await handle
-            except (Exception, asyncio.CancelledError):
-                return
+        self._handle = self.session.say(TTS_FALLBACK_ES, audio=frames(), allow_interruptions=False)
+        return self._handle
 
 
 async def _bounded_close(source, seconds: float = 1.0) -> None:
@@ -128,33 +127,21 @@ class TerminalCloser:
         self.ctx, self.session, self.grace_seconds = ctx, session, grace_seconds
         self._task: asyncio.Task | None = None
 
-    def trigger(self, reason: str) -> None:
+    def trigger(self, reason: str, handle=None) -> None:
         if self._task is not None:
             return
-        coroutine = self._close(reason)
+        coroutine = self._close(reason, handle)
         try:
             self._task = asyncio.create_task(coroutine)
         except RuntimeError:
             coroutine.close()
             self._task = None
 
-    async def _close(self, reason: str) -> None:
+    async def _close(self, reason: str, handle) -> None:
         try:
-            async with asyncio.timeout(self.grace_seconds):
-                handle = self.session.current_speech
-                if handle is None:
-                    await asyncio.sleep(0.05)
-                    handle = self.session.current_speech
-                while handle is not None:
+            if handle is not None:
+                async with asyncio.timeout(self.grace_seconds):
                     await handle.wait_for_playout()
-                    await asyncio.sleep(0)
-                    following = self.session.current_speech
-                    if following is handle:
-                        await asyncio.sleep(0.05)
-                        following = self.session.current_speech
-                        if following is handle:
-                            break
-                    handle = following
         except asyncio.CancelledError:
             pass
         except Exception:

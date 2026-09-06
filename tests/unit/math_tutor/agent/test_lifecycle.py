@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from math_tutor.agent.lifecycle import TTSWatchdog, TerminalCloser
+from math_tutor.agent.lifecycle import FALLBACK_AUDIO_PATH, FALLBACK_AUDIO_TRANSCRIPT_PATH, TTS_FALLBACK_ES, StaticFallbackAudioPlayer, TTSWatchdog, TerminalCloser
 
 
 class Source:
@@ -53,12 +53,12 @@ async def test_terminal_closer_is_once_only_and_shutdown_survives_playout_failur
     class Handle:
         async def wait_for_playout(self): raise RuntimeError("playout")
     class Session:
-        current_speech=Handle()
         async def aclose(self): calls.append("aclose"); raise RuntimeError("close")
     ctx=SimpleNamespace(delete_room=lambda: delete(),shutdown=lambda **kw:calls.append(("shutdown",kw["reason"])))
     async def delete(): calls.append("delete")
     closer=TerminalCloser(ctx,Session(),grace_seconds=.02)
-    closer.trigger("stop"); closer.trigger("other"); await closer.aclose()
+    handle=Handle()
+    closer.trigger("stop",handle); closer.trigger("other",Handle()); await closer.aclose()
     assert calls == ["aclose","delete",("shutdown","stop")]
 
 
@@ -74,9 +74,23 @@ async def test_terminal_close_cancellation_still_reaches_shutdown_once():
     class Handle:
         async def wait_for_playout(self): await asyncio.Event().wait()
     class Session:
-        current_speech=Handle()
         async def aclose(self): calls.append("aclose")
     async def delete(): calls.append("delete")
     closer=TerminalCloser(SimpleNamespace(delete_room=delete,shutdown=lambda **kw:calls.append("shutdown")),Session(),grace_seconds=.05)
-    closer.trigger("stop"); await asyncio.sleep(0); closer._task.cancel(); await closer.aclose()
+    closer.trigger("stop",Handle()); await asyncio.sleep(0); closer._task.cancel(); await closer.aclose()
     assert calls == ["aclose","delete","shutdown"]
+
+
+def test_reviewed_fallback_asset_is_bounded_pcm_and_enqueue_returns_exact_handle():
+    import wave
+    with wave.open(str(FALLBACK_AUDIO_PATH),"rb") as audio:
+        assert audio.getnchannels() == 1 and audio.getsampwidth() == 2
+        assert 0 < audio.getnframes()/audio.getframerate() <= 15
+    assert FALLBACK_AUDIO_TRANSCRIPT_PATH.read_text().strip() == TTS_FALLBACK_ES
+    handle=object(); calls=[]
+    class Session:
+        def say(self,text,**kwargs): calls.append((text,kwargs)); return handle
+    returned=StaticFallbackAudioPlayer(Session()).enqueue()
+    assert returned is handle
+    assert calls[0][0] == "No he podido reproducir el audio. Terminamos por ahora."
+    assert "audio" in calls[0][1]

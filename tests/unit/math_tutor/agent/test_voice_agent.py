@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from threading import Event
 
 from math_tutor.agent.voice_agent import HarnessVoiceAgent, TurnCoordinator, VoiceDecision, VoiceTurn
+from math_tutor.agent.lifecycle import TerminalCloser
+from livekit.agents import Agent
 
 
 def test_low_confidence_turn_requests_confirmation_without_model_call():
@@ -83,3 +85,33 @@ async def test_interrupted_harness_generation_cancels_authoritative_generation()
     with __import__('pytest').raises(asyncio.CancelledError): await task
     release.set()
     assert cancellations == [True]
+
+
+async def test_tts_fallback_unwinds_node_before_explicit_handle_playout_and_close(monkeypatch):
+    order=[]; node_returned=asyncio.Event()
+    class Handle:
+        async def wait_for_playout(self):
+            await node_returned.wait()
+            order.append("playout")
+    handle=Handle()
+    class Fallback:
+        def enqueue(self): order.append("enqueue"); return handle
+    class Watchdog:
+        async def iterate(self,source,*,on_terminal):
+            await on_terminal("tts-provider-error","safe")
+            if False: yield None
+    class Session:
+        async def aclose(self): order.append("aclose")
+    async def delete_room(): order.append("delete-room")
+    ctx=SimpleNamespace(delete_room=delete_room,shutdown=lambda **kwargs:order.append("shutdown"))
+    async def empty():
+        if False: yield None
+    monkeypatch.setattr(Agent.default,"tts_node",lambda *args,**kwargs:empty())
+    value=HarnessVoiceAgent(instructions="bounded",initial_prompt="Pregunta",decide=lambda turn:VoiceDecision(""),cancel=lambda:None,tts_watchdog=Watchdog(),force_stop=lambda reason:order.append("stop"),fallback_audio=Fallback())
+    closer=TerminalCloser(ctx,Session(),grace_seconds=.1)
+    value.bind_terminal_closer(closer)
+    assert await output(value.tts_node("text",None)) == []
+    order.append("node-return")
+    node_returned.set()
+    await closer.aclose()
+    assert order == ["stop","enqueue","node-return","playout","aclose","delete-room","shutdown"]

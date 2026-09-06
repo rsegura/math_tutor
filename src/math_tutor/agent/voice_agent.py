@@ -104,6 +104,7 @@ class HarnessVoiceAgent(Agent):
         self._force_stop = force_stop
         self._fallback_audio = fallback_audio
         self._tts_fallback_started = False
+        self._tts_terminal_pending = None
 
     def bind_terminal_closer(self, closer) -> None:
         self._closer = closer
@@ -126,8 +127,14 @@ class HarnessVoiceAgent(Agent):
             async for frame in source:
                 yield frame
             return
-        async for frame in self._tts_watchdog.iterate(source,on_terminal=self._on_tts_terminal):
-            yield frame
+        try:
+            async for frame in self._tts_watchdog.iterate(source,on_terminal=self._on_tts_terminal):
+                yield frame
+        finally:
+            pending, self._tts_terminal_pending = self._tts_terminal_pending, None
+            if pending is not None and self._closer is not None:
+                reason, handle = pending
+                self._closer.trigger(reason, handle)
 
     async def _on_tts_terminal(self, reason: str, speech: str) -> None:
         if self._tts_fallback_started:
@@ -136,11 +143,12 @@ class HarnessVoiceAgent(Agent):
         try:
             if self._force_stop is not None:
                 await asyncio.to_thread(self._force_stop, reason)
-            if self._fallback_audio is not None:
-                await self._fallback_audio.play()
-        finally:
+            handle = self._fallback_audio.enqueue() if self._fallback_audio is not None else None
+            self._tts_terminal_pending = (reason, handle)
+        except BaseException:
             if self._closer is not None:
                 self._closer.trigger(reason)
+            raise
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         self._cancel()

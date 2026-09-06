@@ -151,9 +151,9 @@ async def test_tts_fail_safe_stops_durably_then_falls_back_and_closes_once(tmp_p
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
     order=[]
     class Fallback:
-        async def play(self): order.append("fallback")
+        def enqueue(self): order.append("fallback"); return "handle"
     class Closer:
-        def trigger(self, value): order.append(("close",value))
+        def trigger(self, value, handle=None): order.append(("close",value,handle))
     def stop(value):
         engine.force_stop(value)
         order.append(("stop",value))
@@ -161,8 +161,11 @@ async def test_tts_fail_safe_stops_durably_then_falls_back_and_closes_once(tmp_p
     agent.bind_terminal_closer(Closer())
     await agent._on_tts_terminal(reason,"ignored")
     await agent._on_tts_terminal(reason,"ignored")
+    pending=agent._tts_terminal_pending
+    agent._tts_terminal_pending=None
+    agent._closer.trigger(*pending)
     state=repo.load_state(metadata.tutoring_session_id)
     events=repo.load_session_aggregate(metadata.tutoring_session_id).events
     assert state.session.ended and not state.session.can_continue
     assert [(event.kind,event.detail) for event in events if event.kind=="session-stop-requested"] == [("session-stop-requested",reason)]
-    assert order == [("stop",reason),"fallback",("close",reason)]
+    assert order == [("stop",reason),"fallback",("close",reason,"handle")]
