@@ -35,3 +35,4 @@ class HarnessDecision:
     terminal: bool = False
     applied_tool: ToolName | None = None
     reason: str = "accepted"
+    selected_evidence_id: str | None = None

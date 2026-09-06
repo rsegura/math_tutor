@@ -659,7 +659,7 @@ git commit -m "feat: route voice sessions to tutoring runtime"
 - Modify: `src/math_tutor/application/provisioning.py`
 - Create: `src/math_tutor/infrastructure/evidence_clips.py`
 - Create: `src/math_tutor/infrastructure/clip_retention.py`
-- Create: `src/math_tutor/infrastructure/persistence/migrations/0003_audio_clip_retention.sql`
+- Create: `src/math_tutor/infrastructure/persistence/migrations/0010_audio_clip_retention.sql`
 - Modify: `src/math_tutor/infrastructure/persistence/migrator.py`
 - Modify: `src/math_tutor/infrastructure/persistence/repositories.py`
 - Modify: `src/math_tutor/agent/voice_agent.py`
@@ -706,7 +706,7 @@ operation for the review API. Consent revocation prevents new clips and queues
 existing clips from that consent scope for deletion. Store files under a
 configured math-tutor evidence directory with opaque IDs; store no transcript
 in filenames or logs. Persist consent scope, revocation, clip expiry, and
-deletion audit data through migration `0003_audio_clip_retention.sql`. Replace
+deletion audit data through migration `0010_audio_clip_retention.sql`. Replace
 Task 10's no-clips purge implementation with this idempotent physical purge
 through the same `ClipPurgePort`.
 

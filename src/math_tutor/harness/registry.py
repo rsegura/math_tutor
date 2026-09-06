@@ -63,7 +63,8 @@ class PedagogicalToolRegistry:
                     kind = None
                 answer = StructuredAnswer(kind=kind, values=raw["values"], status=status)
             except (KeyError, TypeError, ValueError): raise ToolRejected("structured-answer-invalid") from None
-            command = RecordAnswer(**base, activity_id=context.activity.activity_id, answer=answer, response_text=context.current_turn.transcript, stt_confidence=context.current_turn.stt_confidence, assistance_level=context.activity.hints_used, observation_id=f"obs-{context.current_turn.turn_id}", evidence_id=None, retain_evidence=False, reason_for_retention=None)
+            retain = status is AnswerInputStatus.EVALUABLE and context.current_turn.stt_confidence >= 0.65 and context.activity.hints_used == 0
+            command = RecordAnswer(**base, activity_id=context.activity.activity_id, answer=answer, response_text=context.current_turn.transcript, stt_confidence=context.current_turn.stt_confidence, assistance_level=context.activity.hints_used, observation_id=f"obs-{context.current_turn.turn_id}", evidence_id=f"evidence-{context.current_turn.turn_id}" if retain else None, retain_evidence=retain, reason_for_retention="independent-answer" if retain else None)
             result = self._service.record_answer(command); self._applied(result)
             if not isinstance(result.payload, RecordAnswerResult) or not isinstance(result.payload.mathematical_check, AnswerCheck):
                 raise ToolRejected("verification-result-missing", crossed_fence=True)
@@ -72,7 +73,7 @@ class PedagogicalToolRegistry:
             else:
                 speech = {AnswerOutcome.CORRECT:"Sí, esa respuesta es correcta.", AnswerOutcome.INCORRECT:"Esa respuesta todavía no es correcta. Vamos paso a paso.", AnswerOutcome.AMBIGUOUS:"No estoy seguro de haber entendido. ¿Puedes repetirlo?", AnswerOutcome.NOT_EVALUABLE:"No he podido comprobar la respuesta. ¿Puedes decirla de otra forma?"}[result.payload.mathematical_check.outcome]
             reason = "answer-correct" if result.payload.mathematical_check.outcome is AnswerOutcome.CORRECT else "accepted"
-            return HarnessDecision(speech=speech, applied_tool=name, reason=reason)
+            return HarnessDecision(speech=speech, applied_tool=name, reason=reason, selected_evidence_id=f"evidence-{context.current_turn.turn_id}" if retain else None)
         if name is ToolName.GIVE_HINT:
             self._keys(args, required=set())
             index = context.activity.hints_used

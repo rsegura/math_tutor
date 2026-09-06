@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import sqlite3
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, ProvisioningConflict, StoredCommandResult, StoredObservation)
@@ -42,6 +42,9 @@ class EvidenceClipRecord:
     duration_seconds: float
     storage_key: str
     expires_at: str
+    consent_id: str | None = None
+    consent_snapshot_id: str | None = None
+    deletion_state: str = "live"
 
 
 @dataclass(frozen=True, slots=True)
@@ -837,8 +840,111 @@ class SQLiteTutoringRepository:
 
     def load_evidence_clip(self, clip_id: str) -> EvidenceClipRecord | None:
         with self._connect() as db:
-            row = db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at FROM evidence_clips WHERE clip_id=?", (clip_id,)).fetchone()
+            row = db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,deletion_state FROM evidence_clips WHERE clip_id=? AND deletion_state='live'", (clip_id,)).fetchone()
         return EvidenceClipRecord(*row) if row else None
+
+    def authorize_clip_capture(self, *, evidence_id: str, learner_id: str, session_id: str,
+                               snapshot_id: str, captured_at: datetime) -> tuple[str, int] | None:
+        """Resolve authorization only from canonical evidence, snapshot and live consent."""
+        if captured_at.tzinfo is None:
+            raise ValueError("capture timestamp must be timezone-aware")
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT s.consent_id,s.retention_days,s.granted_at FROM session_audio_consent_snapshots s "
+                "JOIN audio_consents c ON c.consent_id=s.consent_id "
+                "JOIN evidence_records e ON e.evidence_id=? AND e.learner_id=s.learner_id AND e.session_id=s.session_id "
+                "WHERE s.snapshot_id=? AND s.learner_id=? AND s.session_id=? AND c.revoked_at IS NULL",
+                (evidence_id, snapshot_id, learner_id, session_id),
+            ).fetchone()
+        if row is None:
+            return None
+        granted = datetime.fromisoformat(row[2])
+        if captured_at > granted + timedelta(days=min(row[1], 30)):
+            return None
+        return row[0], row[1]
+
+    def save_authorized_evidence_clip(self, *, clip_id: str, evidence_id: str, consent_id: str,
+                                      snapshot_id: str, duration_seconds: float, storage_key: str,
+                                      captured_at: datetime, expires_at: datetime) -> bool:
+        if captured_at.tzinfo is None or expires_at.tzinfo is None:
+            raise ValueError("clip timestamps must be timezone-aware")
+        if not 0 < duration_seconds <= 30 or not captured_at < expires_at <= captured_at + timedelta(days=30):
+            raise ValueError("clip duration or expiry is outside hard bounds")
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            auth = db.execute(
+                "SELECT e.learner_id,e.session_id,s.retention_days,s.granted_at FROM evidence_records e "
+                "JOIN session_audio_consent_snapshots s ON s.snapshot_id=? AND s.session_id=e.session_id AND s.learner_id=e.learner_id "
+                "JOIN audio_consents c ON c.consent_id=s.consent_id "
+                "WHERE e.evidence_id=? AND s.consent_id=? AND c.revoked_at IS NULL",
+                (snapshot_id, evidence_id, consent_id),
+            ).fetchone()
+            if auth is None or captured_at > datetime.fromisoformat(auth[3]) + timedelta(days=min(auth[2], 30)) or expires_at > captured_at + timedelta(days=min(auth[2], 30)):
+                db.rollback()
+                return False
+            db.execute(
+                "INSERT INTO evidence_clips(clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (clip_id,evidence_id,auth[0],auth[1],duration_seconds,storage_key,expires_at.isoformat(),consent_id,snapshot_id,captured_at.isoformat()),
+            )
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def claim_evidence_clips(self, *, clip_id: str | None = None, consent_id: str | None = None,
+                             expired_before: datetime | None = None, claimed_at: datetime,
+                             claim_id: str) -> tuple[EvidenceClipRecord, ...]:
+        if claimed_at.tzinfo is None or (expired_before is not None and expired_before.tzinfo is None):
+            raise ValueError("claim timestamps must be timezone-aware")
+        clauses, values = [], []
+        if clip_id is not None:
+            clauses.append("clip_id=?"); values.append(clip_id)
+        if consent_id is not None:
+            clauses.append("consent_id=?"); values.append(consent_id)
+        if expired_before is not None:
+            clauses.append("expires_at<=?"); values.append(expired_before.isoformat())
+        if not clauses:
+            raise ValueError("clip deletion requires an explicit scope")
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            where = " AND ".join(clauses)
+            stale_at = (claimed_at - timedelta(minutes=5)).isoformat()
+            db.execute(
+                f"UPDATE evidence_clips SET deletion_state='deleting',deletion_claimed_at=?,deletion_claim_id=? "
+                f"WHERE ({where}) AND (deletion_state='live' OR (deletion_state='deleting' AND deletion_claimed_at<=?))",
+                (claimed_at.isoformat(), claim_id, *values, stale_at),
+            )
+            rows = db.execute(
+                f"SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,deletion_state FROM evidence_clips WHERE ({where}) AND deletion_claim_id=?",
+                (*values, claim_id),
+            ).fetchall()
+            db.commit()
+            return tuple(EvidenceClipRecord(*row[:9], "deleting") for row in rows)
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
+
+    def complete_evidence_clip_deletion(self, clip_id: str, *, reason: str, deleted_at: datetime) -> None:
+        if deleted_at.tzinfo is None:
+            raise ValueError("deletion timestamp must be timezone-aware")
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT evidence_id,consent_id FROM evidence_clips WHERE clip_id=? AND deletion_state='deleting'", (clip_id,)).fetchone()
+            if row is not None:
+                db.execute("INSERT OR IGNORE INTO audio_clip_deletion_tombstones(clip_id,evidence_id,consent_id,reason,deleted_at) VALUES(?,?,?,?,?)", (clip_id,row[0],row[1],reason,deleted_at.isoformat()))
+                db.execute("DELETE FROM evidence_clips WHERE clip_id=? AND deletion_state='deleting'", (clip_id,))
+            db.commit()
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
 
     def load_session_aggregate(self, session_id: str) -> SessionAggregate | None:
         with self._connect() as db:

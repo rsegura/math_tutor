@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Event
 from typing import Callable
 import asyncio
@@ -35,6 +35,7 @@ class VoiceDecision:
     terminal: bool = False
     needs_confirmation: bool = False
     reason: str = "accepted"
+    selected_evidence_id: str | None = field(default=None, compare=False)
 
 
 def _normalise(text: str) -> str:
@@ -91,7 +92,7 @@ class SilentLLM(livekit_llm.LLM):
 
 class HarnessVoiceAgent(Agent):
     """LiveKit transport adapter whose generated speech comes only from the harness."""
-    def __init__(self, *, instructions: str, initial_prompt: str, decide: Callable[[VoiceTurn], VoiceDecision], cancel: Callable[[], None], confidence_threshold: float = 0.65, tts_watchdog=None, initial_terminal_reason: str | None = None, force_stop: Callable[[str], None] | None = None, fallback_audio=None, terminal_handle: Callable[[], object | None] | None = None) -> None:
+    def __init__(self, *, instructions: str, initial_prompt: str, decide: Callable[[VoiceTurn], VoiceDecision], cancel: Callable[[], None], confidence_threshold: float = 0.65, tts_watchdog=None, initial_terminal_reason: str | None = None, force_stop: Callable[[str], None] | None = None, fallback_audio=None, terminal_handle: Callable[[], object | None] | None = None, audio_frame_sink=None, evidence_selected=None) -> None:
         super().__init__(instructions=instructions)
         self._decide = decide
         self._cancel = cancel
@@ -107,6 +108,8 @@ class HarnessVoiceAgent(Agent):
         self._terminal_handle = terminal_handle or (lambda: None)
         self._tts_fallback_started = False
         self._tts_terminal_pending = None
+        self._audio_frame_sink = audio_frame_sink
+        self._evidence_selected = evidence_selected
 
     def bind_terminal_closer(self, closer) -> None:
         self._closer = closer
@@ -117,7 +120,14 @@ class HarnessVoiceAgent(Agent):
             self._closer.trigger(self._initial_terminal_reason)
 
     async def stt_node(self, audio, model_settings):
-        async for event in Agent.default.stt_node(self, audio, model_settings):
+        source = audio
+        if self._audio_frame_sink is not None:
+            async def tapped():
+                async for frame in audio:
+                    self._audio_frame_sink(frame)
+                    yield frame
+            source = tapped()
+        async for event in Agent.default.stt_node(self, source, model_settings):
             if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT and event.alternatives:
                 value = event.alternatives[0].confidence
                 self._confidence = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1 else None
@@ -127,10 +137,14 @@ class HarnessVoiceAgent(Agent):
         source = Agent.default.tts_node(self, text, model_settings)
         if self._tts_watchdog is None:
             async for frame in source:
+                if self._audio_frame_sink is not None:
+                    self._audio_frame_sink(frame)
                 yield frame
             return
         try:
             async for frame in self._tts_watchdog.iterate(source,on_terminal=self._on_tts_terminal):
+                if self._audio_frame_sink is not None:
+                    self._audio_frame_sink(frame)
                 yield frame
         finally:
             pending, self._tts_terminal_pending = self._tts_terminal_pending, None
@@ -185,6 +199,8 @@ class HarnessVoiceAgent(Agent):
                 self._cancel()
                 raise
         try:
+            if decision.selected_evidence_id is not None and self._evidence_selected is not None:
+                self._evidence_selected(turn.turn_id, decision.selected_evidence_id)
             if decision.speech:
                 yield decision.speech
         finally:

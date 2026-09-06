@@ -402,6 +402,6 @@ class BoundedConversationEngine:
                 source_activity_id=activity_id,
                 source_activity=activity,
             )
-            return VoiceDecision(f"{decision.speech} {next_prompt}")
+            return VoiceDecision(f"{decision.speech} {next_prompt}", selected_evidence_id=decision.selected_evidence_id)
         speech = "De acuerdo, paramos aquí." if decision.terminal else (decision.speech or "Vamos paso a paso.")
-        return VoiceDecision(speech, terminal=decision.terminal, reason="stop-requested" if decision.terminal else decision.reason)
+        return VoiceDecision(speech, terminal=decision.terminal, reason="stop-requested" if decision.terminal else decision.reason, selected_evidence_id=decision.selected_evidence_id)

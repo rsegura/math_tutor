@@ -77,6 +77,16 @@ def test_record_answer_releases_only_deterministically_verified_speech(context):
     assert result.speech == "Sí, esa respuesta es correcta."
 
 
+def test_reliable_independent_answer_commits_an_evidence_selection(context):
+    service = CapturingService()
+    PedagogicalToolRegistry(service, HarnessLimits()).execute(
+        ToolProposal(ToolName.RECORD_ANSWER, {"turn_id":"turn-1","answer":{"status":"evaluable","kind":"integer","values":{"answer":4}}}), context)
+    command = service.commands[-1]
+    assert command.retain_evidence is True
+    assert command.evidence_id == "evidence-turn-1"
+    assert command.reason_for_retention == "independent-answer"
+
+
 def test_context_attempt_counter_cannot_short_circuit_authoritative_service(context):
     exhausted = replace(context, activity=replace(context.activity, attempts_used=3))
     service = CapturingService()

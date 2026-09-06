@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 
 from livekit.agents import AgentSession, JobContext, WorkerOptions, cli
 from livekit.plugins import silero
@@ -14,6 +15,21 @@ from math_tutor.agent.lifecycle import SpeechHandleTracker, StaticFallbackAudioP
 from math_tutor.infrastructure.dispatch import AGENT_NAME, DispatchMetadata
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
+from math_tutor.infrastructure.clip_retention import ClipRetentionService, RetentionSettings, RetentionSweeper
+from math_tutor.infrastructure.evidence_clips import AudioFrame, OpaqueClipStore, SessionAudioBuffers
+
+
+class RetentionLifecycle:
+    """Makes startup cleanup and awaited shutdown explicit at composition roots."""
+    def __init__(self, sweeper) -> None:
+        self.sweeper = sweeper
+
+    async def start_before_jobs(self) -> None:
+        await self.sweeper.sweep_once()
+        await self.sweeper.start()
+
+    async def aclose(self) -> None:
+        await self.sweeper.aclose()
 
 
 def resolve_dispatch(ctx: JobContext) -> DispatchMetadata:
@@ -40,6 +56,16 @@ async def entrypoint(ctx: JobContext) -> None:
     database_path = Path(os.environ.get("DATABASE_PATH", "/app/data/math_tutor.db"))
     migrate(database_path)
     repository = SQLiteTutoringRepository(database_path)
+    retention_settings = RetentionSettings.from_environment(os.environ)
+    clip_retention = ClipRetentionService(repository, OpaqueClipStore(retention_settings.evidence_directory), retention_settings)
+    retention_lifecycle = RetentionLifecycle(RetentionSweeper(clip_retention.sweep_expired, interval_seconds=retention_settings.sweep_interval_seconds))
+    await retention_lifecycle.start_before_jobs()
+    session_id = metadata.tutoring_session_id
+    buffers = SessionAudioBuffers(context_seconds=retention_settings.context_seconds, hard_cap_seconds=retention_settings.hard_cap_seconds)
+    async def close_retention() -> None:
+        buffers.close_session(session_id)
+        await retention_lifecycle.aclose()
+    ctx.add_shutdown_callback(close_retention)
     # Exact durable reconstruction is deliberately before provider creation or room connection.
     runtime = build_tutoring_runtime(metadata=metadata, repository=repository, env=os.environ)
     engine = BoundedConversationEngine(repository=repository, runtime=runtime, curricula_dir=Path(__file__).resolve().parents[1] / "curricula")
@@ -48,7 +74,23 @@ async def entrypoint(ctx: JobContext) -> None:
     session = AgentSession(stt=stt, llm=SilentLLM(), tts=tts, vad=silero.VAD.load(), preemptive_generation=False)
     speech_handles = SpeechHandleTracker()
     session.on("speech_created", speech_handles.observe)
-    agent = HarnessVoiceAgent(instructions=_instructions(runtime), initial_prompt=engine.initial_prompt, decide=engine.decide, cancel=engine.cancel, tts_watchdog=TTSWatchdog(), initial_terminal_reason=engine.startup_terminal_reason, force_stop=engine.force_stop, fallback_audio=StaticFallbackAudioPlayer(session), terminal_handle=speech_handles.latest)
+    session_id = runtime.bootstrap.session.session_id
+    def capture_frame(frame) -> None:
+        if not retention_settings.enabled:
+            return
+        frame = getattr(frame, "frame", frame)
+        rate = getattr(frame, "sample_rate", 0)
+        samples = getattr(frame, "samples_per_channel", 0)
+        duration = float(samples) / float(rate) if rate and samples else float(getattr(frame, "duration", 0))
+        payload = bytes(getattr(frame, "data", b""))
+        if payload and duration > 0:
+            buffers.append(session_id, AudioFrame(payload, duration, datetime.now(timezone.utc)))
+    def persist_selection(turn_id: str, evidence_id: str) -> None:
+        del turn_id
+        clip_retention.persist_selected(evidence_id=evidence_id, learner_id=runtime.bootstrap.learner.learner_id,
+            session_id=session_id, consent_snapshot_id=runtime.bootstrap.audio_consent_snapshot_id,
+            selected=buffers.select(session_id, datetime.now(timezone.utc)), evidence_selection_committed=True)
+    agent = HarnessVoiceAgent(instructions=_instructions(runtime), initial_prompt=engine.initial_prompt, decide=engine.decide, cancel=engine.cancel, tts_watchdog=TTSWatchdog(), initial_terminal_reason=engine.startup_terminal_reason, force_stop=engine.force_stop, fallback_audio=StaticFallbackAudioPlayer(session), terminal_handle=speech_handles.latest, audio_frame_sink=capture_frame, evidence_selected=persist_selection)
     closer = TerminalCloser(ctx, session)
     agent.bind_terminal_closer(closer)
     ctx.add_shutdown_callback(closer.aclose)

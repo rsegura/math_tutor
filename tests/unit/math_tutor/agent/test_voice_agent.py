@@ -120,6 +120,14 @@ async def test_interrupted_harness_generation_cancels_authoritative_generation()
     assert cancellations == [True]
 
 
+async def test_clip_selection_callback_runs_only_after_committed_evidence_decision():
+    selected=[]
+    value=HarnessVoiceAgent(instructions="bounded",initial_prompt="Pregunta",decide=lambda turn:VoiceDecision("Bien",selected_evidence_id="evidence-t"),cancel=lambda:None,evidence_selected=lambda turn,evidence:selected.append((turn,evidence)))
+    value._pending=VoiceTurn("t","cuatro",.9,Event())
+    assert await output(value.llm_node(chat("cuatro"),[],None)) == ["Bien"]
+    assert selected == [("t","evidence-t")]
+
+
 async def test_tts_fallback_unwinds_node_before_explicit_handle_playout_and_close(monkeypatch):
     order=[]; node_returned=asyncio.Event()
     class Handle:

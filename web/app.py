@@ -13,6 +13,8 @@ from math_tutor.application.provisioning import ProvisioningService
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
+from math_tutor.infrastructure.clip_retention import ClipRetentionService, RetentionSettings
+from math_tutor.infrastructure.evidence_clips import OpaqueClipStore
 from web.therapist_api import create_therapist_router
 from web.token_api import create_token_router
 from web.review_api import create_review_router
@@ -39,12 +41,6 @@ class WebSettings:
         return cls(enabled, os.getenv("THERAPIST_API_TOKEN"))
 
 
-class NoClipPurger:
-    """Task-10 audit-only adapter; Task 12 replaces physical deletion."""
-    def purge_consent_scope(self, consent_id: str, session_ids: tuple[str, ...]) -> None:
-        return None
-
-
 def create_app(settings: WebSettings | None = None, *, provisioning: ProvisioningService | None = None, database_path: Path | None = None) -> FastAPI:
     settings = settings or WebSettings.from_environment()
     result = FastAPI(title="Math Tutor Voice PoC")
@@ -57,7 +53,9 @@ def create_app(settings: WebSettings | None = None, *, provisioning: Provisionin
         if provisioning is None:
             base = Path(__file__).resolve().parents[1] / "src/math_tutor/curricula"
             curriculum, _ = load_curriculum_catalogs(base / "primary-math-v1.yaml", base / "activity-templates-v1.yaml")
-            provisioning = ProvisioningService(repository, curriculum, NoClipPurger())
+            retention = RetentionSettings.from_environment(os.environ)
+            clip_purger = ClipRetentionService(repository, OpaqueClipStore(retention.evidence_directory), retention)
+            provisioning = ProvisioningService(repository, curriculum, clip_purger)
         result.include_router(create_therapist_router(provisioning, settings.therapist_api_token or ""))
     result.include_router(create_token_router(repository))
     result.include_router(create_review_router(repository, settings.therapist_api_token))
