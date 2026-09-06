@@ -100,7 +100,12 @@ class ClipRetentionService:
             claimed = self.repository.claim_evidence_clips(clip_id=clip_id, consent_id=consent_id, expired_before=expired_before, claimed_at=self._now(), claim_id=self._claim_id)
             deleted = 0
             for record in claimed:
-                self.store.delete(record.storage_key)
+                try:
+                    self.store.delete(record.storage_key)
+                except ValueError:
+                    if record.consent_id is not None:
+                        raise
+                    self.store.delete_quarantined_legacy(record.storage_key)
                 self.repository.complete_evidence_clip_deletion(record.clip_id, reason=reason, deleted_at=self._now())
                 deleted += 1
             return deleted

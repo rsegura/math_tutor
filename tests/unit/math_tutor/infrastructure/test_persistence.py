@@ -175,19 +175,12 @@ def test_activity_progress_upsert_preserves_unmentioned_rows(tmp_path):
     assert {p.activity_id: p.version for p in repo.load_state("session-1").activity_progress} == {"a": 2, "b": 1}
 
 
-def test_clip_metadata_is_bounded_and_references_exactly_one_evidence(tmp_path):
+def test_legacy_clip_write_api_cannot_bypass_consent_fence(tmp_path):
     repo = repository(tmp_path)
     repo.commit_once(batch())
-    repo.save_evidence_clip("clip-1", "evidence-1", "learner-1", "session-1", duration_seconds=20, storage_key="clips/clip-1.enc", expires_at="2026-09-10T00:00:00Z")
-    clip = repo.load_evidence_clip("clip-1")
-    assert clip.evidence_id == "evidence-1" and clip.duration_seconds == 20
-    for duration in (0, 31):
-        try:
+    for duration in (0, 20, 31):
+        with pytest.raises(ValueError, match="consent-gated"):
             repo.save_evidence_clip("bad", "evidence-1", "learner-1", "session-1", duration_seconds=duration, storage_key="x", expires_at="2026-09-10T00:00:00Z")
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("unbounded clip accepted")
 
 
 def test_reviews_and_profile_revisions_are_append_only_and_reconstructible(tmp_path):
@@ -355,20 +348,12 @@ def test_bootstrap_helpers_never_blindly_overwrite_versioned_state(tmp_path):
         raise AssertionError("blind estimate overwrite accepted")
 
 
-def test_clip_ownership_is_derived_from_canonical_evidence(tmp_path):
+def test_legacy_clip_write_rejects_even_canonical_evidence(tmp_path):
     repo = repository(tmp_path)
     repo.commit_once(batch())
-    repo.save_evidence_clip("clip-derived", "evidence-1", duration_seconds=20,
-                            storage_key="clips/derived.enc", expires_at="2026-09-10T00:00:00Z")
-    clip = repo.load_evidence_clip("clip-derived")
-    assert (clip.learner_id, clip.session_id) == ("learner-1", "session-1")
-    try:
-        repo.save_evidence_clip("clip-bad", "evidence-1", "other", "session-1",
-                                duration_seconds=20, storage_key="x", expires_at="2026-09-10T00:00:00Z")
-    except ValueError as error:
-        assert "ownership" in str(error)
-    else:
-        raise AssertionError("caller-controlled clip owner accepted")
+    with pytest.raises(ValueError, match="consent-gated"):
+        repo.save_evidence_clip("clip-derived", "evidence-1", duration_seconds=20,
+                                storage_key="clips/derived.enc", expires_at="2026-09-10T00:00:00Z")
 
 
 def test_interpretation_revisions_append_with_version_cas(tmp_path):

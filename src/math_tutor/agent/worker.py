@@ -19,17 +19,47 @@ from math_tutor.infrastructure.clip_retention import ClipRetentionService, Reten
 from math_tutor.infrastructure.evidence_clips import AudioFrame, OpaqueClipStore, SessionAudioBuffers
 
 
-class RetentionLifecycle:
-    """Makes startup cleanup and awaited shutdown explicit at composition roots."""
-    def __init__(self, sweeper) -> None:
-        self.sweeper = sweeper
+_RETENTION_RUNTIME_KEY = "math_tutor_retention_runtime"
 
-    async def start_before_jobs(self) -> None:
-        await self.sweeper.sweep_once()
-        await self.sweeper.start()
+
+class WorkerRetentionRuntime:
+    """The single retention owner for one LiveKit worker process."""
+    def __init__(self, repository, service, sweeper, settings=None) -> None:
+        self.repository, self.service, self.sweeper = repository, service, sweeper
+        self.settings = settings
+        self._started = False
+        self._closed = False
+
+    @classmethod
+    def from_environment(cls, env) -> "WorkerRetentionRuntime":
+        database_path = Path(env.get("DATABASE_PATH", "/app/data/math_tutor.db"))
+        migrate(database_path)
+        repository = SQLiteTutoringRepository(database_path)
+        settings = RetentionSettings.from_environment(env)
+        service = ClipRetentionService(repository, OpaqueClipStore(settings.evidence_directory), settings)
+        return cls(repository, service, RetentionSweeper(service.sweep_expired, interval_seconds=settings.sweep_interval_seconds), settings)
+
+    def startup_before_jobs(self) -> None:
+        self.service.sweep_expired()
+
+    async def start_periodic(self) -> None:
+        if not self._started:
+            await self.sweeper.start()
+            self._started = True
 
     async def aclose(self) -> None:
+        if self._closed:
+            return
         await self.sweeper.aclose()
+        self.repository.close()
+        self._closed = True
+
+
+def prewarm_retention(process) -> None:
+    """Synchronous prewarm runs before LiveKit advertises the job process."""
+    runtime = WorkerRetentionRuntime.from_environment(os.environ)
+    runtime.startup_before_jobs()
+    process.userdata[_RETENTION_RUNTIME_KEY] = runtime
 
 
 def resolve_dispatch(ctx: JobContext) -> DispatchMetadata:
@@ -53,21 +83,32 @@ def _instructions(runtime) -> str:
 
 async def entrypoint(ctx: JobContext) -> None:
     metadata = resolve_dispatch(ctx)
-    database_path = Path(os.environ.get("DATABASE_PATH", "/app/data/math_tutor.db"))
-    migrate(database_path)
-    repository = SQLiteTutoringRepository(database_path)
-    retention_settings = RetentionSettings.from_environment(os.environ)
-    clip_retention = ClipRetentionService(repository, OpaqueClipStore(retention_settings.evidence_directory), retention_settings)
-    retention_lifecycle = RetentionLifecycle(RetentionSweeper(clip_retention.sweep_expired, interval_seconds=retention_settings.sweep_interval_seconds))
-    await retention_lifecycle.start_before_jobs()
+    process_runtime = ctx.proc.userdata.get(_RETENTION_RUNTIME_KEY)
+    if not isinstance(process_runtime, WorkerRetentionRuntime):
+        raise RuntimeError("retention runtime was not prewarmed")
+    await process_runtime.start_periodic()
+    repository = process_runtime.repository
+    retention_settings = process_runtime.settings
+    clip_retention = process_runtime.service
     session_id = metadata.tutoring_session_id
-    buffers = SessionAudioBuffers(context_seconds=retention_settings.context_seconds, hard_cap_seconds=retention_settings.hard_cap_seconds)
+    buffers = None
+    # No frame is allocated until the exact durable learner/session snapshot is
+    # revalidated. A failed check clears and permanently disables this session.
+    def buffer_authorized(candidate_session_id: str, at: datetime) -> bool:
+        snapshot_id = runtime.bootstrap.audio_consent_snapshot_id
+        return bool(snapshot_id and repository.authorize_session_clip_buffer(
+            learner_id=runtime.bootstrap.learner.learner_id,
+            session_id=candidate_session_id, snapshot_id=snapshot_id, at=at))
     async def close_retention() -> None:
-        buffers.close_session(session_id)
-        await retention_lifecycle.aclose()
+        if buffers is not None:
+            buffers.close_session(session_id)
+        await process_runtime.aclose()
     ctx.add_shutdown_callback(close_retention)
     # Exact durable reconstruction is deliberately before provider creation or room connection.
     runtime = build_tutoring_runtime(metadata=metadata, repository=repository, env=os.environ)
+    buffers = SessionAudioBuffers(context_seconds=retention_settings.context_seconds,
+        hard_cap_seconds=retention_settings.hard_cap_seconds, enabled=retention_settings.enabled,
+        authorize=buffer_authorized)
     engine = BoundedConversationEngine(repository=repository, runtime=runtime, curricula_dir=Path(__file__).resolve().parents[1] / "curricula")
     stt, tts = create_voice_providers(runtime.providers)
     await ctx.connect()
@@ -76,15 +117,16 @@ async def entrypoint(ctx: JobContext) -> None:
     session.on("speech_created", speech_handles.observe)
     session_id = runtime.bootstrap.session.session_id
     def capture_frame(frame) -> None:
-        if not retention_settings.enabled:
-            return
         frame = getattr(frame, "frame", frame)
         rate = getattr(frame, "sample_rate", 0)
         samples = getattr(frame, "samples_per_channel", 0)
         duration = float(samples) / float(rate) if rate and samples else float(getattr(frame, "duration", 0))
         payload = bytes(getattr(frame, "data", b""))
-        if payload and duration > 0:
-            buffers.append(session_id, AudioFrame(payload, duration, datetime.now(timezone.utc)))
+        channels = int(getattr(frame, "num_channels", 0) or getattr(frame, "channels", 0))
+        sample_width = int(getattr(frame, "sample_width", 2))
+        if payload and duration > 0 and rate and channels:
+            captured_at = datetime.now(timezone.utc) - __import__('datetime').timedelta(seconds=duration)
+            buffers.append(session_id, AudioFrame(payload, duration, captured_at, int(rate), channels, sample_width))
     def persist_selection(turn_id: str, evidence_id: str) -> None:
         del turn_id
         clip_retention.persist_selected(evidence_id=evidence_id, learner_id=runtime.bootstrap.learner.learner_id,
@@ -98,7 +140,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 def build_worker_options() -> WorkerOptions:
-    return WorkerOptions(entrypoint_fnc=entrypoint, agent_name=AGENT_NAME)
+    return WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm_retention, agent_name=AGENT_NAME)
 
 
 if __name__ == "__main__":

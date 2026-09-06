@@ -44,6 +44,7 @@ class EvidenceClipRecord:
     expires_at: str
     consent_id: str | None = None
     consent_snapshot_id: str | None = None
+    captured_at: str | None = None
     deletion_state: str = "live"
 
 
@@ -215,6 +216,10 @@ class SQLiteTutoringRepository:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def close(self) -> None:
+        """Repository connections are short-lived; retain an explicit lifecycle port."""
+        return None
 
     @staticmethod
     def _has_profile_versions(db: sqlite3.Connection) -> bool:
@@ -828,20 +833,15 @@ class SQLiteTutoringRepository:
         return revision
 
     def save_evidence_clip(self, clip_id: str, evidence_id: str, learner_id: str | None = None, session_id: str | None = None, *, duration_seconds: float, storage_key: str, expires_at: str) -> None:
-        if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, (int,float)) or not 0 < duration_seconds <= 30:
-            raise ValueError("clip duration must be greater than zero and at most 30 seconds")
-        with self._connect() as db:
-            owner = db.execute("SELECT o.learner_id,o.session_id FROM evidence_records e JOIN observations o ON o.observation_id=e.observation_id WHERE e.evidence_id=?", (evidence_id,)).fetchone()
-            if owner is None:
-                raise ValueError("evidence does not exist")
-            if learner_id is not None and learner_id != owner[0] or session_id is not None and session_id != owner[1]:
-                raise ValueError("clip ownership does not match canonical evidence")
-            db.execute("INSERT INTO evidence_clips(clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at) VALUES(?,?,?,?,?,?,?)", (clip_id,evidence_id,owner[0],owner[1],duration_seconds,storage_key,expires_at))
+        del clip_id, evidence_id, learner_id, session_id, duration_seconds, storage_key, expires_at
+        raise ValueError("consent-gated clip API required")
 
     def load_evidence_clip(self, clip_id: str) -> EvidenceClipRecord | None:
         with self._connect() as db:
-            row = db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,deletion_state FROM evidence_clips WHERE clip_id=? AND deletion_state='live'", (clip_id,)).fetchone()
-        return EvidenceClipRecord(*row) if row else None
+            row = db.execute("SELECT ec.clip_id,ec.evidence_id,ec.learner_id,ec.session_id,ec.duration_seconds,ec.storage_key,ec.expires_at,ec.consent_id,ec.consent_snapshot_id,ec.captured_at,ec.deletion_state FROM evidence_clips ec JOIN audio_consents c ON c.consent_id=ec.consent_id AND c.revoked_at IS NULL WHERE ec.clip_id=? AND ec.deletion_state='live'", (clip_id,)).fetchone()
+        if row is None or datetime.fromisoformat(row[6]) <= datetime.now(timezone.utc):
+            return None
+        return EvidenceClipRecord(*row)
 
     def authorize_clip_capture(self, *, evidence_id: str, learner_id: str, session_id: str,
                                snapshot_id: str, captured_at: datetime) -> tuple[str, int] | None:
@@ -862,6 +862,24 @@ class SQLiteTutoringRepository:
         if captured_at > granted + timedelta(days=min(row[1], 30)):
             return None
         return row[0], row[1]
+
+    def authorize_session_clip_buffer(self, *, learner_id: str, session_id: str,
+                                      snapshot_id: str, at: datetime) -> bool:
+        """Authorize transient buffering from the exact session snapshot."""
+        if at.tzinfo is None:
+            raise ValueError("authorization timestamp must be timezone-aware")
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT s.retention_days,s.granted_at,ls.session_json FROM session_audio_consent_snapshots s "
+                "JOIN audio_consents c ON c.consent_id=s.consent_id "
+                "JOIN learning_sessions ls ON ls.session_id=s.session_id AND ls.learner_id=s.learner_id "
+                "WHERE s.snapshot_id=? AND s.learner_id=? AND s.session_id=? AND c.revoked_at IS NULL",
+                (snapshot_id, learner_id, session_id),
+            ).fetchone()
+        if not row or at > datetime.fromisoformat(row[1]) + timedelta(days=min(row[0], 30)):
+            return False
+        session = _load(row[2])
+        return isinstance(session, LearningSession) and session.can_continue and not session.ended
 
     def save_authorized_evidence_clip(self, *, clip_id: str, evidence_id: str, consent_id: str,
                                       snapshot_id: str, duration_seconds: float, storage_key: str,
@@ -920,11 +938,11 @@ class SQLiteTutoringRepository:
                 (claimed_at.isoformat(), claim_id, *values, stale_at),
             )
             rows = db.execute(
-                f"SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,deletion_state FROM evidence_clips WHERE ({where}) AND deletion_claim_id=?",
+                f"SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at,deletion_state FROM evidence_clips WHERE ({where}) AND deletion_claim_id=?",
                 (*values, claim_id),
             ).fetchall()
             db.commit()
-            return tuple(EvidenceClipRecord(*row[:9], "deleting") for row in rows)
+            return tuple(EvidenceClipRecord(*row) for row in rows)
         except Exception:
             db.rollback(); raise
         finally:
@@ -972,7 +990,9 @@ class SQLiteTutoringRepository:
             proposals = tuple(_load(row[0]) for row in db.execute("SELECT proposal_json FROM profile_change_proposals WHERE learner_id=? AND session_id=? ORDER BY proposal_id", (learner_id, session_id)))
             reviews = tuple(TherapistReviewRecord(row[0],row[1],row[2],row[3],_load(row[4])) for row in db.execute("SELECT review_id,version,learner_id,session_id,review_json FROM therapist_reviews WHERE session_id=? ORDER BY review_id,version", (session_id,)))
             revisions = tuple(ProfileRevisionRecord(row[0],row[1],row[2],_load(row[3]),row[4]) for row in db.execute("SELECT revision_id,learner_id,profile_version,revision_json,policy_version FROM profile_revisions WHERE learner_id=? ORDER BY profile_version", (learner_id,)))
-            clips = tuple(EvidenceClipRecord(*row) for row in db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at FROM evidence_clips WHERE session_id=? ORDER BY clip_id", (session_id,)))
+            clip_rows = db.execute("SELECT ec.clip_id,ec.evidence_id,ec.learner_id,ec.session_id,ec.duration_seconds,ec.storage_key,ec.expires_at,ec.consent_id,ec.consent_snapshot_id,ec.captured_at,ec.deletion_state FROM evidence_clips ec JOIN audio_consents c ON c.consent_id=ec.consent_id AND c.revoked_at IS NULL WHERE ec.session_id=? AND ec.deletion_state='live' ORDER BY ec.clip_id", (session_id,)).fetchall()
+            now = datetime.now(timezone.utc)
+            clips = tuple(EvidenceClipRecord(*row) for row in clip_rows if datetime.fromisoformat(row[6]) > now)
         return SessionAggregate(_load(session_row[0]), _load(plan_row[0]), curriculum[0], curriculum[1], plan_row[1], session_row[1], activities, observations, evidence, estimates, progress, events, proposals, reviews, revisions, clips)
 
     def load_summary_source(self, session_id: str) -> SessionSummarySource | None:
