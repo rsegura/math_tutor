@@ -185,10 +185,13 @@ def create_review_router(repository, therapist_token: str | None, *, summary_ser
         next_history=[]
         if hasattr(repository,"list_next_objective_decisions"):
             for item in next_proposals:
-                for decision in repository.list_next_objective_decisions(item.proposal_id):
+                decisions=repository.list_next_objective_decisions(item.proposal_id)
+                for decision in decisions:
                     next_history.append({**next_wire(item),"revision":decision.revision,"status":decision.status.value,
                         "decision_reason":decision.reason,"expected_plan_version":decision.expected_plan_version,
                         "expected_profile_version":decision.expected_profile_version,"resulting_plan_version":decision.resulting_plan_version,"decided_at":decision.decided_at.isoformat()})
+                if item.status is ProposalDecisionStatus.STALE and not decisions:
+                    next_history.append({**next_wire(item),"decision_reason":"profile-version-superseded"})
         else:
             next_history=[next_wire(item) for item in next_proposals if item.status is not ProposalDecisionStatus.PENDING]
         return {"learner":{"learner_id":learner.learner_id,"pseudonym":learner.pseudonym,"age_years":learner.age_years},

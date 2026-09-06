@@ -23,7 +23,7 @@ from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.domain.audio_consent import AudioConsent
 from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits
-from math_tutor.application.next_objectives import NextObjectiveDecision, NextObjectiveDecisionRevision, NextObjectiveError, NextObjectiveProposal, ProposalDecisionStatus
+from math_tutor.application.next_objectives import NextObjectiveDecision, NextObjectiveDecisionRevision, NextObjectiveError, NextObjectiveGenerationSource, NextObjectiveProposal, ProposalDecisionStatus
 from math_tutor.infrastructure.dispatch import VoiceBootstrap, VoiceBootstrapError, verify_join_code
 
 
@@ -311,11 +311,13 @@ class SQLiteTutoringRepository:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            existing = db.execute("SELECT proposal_id FROM next_objective_proposals WHERE learner_id=? AND source_session_id=? AND source_plan_id=? AND source_plan_version=? AND objective_id=?",(proposal.learner_id,proposal.source_session_id,proposal.source_plan_id,proposal.source_plan_version,proposal.objective_id)).fetchone()
+            current_profile=db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?",(proposal.learner_id,)).fetchone()
+            if current_profile is None or current_profile[0]!=proposal.source_profile_version: raise NextObjectiveError("stale-profile-version")
+            existing = db.execute("SELECT proposal_id FROM next_objective_proposals WHERE learner_id=? AND source_session_id=? AND source_plan_id=? AND source_plan_version=? AND source_profile_version=? AND objective_id=?",(proposal.learner_id,proposal.source_session_id,proposal.source_plan_id,proposal.source_plan_version,proposal.source_profile_version,proposal.objective_id)).fetchone()
             if existing is not None:
                 db.rollback()
                 loaded=self.load_next_objective_proposal(existing[0])
-                if loaded is None: raise NextObjectiveError("stale-existing-proposal")
+                if loaded is None or loaded.status is ProposalDecisionStatus.STALE: raise NextObjectiveError("stale-existing-proposal")
                 return loaded
             db.execute("INSERT INTO next_objective_proposals(proposal_id,learner_id,source_session_id,source_plan_id,source_plan_version,source_profile_version,objective_id,rationale,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(proposal.proposal_id,proposal.learner_id,proposal.source_session_id,proposal.source_plan_id,proposal.source_plan_version,proposal.source_profile_version,proposal.objective_id,proposal.rationale,proposal.created_at.isoformat()))
             for position,evidence_id in enumerate(proposal.evidence_ids):
@@ -327,12 +329,35 @@ class SQLiteTutoringRepository:
             db.rollback(); raise
         finally: db.close()
 
+    def load_next_objective_generation_source(self, learner_id: str, session_id: str) -> NextObjectiveGenerationSource | None:
+        """Read plan, profile, estimates and visible evidence from one SQLite snapshot."""
+        db=self._connect_read_only()
+        try:
+            db.execute("BEGIN")
+            session=db.execute("SELECT learner_id,plan_id,plan_version FROM learning_sessions WHERE session_id=?",(session_id,)).fetchone()
+            if session is None or session[0]!=learner_id: db.rollback(); return None
+            plan_row=db.execute("SELECT p.plan_id,p.version,p.adaptations_json,p.duration_minutes,p.max_activities,l.plan_json FROM provisioned_plans p JOIN learning_plans l ON l.plan_id=p.plan_id AND l.version=p.version WHERE p.learner_id=? ORDER BY p.version DESC LIMIT 1",(learner_id,)).fetchone()
+            profile=db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?",(learner_id,)).fetchone()
+            if plan_row is None or profile is None or (session[1],session[2])!=(plan_row[0],plan_row[1]): db.rollback(); return None
+            plan=ProvisionedPlan(_load(plan_row[5]),tuple(json.loads(plan_row[2])),SessionLimits(plan_row[3],plan_row[4]))
+            estimates=tuple(_load(row[0]) for row in db.execute("SELECT estimate_json FROM skill_estimates WHERE learner_id=? ORDER BY objective_id",(learner_id,)))
+            evidence_ids={row[0] for row in db.execute("SELECT evidence_id FROM evidence_records WHERE learner_id=?",(learner_id,))}
+            discarded=set()
+            for row in db.execute("SELECT review_json FROM therapist_reviews WHERE learner_id=? ORDER BY created_at,rowid",(learner_id,)):
+                review=_load(row[0])
+                if isinstance(review,DiscardEvidenceReview): discarded.add(review.evidence_id)
+            db.commit()
+            return NextObjectiveGenerationSource(learner_id,session_id,plan,profile[0],estimates,frozenset(evidence_ids-discarded))
+        except Exception:
+            db.rollback(); raise
+        finally: db.close()
+
     def load_next_objective_proposal(self, proposal_id: str) -> NextObjectiveProposal | None:
         with self._connect_read_only() as db:
-            row=db.execute("SELECT p.proposal_id,p.learner_id,p.source_session_id,p.source_plan_id,p.source_plan_version,p.source_profile_version,p.objective_id,p.rationale,p.created_at,d.status,d.revision,d.decided_at FROM next_objective_proposals p LEFT JOIN next_objective_decisions d ON d.proposal_id=p.proposal_id WHERE p.proposal_id=? AND p.stale_reason IS NULL ORDER BY d.revision DESC LIMIT 1",(proposal_id,)).fetchone()
+            row=db.execute("SELECT p.proposal_id,p.learner_id,p.source_session_id,p.source_plan_id,p.source_plan_version,p.source_profile_version,p.objective_id,p.rationale,p.created_at,d.status,d.revision,d.decided_at,p.stale_reason,v.version FROM next_objective_proposals p JOIN learner_profile_versions v ON v.learner_id=p.learner_id LEFT JOIN next_objective_decisions d ON d.proposal_id=p.proposal_id WHERE p.proposal_id=? ORDER BY d.revision DESC LIMIT 1",(proposal_id,)).fetchone()
             evidence=tuple(item[0] for item in db.execute("SELECT evidence_id FROM next_objective_proposal_evidence WHERE proposal_id=? ORDER BY position",(proposal_id,))) if row else ()
         if row is None: return None
-        status_value=ProposalDecisionStatus(row[9]) if row[9] else ProposalDecisionStatus.PENDING
+        status_value=ProposalDecisionStatus.STALE if row[12] is not None or (row[9] is None and row[5]!=row[13]) else ProposalDecisionStatus(row[9]) if row[9] else ProposalDecisionStatus.PENDING
         updated=datetime.fromisoformat(row[11]) if row[11] else datetime.fromisoformat(row[8])
         return NextObjectiveProposal(row[0],row[1],row[2],row[3],row[4],row[5],row[6],row[7],evidence,status_value,row[10] or 0,datetime.fromisoformat(row[8]),updated)
 

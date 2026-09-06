@@ -15,6 +15,17 @@ class ProposalDecisionStatus(Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    STALE = "stale"
+
+
+@dataclass(frozen=True, slots=True)
+class NextObjectiveGenerationSource:
+    learner_id: str
+    source_session_id: str
+    plan: object
+    source_profile_version: int
+    estimates: tuple[object, ...]
+    visible_evidence_ids: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +35,7 @@ class NextObjectiveProposal:
     source_session_id: str
     source_plan_id: str
     source_plan_version: int
-    source_profile_version: int
+    source_profile_version: int | None
     objective_id: str
     rationale: str
     evidence_ids: tuple[str, ...]
@@ -36,11 +47,16 @@ class NextObjectiveProposal:
     def __post_init__(self) -> None:
         texts=(self.proposal_id,self.learner_id,self.source_session_id,self.source_plan_id,self.objective_id,self.rationale)
         if any(not isinstance(value,str) or not value or value!=value.strip() for value in texts): raise NextObjectiveError("invalid-next-objective-proposal")
-        if any(isinstance(value,bool) or not isinstance(value,int) or value<1 for value in (self.source_plan_version,self.source_profile_version)): raise NextObjectiveError("invalid-next-objective-proposal")
-        if not self.evidence_ids or len(self.evidence_ids)!=len(set(self.evidence_ids)): raise NextObjectiveError("invalid-next-objective-proposal")
+        if isinstance(self.source_plan_version,bool) or not isinstance(self.source_plan_version,int) or self.source_plan_version<1: raise NextObjectiveError("invalid-next-objective-proposal")
+        if self.source_profile_version is None:
+            if self.status is not ProposalDecisionStatus.STALE: raise NextObjectiveError("invalid-next-objective-proposal")
+        elif isinstance(self.source_profile_version,bool) or not isinstance(self.source_profile_version,int) or self.source_profile_version<1:
+            raise NextObjectiveError("invalid-next-objective-proposal")
+        if (not self.evidence_ids and self.status is not ProposalDecisionStatus.STALE) or len(self.evidence_ids)!=len(set(self.evidence_ids)): raise NextObjectiveError("invalid-next-objective-proposal")
         if any(not isinstance(value,str) or not value or value!=value.strip() for value in self.evidence_ids): raise NextObjectiveError("invalid-next-objective-proposal")
         if self.status is ProposalDecisionStatus.PENDING and self.revision!=0: raise NextObjectiveError("invalid-next-objective-proposal")
-        if self.status is not ProposalDecisionStatus.PENDING and self.revision<1: raise NextObjectiveError("invalid-next-objective-proposal")
+        if self.status is ProposalDecisionStatus.STALE and (isinstance(self.revision,bool) or not isinstance(self.revision,int) or self.revision<0): raise NextObjectiveError("invalid-next-objective-proposal")
+        if self.status in {ProposalDecisionStatus.APPROVED,ProposalDecisionStatus.REJECTED} and self.revision<1: raise NextObjectiveError("invalid-next-objective-proposal")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None or self.updated_at<self.created_at: raise NextObjectiveError("invalid-next-objective-proposal")
 
 
@@ -91,29 +107,38 @@ class NextObjectiveService:
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def propose_available(self, learner_id: str, source_session_id: str) -> NextObjectiveProposal | None:
-        aggregate = self.repository.load_session_aggregate(source_session_id)
-        plan = self.repository.load_current_provisioned_plan(learner_id)
-        if aggregate is None or plan is None or aggregate.session.learner_id != learner_id:
+        if hasattr(self.repository,"load_next_objective_generation_source"):
+            generation = self.repository.load_next_objective_generation_source(learner_id,source_session_id)
+            if generation is None: raise NextObjectiveError("proposal-owner-mismatch")
+            plan=generation.plan; estimates=generation.estimates; visible=generation.visible_evidence_ids
+            profile_version=generation.source_profile_version
+            session_plan=(plan.plan.plan_id,plan.version)
+        else:
+            aggregate = self.repository.load_session_aggregate(source_session_id)
+            plan = self.repository.load_current_provisioned_plan(learner_id)
+            if aggregate is None or plan is None or aggregate.session.learner_id != learner_id: raise NextObjectiveError("proposal-owner-mismatch")
+            estimates=aggregate.estimates
+            source = self.repository.load_summary_source(source_session_id) if hasattr(self.repository,"load_summary_source") else None
+            visible = frozenset(item.evidence_id for item in source.evidence) - set(source.discarded_evidence_ids) if source is not None else None
+            profile_version=self.repository.load_profile_version(learner_id)
+            session_plan=(aggregate.session.plan_id,aggregate.session.plan_version)
+        if plan is None or profile_version is None:
             raise NextObjectiveError("proposal-owner-mismatch")
-        if (aggregate.session.plan_id, aggregate.session.plan_version) != (plan.plan.plan_id, plan.version):
+        if session_plan != (plan.plan.plan_id, plan.version):
             raise NextObjectiveError("stale-source-plan")
-        source = self.repository.load_summary_source(source_session_id) if hasattr(self.repository,"load_summary_source") else None
-        visible = None if source is None else {item.evidence_id for item in source.evidence} - set(source.discarded_evidence_ids)
-        achieved = {item.objective_id for item in aggregate.estimates if item.state in {CompetencyState.INDEPENDENT,CompetencyState.GENERALIZED}
+        achieved = {item.objective_id for item in estimates if item.state in {CompetencyState.INDEPENDENT,CompetencyState.GENERALIZED}
                     and item.supporting_evidence_ids and (visible is None or set(item.supporting_evidence_ids)<=visible)}
         candidate = next((item for item in self.curriculum.objectives
                           if item.id not in plan.plan.authorised_objective_ids
                           and item.prerequisite_ids and self.curriculum.prerequisites_met(item.id, achieved)), None)
         if candidate is None: return None
-        evidence_ids = tuple(dict.fromkeys(evidence_id for item in aggregate.estimates
+        evidence_ids = tuple(dict.fromkeys(evidence_id for item in estimates
             if item.objective_id in candidate.prerequisite_ids and item.objective_id in achieved
             for evidence_id in item.supporting_evidence_ids))
         if not evidence_ids: return None
-        identity = f"{learner_id}\0{source_session_id}\0{plan.plan.plan_id}\0{plan.version}\0{candidate.id}"
+        identity = f"{learner_id}\0{source_session_id}\0{plan.plan.plan_id}\0{plan.version}\0{profile_version}\0{candidate.id}"
         proposal_id = "next-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
         at = self.now()
-        profile_version = self.repository.load_profile_version(learner_id)
-        if profile_version is None: raise NextObjectiveError("profile-version-not-found")
         proposal = NextObjectiveProposal(proposal_id,learner_id,source_session_id,plan.plan.plan_id,plan.version,profile_version,
             candidate.id,f"Prerrequisitos consolidados: {', '.join(candidate.prerequisite_ids)}.",evidence_ids,
             ProposalDecisionStatus.PENDING,0,at,at)
@@ -125,6 +150,8 @@ class NextObjectiveService:
         proposal = self.repository.load_next_objective_proposal(decision.proposal_id)
         if proposal is None or proposal.learner_id != decision.learner_id:
             raise NextObjectiveError("proposal-owner-mismatch")
+        if proposal.status is ProposalDecisionStatus.STALE:
+            raise NextObjectiveError("stale-profile-version")
         if proposal.status is not ProposalDecisionStatus.PENDING or proposal.revision != decision.expected_revision:
             raise NextObjectiveError("stale-proposal-revision")
         if proposal.source_profile_version != decision.expected_profile_version:

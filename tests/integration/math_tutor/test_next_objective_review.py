@@ -39,6 +39,19 @@ def setup(tmp_path, *, migration_dir=None):
     return repo,curriculum,session
 
 
+def add_fresh_independent_evidence(repo,session, *, suffix="fresh"):
+    activity_id=f"activity-{suffix}"; observation_id=f"observation-{suffix}"; evidence_id=f"evidence-{suffix}"
+    activity=Activity("count-items","count-to-20",1,"Cuenta",{"count":5},StructuredAnswer.evaluable(ExpectedAnswerKind.INTEGER,{"answer":5}),(),())
+    observation=Observation(observation_id,"learner-next",session.tutoring_session_id,"count-to-20",activity_id,ObservationOutcome.CORRECT,.98,0,TranscriptionReliabilityPolicy(.7),"cinco")
+    with repo._connect() as db:
+        db.execute("INSERT INTO activities(session_id,activity_id,objective_id,activity_json) VALUES(?,?,?,?)",(session.tutoring_session_id,activity_id,"count-to-20",_dump(activity)))
+        db.execute("INSERT INTO observations(observation_id,session_id,learner_id,objective_id,activity_id,observation_json,version) VALUES(?,?,?,?,?,?,1)",(observation_id,session.tutoring_session_id,"learner-next","count-to-20",activity_id,_dump(observation)))
+        db.execute("INSERT INTO evidence_records(evidence_id,observation_id,learner_id,session_id,objective_id,reason_for_retention) VALUES(?,?,?,?,?,?)",(evidence_id,observation_id,"learner-next",session.tutoring_session_id,"count-to-20","progression"))
+    current=repo.load_estimate("learner-next","count-to-20")
+    repo.save_estimate(SkillEstimate("learner-next","count-to-20",CompetencyState.INDEPENDENT,current.version+1,(evidence_id,),(observation_id,)),expected_version=current.version)
+    return evidence_id
+
+
 def test_proposal_approval_is_atomic_idempotent_and_preserves_append_only_history(tmp_path):
     repo,curriculum,session=setup(tmp_path); service=NextObjectiveService(repo,curriculum)
     proposal=service.propose_available("learner-next",session.tutoring_session_id)
@@ -93,8 +106,39 @@ def test_profile_cas_blocks_approval_when_review_changes_evidence_after_validati
     assert len(outcome)==1 and isinstance(outcome[0],NextObjectiveError)
     assert str(outcome[0])=="stale-profile-version"
     assert repo.load_current_provisioned_plan("learner-next").version==1
-    assert repo.load_next_objective_proposal(proposal.proposal_id).status is ProposalDecisionStatus.PENDING
+    assert repo.load_next_objective_proposal(proposal.proposal_id).status is ProposalDecisionStatus.STALE
     assert repo.list_next_objective_decisions(proposal.proposal_id)==()
+    add_fresh_independent_evidence(repo,session)
+    fresh=service.propose_available("learner-next",session.tutoring_session_id)
+    assert fresh.proposal_id != proposal.proposal_id
+    assert fresh.source_profile_version==2
+    assert fresh.status is ProposalDecisionStatus.PENDING
+    assert service.propose_available("learner-next",session.tutoring_session_id)==fresh
+    assert [(item.proposal_id,item.status) for item in repo.list_next_objective_proposals("learner-next",source_session_id=session.tutoring_session_id)]==[
+        (proposal.proposal_id,ProposalDecisionStatus.STALE),(fresh.proposal_id,ProposalDecisionStatus.PENDING)]
+
+
+def test_profile_cas_blocks_proposal_created_after_generation_snapshot(tmp_path):
+    repo,curriculum,session=setup(tmp_path); other=SQLiteTutoringRepository(repo.database)
+    service=NextObjectiveService(repo,curriculum)
+    entered,release=Event(),Event(); original=repo.create_next_objective_proposal
+    def delayed(proposal):
+        entered.set(); release.wait(5); return original(proposal)
+    repo.create_next_objective_proposal=delayed
+    outcome=[]
+    def generate():
+        try: outcome.append(service.propose_available("learner-next",session.tutoring_session_id))
+        except NextObjectiveError as error: outcome.append(error)
+    thread=Thread(target=generate)
+    thread.start(); assert entered.wait(5)
+    thresholds=tuple(AssistanceThreshold(state,3) for state in (CompetencyState.EXPLORING,CompetencyState.WITH_INTENSIVE_HELP,CompetencyState.WITH_LIGHT_HELP,CompetencyState.INDEPENDENT,CompetencyState.GENERALIZED))
+    review=TherapistReviewService(other,ProgressionPolicy(thresholds)).discard_evidence(DiscardEvidence("discard-generation-race","ignored","review-generation-race","learner-next",session.tutoring_session_id,"evidence-next","STT incorrecto",0,1))
+    assert review.status is ReviewStatus.APPLIED
+    release.set(); thread.join(5)
+    assert len(outcome)==1 and isinstance(outcome[0],NextObjectiveError)
+    assert str(outcome[0])=="stale-profile-version"
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM next_objective_proposals").fetchone()[0]==0
 
 
 def test_incremental_profile_version_migration_backfills_only_pending_proposals(tmp_path):
@@ -111,6 +155,6 @@ def test_incremental_profile_version_migration_backfills_only_pending_proposals(
         db.execute("INSERT INTO next_objective_decisions(proposal_id,revision,command_id,learner_id,status,reason,expected_revision,expected_plan_version,resulting_plan_version,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?)",("legacy-terminal",1,"legacy-command","learner-next","rejected","No",0,1,None,datetime.now(timezone.utc).isoformat()))
     migrate(repo.database)
     assert repo.load_next_objective_proposal("legacy-pending").source_profile_version==1
-    assert repo.load_next_objective_proposal("legacy-terminal") is None
+    assert repo.load_next_objective_proposal("legacy-terminal").status is ProposalDecisionStatus.STALE
     with repo._connect() as db:
         assert db.execute("SELECT stale_reason FROM next_objective_proposals WHERE proposal_id='legacy-terminal'").fetchone()[0]=="legacy-profile-version-unverifiable"

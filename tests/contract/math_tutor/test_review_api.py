@@ -124,6 +124,19 @@ def test_review_reads_require_auth_and_return_business_safe_authoritative_data()
     assert "diagnos" not in detail.text.lower()
 
 
+def test_stale_undecided_next_objective_is_kept_in_history_not_actions():
+    class StaleQueries(Queries):
+        def list_next_objective_proposals(self,learner_id,source_session_id=None):
+            proposal=super().list_next_objective_proposals(learner_id,source_session_id)[0]
+            return (replace(proposal,status=ProposalDecisionStatus.STALE),)
+        def list_next_objective_decisions(self,proposal_id): return ()
+    app=FastAPI(); app.include_router(create_review_router(StaleQueries(),TOKEN,summary_service=Summary(),review_service=Reviews(),clip_access=Clips(),next_objective_service=NextObjectives()))
+    body=TestClient(app).get("/api/review/learners/learner-1/sessions/session-1",headers=HEADERS).json()
+    assert body["next_objective_proposals"]==[]
+    assert body["next_objective_history"][0]["status"]=="stale"
+    assert body["next_objective_history"][0]["decision_reason"]=="profile-version-superseded"
+
+
 def test_cross_owner_paths_fail_closed():
     api=client()
     assert api.get("/api/review/learners/other/sessions/session-1",headers=HEADERS).status_code == 404
