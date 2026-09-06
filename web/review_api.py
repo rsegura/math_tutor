@@ -132,24 +132,42 @@ def create_review_router(repository, therapist_token: str | None, *, summary_ser
     def detail(learner_id: str, session_id: str):
         learner, aggregate = owned(learner_id, session_id)
         summary = summaries.build(session_id)
+        source = repository.load_summary_source(session_id) if hasattr(repository, "load_summary_source") else None
+        evidence_records = aggregate.evidence if source is None else source.evidence
         clip_by_evidence = {item.evidence_id: item for item in aggregate.clips}
         discarded = set(summary.discarded_evidence_ids)
         evidence = []
-        for item in aggregate.evidence:
+        for item in evidence_records:
             if item.evidence_id in discarded: continue
             observation = item.observation
             clip = clip_by_evidence.get(item.evidence_id)
             evidence.append({"evidence_id":item.evidence_id,"objective_id":observation.objective_id,
                 "outcome":observation.outcome.value,"assistance_level":observation.assistance_level,
+                "source_session_id":observation.session_id,
                 "stt_confidence":observation.stt_confidence,"response_excerpt":observation.transcribed_response[:240],
                 "retention_reason":item.reason_for_retention,"interpretation":item.current_interpretation,
                 "interpretation_status":"hypothesis" if item.current_interpretation else None,
                 "clip":None if clip is None else {"clip_id":clip.clip_id,"duration_seconds":clip.duration_seconds,"expires_at":clip.expires_at}})
+        support = {item.evidence_id:item for item in evidence_records if item.evidence_id not in discarded}
+        objective_estimates = []
+        for item in aggregate.estimates:
+            supported = [support[evidence_id] for evidence_id in item.supporting_evidence_ids if evidence_id in support]
+            objective_estimates.append({"objective_id":item.objective_id,"state":item.state.value,
+                "estimate_version":item.version,"status":"needs-review" if item.state is CompetencyState.NEEDS_REVIEW else "current-estimate",
+                "supporting_evidence_ids":[record.evidence_id for record in supported],
+                "support_confidence":{"kind":"stt-confidence-range","minimum":min((record.observation.stt_confidence for record in supported),default=None),"maximum":max((record.observation.stt_confidence for record in supported),default=None)}})
+        material_claims = [{"claim_id":item.claim_id,"kind":item.kind,"text":item.text,
+            "evidence_ids":list(item.evidence_ids),"status":"hypothesis" if item.is_hypothesis else "fact"} for item in summary.claims]
+        profile_proposals = [claim for claim in material_claims if claim["kind"] == "profile-proposal"]
         return {"learner":{"learner_id":learner.learner_id,"pseudonym":learner.pseudonym,"age_years":learner.age_years},
             "session_id":session_id,"session_version":summary.source_session_version,"profile_version":summary.source_profile_version,
-            "objectives":[{"objective_id":item.objective_id,"state":item.state.value,"estimate_version":item.version,"status":"provisional"} for item in aggregate.estimates],
-            "summary":[{"claim_id":item.claim_id,"kind":item.kind,"text":item.text,"evidence_ids":list(item.evidence_ids),"status":"hypothesis" if item.is_hypothesis else "observation"} for item in summary.claims],
-            "evidence":evidence,"history":[{"review_id":item.review_id,"version":item.version,"action":_wire(item.review)} for item in aggregate.reviews]}
+            "objective_estimates":objective_estimates,"objectives":objective_estimates,
+            "assistance_observations":[{"evidence_id":item.evidence_id,"objective_id":item.observation.objective_id,"source_session_id":item.observation.session_id,"assistance_level":item.observation.assistance_level} for item in evidence_records if item.evidence_id not in discarded],
+            "authoritative_claims":material_claims,"summary":material_claims,
+            "hypotheses":[claim for claim in material_claims if claim["status"] == "hypothesis" and claim["kind"] != "profile-proposal"],
+            "profile_change_proposals":profile_proposals,
+            "next_objective_proposals":[],
+            "evidence":evidence,"history":[{"review_id":item.review_id,"version":item.version,"created_at":item.created_at,"action":_wire(item.review)} for item in aggregate.reviews]}
 
     @router.get("/learners/{learner_id}/sessions/{session_id}/clips/{clip_id}", dependencies=auth)
     def clip(learner_id: str, session_id: str, clip_id: str):

@@ -56,6 +56,7 @@ class TherapistReviewRecord:
     learner_id: str
     session_id: str | None
     review: object
+    created_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -832,8 +833,8 @@ class SQLiteTutoringRepository:
 
     def load_therapist_reviews(self, review_id: str) -> tuple[TherapistReviewRecord, ...]:
         with self._connect() as db:
-            rows = db.execute("SELECT review_id,version,learner_id,session_id,review_json FROM therapist_reviews WHERE review_id=? ORDER BY version", (review_id,)).fetchall()
-        return tuple(TherapistReviewRecord(row[0], row[1], row[2], row[3], _load(row[4])) for row in rows)
+            rows = db.execute("SELECT review_id,version,learner_id,session_id,review_json,created_at FROM therapist_reviews WHERE review_id=? ORDER BY version", (review_id,)).fetchall()
+        return tuple(TherapistReviewRecord(row[0], row[1], row[2], row[3], _load(row[4]), row[5]) for row in rows)
 
     def append_profile_revision(self, revision_id: str, learner_id: str, profile_version: int, revision: object, *, policy_version: str) -> None:
         with self._connect() as db:
@@ -1124,7 +1125,7 @@ class SQLiteTutoringRepository:
             progress = tuple(_load(row[0]) for row in db.execute("SELECT progress_json FROM activity_progress WHERE session_id=? ORDER BY activity_id", (session_id,)))
             events = tuple(PersistedEvent(*row) for row in db.execute("SELECT kind,session_id,objective_id,activity_id,detail FROM tutoring_events WHERE session_id=? ORDER BY event_id", (session_id,)))
             proposals = tuple(_load(row[0]) for row in db.execute("SELECT proposal_json FROM profile_change_proposals WHERE learner_id=? AND session_id=? ORDER BY proposal_id", (learner_id, session_id)))
-            reviews = tuple(TherapistReviewRecord(row[0],row[1],row[2],row[3],_load(row[4])) for row in db.execute("SELECT review_id,version,learner_id,session_id,review_json FROM therapist_reviews WHERE session_id=? ORDER BY review_id,version", (session_id,)))
+            reviews = tuple(TherapistReviewRecord(row[0],row[1],row[2],row[3],_load(row[4]),row[5]) for row in db.execute("SELECT review_id,version,learner_id,session_id,review_json,created_at FROM therapist_reviews WHERE session_id=? ORDER BY created_at,rowid", (session_id,)))
             revisions = tuple(ProfileRevisionRecord(row[0],row[1],row[2],_load(row[3]),row[4]) for row in db.execute("SELECT revision_id,learner_id,profile_version,revision_json,policy_version FROM profile_revisions WHERE learner_id=? ORDER BY profile_version", (learner_id,)))
             clip_rows = db.execute("SELECT ec.clip_id,ec.evidence_id,ec.learner_id,ec.session_id,ec.duration_seconds,ec.storage_key,ec.expires_at,ec.consent_id,ec.consent_snapshot_id,ec.captured_at,ec.deletion_state FROM evidence_clips ec JOIN audio_consents c ON c.consent_id=ec.consent_id AND c.revoked_at IS NULL WHERE ec.session_id=? AND ec.deletion_state='live' ORDER BY ec.clip_id", (session_id,)).fetchall()
             now = datetime.now(timezone.utc)

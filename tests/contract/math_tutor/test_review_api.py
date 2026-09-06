@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from pathlib import Path
+import wave
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -13,6 +16,13 @@ from math_tutor.application.provisioning import ProvisioningService
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
+from math_tutor.infrastructure.persistence.repositories import _dump
+from math_tutor.infrastructure.clip_retention import ClipRetentionService, RetentionSettings
+from math_tutor.infrastructure.evidence_clips import OpaqueClipStore, SelectedAudio
+from math_tutor.application.provisioning import CreateLearner, CreateLearningPlan, SessionLimits, StartLearningSession
+from math_tutor.domain.activities import Activity, StructuredAnswer
+from math_tutor.domain.evidence import Observation, ObservationOutcome, TranscriptionReliabilityPolicy
+from math_tutor.domain.templates import ExpectedAnswerKind
 from web.app import WebSettings, create_app
 
 
@@ -92,6 +102,12 @@ def test_review_reads_require_auth_and_return_business_safe_authoritative_data()
     assert body["summary"][0]["evidence_ids"]==["evidence-1"]
     assert body["summary"][1]["status"]=="hypothesis"
     assert body["profile_version"]==3
+    assert body["objective_estimates"][0]["state"]=="exploring"
+    assert body["objective_estimates"][0]["status"]=="current-estimate"
+    assert body["objective_estimates"][0]["support_confidence"]["kind"]=="stt-confidence-range"
+    assert body["profile_change_proposals"]==[body["authoritative_claims"][1]]
+    assert body["hypotheses"]==[]
+    assert body["next_objective_proposals"]==[]
     assert all(response.headers["cache-control"]=="no-store" for response in (learners,sessions,detail))
     assert "diagnos" not in detail.text.lower()
 
@@ -143,3 +159,58 @@ def test_real_query_boundary_lists_only_the_owned_provisioned_session(tmp_path):
     assert learners==[{"learner_id":"learner-real","pseudonym":"Sol","age_years":9}]
     assert [item["session_id"] for item in sessions]==[started["tutoring_session_id"]]
     assert detail.status_code==200 and detail.json()["learner"]["pseudonym"]=="Sol"
+
+
+def wav_audio():
+    target=BytesIO()
+    with wave.open(target,"wb") as audio:
+        audio.setnchannels(1); audio.setsampwidth(1); audio.setframerate(8000); audio.writeframes(b"\x80"*8000)
+    return SelectedAudio(target.getvalue(),1)
+
+
+def real_clip_client(tmp_path):
+    database=tmp_path/"clips.db"; migrate(database); repository=SQLiteTutoringRepository(database)
+    root=Path("src/math_tutor/curricula"); curriculum,_=load_curriculum_catalogs(root/"primary-math-v1.yaml",root/"activity-templates-v1.yaml")
+    now=datetime.now(timezone.utc); store=OpaqueClipStore(tmp_path/"clips")
+    retention=ClipRetentionService(repository,store,RetentionSettings(enabled=True,retention_days=2,evidence_directory=tmp_path/"clips"),now=lambda:now)
+    service=ProvisioningService(repository,curriculum,retention)
+    service.create_learner(CreateLearner("learner-clips","Nube",9))
+    service.create_learning_plan(CreateLearningPlan("plan-clips","learner-clips",("units-tens",),(),SessionLimits(10,4)))
+    consent=service.grant_audio_consent("learner-clips",retention_days=2,now=now)
+    session=service.start_learning_session(StartLearningSession("learner-clips",consent.consent_id))
+    def persist(suffix):
+        activity_id=f"activity-{suffix}"; observation_id=f"observation-{suffix}"; evidence_id=f"evidence-{suffix}"
+        activity=Activity("template-clip","units-tens",1,"¿Cuántas unidades?",{"number":4},StructuredAnswer.evaluable(ExpectedAnswerKind.INTEGER,{"answer":4}),(),())
+        observation=Observation(observation_id,"learner-clips",session.tutoring_session_id,"units-tens",activity_id,ObservationOutcome.CORRECT,.95,0,TranscriptionReliabilityPolicy(.7),"cuatro")
+        with repository._connect() as db:
+            db.execute("INSERT INTO activities(session_id,activity_id,objective_id,activity_json) VALUES(?,?,?,?)",(session.tutoring_session_id,activity_id,"units-tens",_dump(activity)))
+            db.execute("INSERT INTO observations(observation_id,session_id,learner_id,objective_id,activity_id,observation_json,version) VALUES(?,?,?,?,?,?,1)",(observation_id,session.tutoring_session_id,"learner-clips","units-tens",activity_id,_dump(observation)))
+            db.execute("INSERT INTO evidence_records(evidence_id,observation_id,learner_id,session_id,objective_id,reason_for_retention) VALUES(?,?,?,?,?,?)",(evidence_id,observation_id,"learner-clips",session.tutoring_session_id,"units-tens","review-sample"))
+        return retention.persist_selected(evidence_id=evidence_id,learner_id="learner-clips",session_id=session.tutoring_session_id,consent_snapshot_id=session.audio_consent_snapshot_id,selected=wav_audio(),evidence_selection_committed=True)
+    clip_ids={kind:persist(kind) for kind in ("live","expired","revoked","deleting")}
+    with repository._connect() as db:
+        db.execute("UPDATE evidence_clips SET expires_at=? WHERE clip_id=?",((now-timedelta(seconds=1)).isoformat(),clip_ids["expired"]))
+        db.execute("UPDATE evidence_clips SET deletion_state='deleting' WHERE clip_id=?",(clip_ids["deleting"],))
+        # Revoke only one clip's authorisation by moving it to a separately revoked consent scope.
+        revoked_id="revoked-consent"
+        db.execute("INSERT INTO audio_consents(consent_id,learner_id,plan_id,plan_version,retention_days,granted_at,revoked_at,version) VALUES(?,?,?,?,?,?,?,?)",(revoked_id,"learner-clips","plan-clips",1,2,now.isoformat(),now.isoformat(),2))
+        db.execute("UPDATE evidence_clips SET consent_id=? WHERE clip_id=?",(revoked_id,clip_ids["revoked"]))
+    api=TestClient(create_app(WebSettings(True,TOKEN),provisioning=service))
+    return api,repository,store,session.tutoring_session_id,clip_ids
+
+
+def test_real_http_clip_access_denies_invalid_lifecycle_and_deletes_durably(tmp_path):
+    api,repository,store,session_id,clips=real_clip_client(tmp_path)
+    base=f"/api/review/learners/learner-clips/sessions/{session_id}/clips"
+    live=api.get(f"{base}/{clips['live']}",headers=HEADERS)
+    assert live.status_code==200 and live.content.startswith(b"RIFF")
+    for kind in ("expired","revoked","deleting"):
+        denied=api.get(f"{base}/{clips[kind]}",headers=HEADERS)
+        assert denied.status_code==404 and str(store.root) not in denied.text
+    assert api.get(f"/api/review/learners/other/sessions/{session_id}/clips/{clips['live']}",headers=HEADERS).status_code==404
+    storage_key=repository.load_evidence_clip(clips["live"]).storage_key
+    assert api.delete(f"{base}/{clips['live']}",headers=HEADERS).json()=={"status":"deleted"}
+    assert not (store.root/storage_key).exists() and repository.load_evidence_clip(clips["live"]) is None
+    with repository._connect() as db:
+        assert db.execute("SELECT reason FROM audio_clip_deletion_tombstones WHERE clip_id=?",(clips["live"],)).fetchone()[0]=="explicit-delete"
+    assert api.delete(f"{base}/{clips['live']}",headers=HEADERS).json()=={"status":"already-deleted"}
