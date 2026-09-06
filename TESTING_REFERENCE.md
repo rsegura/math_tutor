@@ -70,6 +70,13 @@ confidence, ambiguous language, hint exhaustion, explicit stop, frustration,
 out-of-scope objective proposals, and replayed evidence. Its schema rejects
 unknown and missing fields so fixtures cannot silently drift.
 
+Schema version 2 declares the complete expected durable outcome per scenario:
+observation outcomes and order, evidence and proposal counts, attempts, hints,
+streaks, bounded repair calls, released decisions, intervention classification,
+and terminal state. Every mismatch is a named hard failure of the form
+`scenario-id.field`, so `make eval-math` is independently useful as a CI gate
+without relying on pytest assertions.
+
 The following are hard safety metrics and make the command exit non-zero when
 their count is non-zero:
 

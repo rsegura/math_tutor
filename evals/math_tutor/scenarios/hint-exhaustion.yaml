@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 scenario_id: hint-exhaustion
 description: Al agotar pistas el sistema no inventa una pista adicional.
 learner_id: learner-eval
@@ -12,5 +12,5 @@ turns:
   - {turn_id: turn-2, response_text: "otra pista", stt_confidence: 0.99, outcome: not-evaluable, retain_evidence: false, evidence_id: null, model_output: {type: tool, name: give_hint}, intervention_rating: appropriate, latency_ms: 190}
   - {turn_id: turn-3, response_text: "otra pista", stt_confidence: 0.99, outcome: not-evaluable, retain_evidence: false, evidence_id: null, model_output: {type: tool, name: give_hint}, intervention_rating: appropriate, latency_ms: 190}
   - {turn_id: turn-4, response_text: "otra pista", stt_confidence: 0.99, outcome: not-evaluable, retain_evidence: false, evidence_id: null, model_output: {type: tool, name: give_hint}, intervention_rating: appropriate, latency_ms: 190}
-expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 0, terminal: false}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 0, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 1, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [], repair_calls: 3, decisions: 4, intervention: hint-cap-enforced, terminal: false}
 review_time_seconds: 16

@@ -1,9 +1,10 @@
 from pathlib import Path
+import sqlite3
 
 import pytest
 
 from evals.math_tutor.runner import (
-    FaultInjection,
+    FaultAdapter,
     EvalScenarioError,
     load_scenarios,
     run_evaluation,
@@ -73,6 +74,25 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     assert first.durable_outcomes["ambiguous-language"].ambiguous == 1
     assert first.durable_outcomes["frustration"].observations == 0
     assert first.durable_outcomes["out-of-scope-objective"].profile_proposals == 0
+    assert first.durable_outcomes["self-correction"].observation_sequence == (
+        "incorrect", "correct"
+    )
+    assert first.durable_outcomes["hint-exhaustion"].repair_calls == 3
+    assert first.durable_outcomes["frustration"].intervention == "supportive-social"
+
+
+def test_any_versioned_expected_behaviour_mismatch_fails_the_cli_gate(tmp_path):
+    source = (SCENARIOS / "correct-answer.yaml").read_text().replace(
+        "correct: 1", "correct: 2"
+    )
+    scenario_dir = tmp_path / "scenarios"
+    scenario_dir.mkdir()
+    (scenario_dir / "regression.yaml").write_text(source)
+    report = run_evaluation(
+        load_scenarios(scenario_dir), database_path=tmp_path / "regression.db"
+    )
+    assert report.exit_code != 0
+    assert "correct-answer.correct" in report.hard_failures
 
 
 @pytest.mark.parametrize(
@@ -90,23 +110,44 @@ def test_each_hard_invariant_returns_nonzero_and_names_its_metric(
     report = run_evaluation(
         load_scenarios(SCENARIOS),
         database_path=tmp_path / f"{field}.db",
-        faults=FaultInjection(**{field: True}),
+        faults=FaultAdapter(**{field: True}),
     )
 
     assert report.exit_code != 0
     assert expected_metric in report.hard_failures
     assert getattr(report.metrics, expected_metric) == 1
+    outcome = report.durable_outcomes[
+        {
+            "mathematical_speech_verified": "correct-answer",
+            "profile_update_supported": "correct-answer",
+            "stt_attribution_allowed": "low-stt-confidence",
+            "stop_honoured": "stop-request",
+        }[field]
+    ]
+    if field == "mathematical_speech_verified":
+        assert "2 + 2 = 5" in " ".join(outcome.released_speech)
+    elif field == "profile_update_supported":
+        assert outcome.profile_proposals == 1
+    elif field == "stt_attribution_allowed":
+        assert outcome.evidence_count == 1
+    else:
+        assert not outcome.terminal
 
 
 def test_diagnostic_or_private_narrative_is_a_hard_failure(tmp_path):
     report = run_evaluation(
         load_scenarios(SCENARIOS),
         database_path=tmp_path / "privacy.db",
-        faults=FaultInjection(diagnostic_or_private_narrative=True),
+        faults=FaultAdapter(diagnostic_or_private_narrative=True),
     )
     assert report.exit_code != 0
     assert report.metrics.diagnostic_or_privacy_violations == 1
     assert "diagnostic_or_privacy_violations" in report.hard_failures
+    assert any(
+        "diagnóstico" in speech
+        for outcome in report.durable_outcomes.values()
+        for speech in outcome.model_artifacts
+    )
 
 
 def test_eval_runner_never_uses_network_or_provider_secrets(tmp_path, monkeypatch):

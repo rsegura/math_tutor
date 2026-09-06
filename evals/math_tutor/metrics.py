@@ -49,4 +49,12 @@ class DurableOutcome:
     profile_proposals: int
     attempts_used: int
     hints_used: int
+    consecutive_correct: int
+    consecutive_incorrect: int
+    observation_sequence: tuple[str, ...]
+    repair_calls: int
+    decisions: int
+    intervention: str
+    released_speech: tuple[str, ...]
+    model_artifacts: tuple[str, ...]
     terminal: bool

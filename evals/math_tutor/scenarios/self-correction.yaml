@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 scenario_id: self-correction
 description: La autocorrección conserva hechos separados sin reescribir el primer intento.
 learner_id: learner-eval
@@ -10,5 +10,5 @@ authorised_objectives: [subtract-within-20]
 turns:
   - {turn_id: turn-1, response_text: "nueve", stt_confidence: 0.97, outcome: incorrect, retain_evidence: true, evidence_id: evidence-self-1, model_output: {type: tool, name: record_answer}, intervention_rating: needs-review, latency_ms: 250}
   - {turn_id: turn-2, response_text: "no, ocho", stt_confidence: 0.98, outcome: correct, retain_evidence: true, evidence_id: evidence-self-2, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 220}
-expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 2, terminal: false}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 2, correct: 1, incorrect: 1, ambiguous: 0, not_evaluable: 0, evidence_count: 2, profile_proposals: 0, attempts_used: 2, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [incorrect, correct], repair_calls: 0, decisions: 2, intervention: self-correction-recorded, terminal: false}
 review_time_seconds: 24

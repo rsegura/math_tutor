@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 scenario_id: low-stt-confidence
 description: Una transcripción poco fiable no se atribuye como fallo ni se conserva.
 learner_id: learner-eval
@@ -9,5 +9,5 @@ profile_objective: null
 authorised_objectives: [add-within-20]
 turns:
   - {turn_id: turn-1, response_text: "quizá trece", stt_confidence: 0.42, outcome: incorrect, retain_evidence: false, evidence_id: null, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 205}
-expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 0, terminal: false}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 1, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 1, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [not-evaluable], repair_calls: 0, decisions: 1, intervention: not-evaluable, terminal: false}
 review_time_seconds: 10

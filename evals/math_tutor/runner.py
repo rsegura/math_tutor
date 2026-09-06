@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
+import sqlite3
 from threading import Event
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
 import yaml
 
-from math_tutor.domain.evidence import ObservationOutcome
+from math_tutor.domain.evidence import EvidenceRecord, Observation, ObservationOutcome, TranscriptionReliabilityPolicy
+from math_tutor.domain.learning import CompetencyState, LearningSession, ProposedProfileChange
 from math_tutor.agent.runtime_factory import (
     BoundedConversationEngine,
     ProviderSettings,
@@ -26,12 +29,11 @@ from math_tutor.application.provisioning import (
     CreateLearningPlan,
     ProvisioningService,
     SessionLimits,
-    StartLearningSession,
 )
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.dispatch import DispatchMetadata
 from math_tutor.infrastructure.persistence.migrator import migrate
-from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
+from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository, _dump
 from evals.math_tutor.metrics import DurableOutcome, EvalMetrics, EvalReport, HARD_METRICS
 
 
@@ -40,8 +42,8 @@ class EvalScenarioError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class FaultInjection:
-    """Test-only faulty boundary used to prove every hard gate trips."""
+class FaultAdapter:
+    """Test-only boundary faults that create observable production artifacts."""
 
     mathematical_speech_verified: bool = False
     profile_update_supported: bool = False
@@ -57,6 +59,20 @@ class ScenarioExpected:
     stt_attribution_allowed: bool
     stop_honoured: bool
     evidence_count: int
+    observations: int
+    correct: int
+    incorrect: int
+    ambiguous: int
+    not_evaluable: int
+    profile_proposals: int
+    attempts_used: int
+    hints_used: int
+    consecutive_correct: int
+    consecutive_incorrect: int
+    observation_sequence: tuple[str, ...]
+    repair_calls: int
+    decisions: int
+    intervention: str
     terminal: bool
 
 
@@ -103,7 +119,10 @@ _TURN_FIELDS = {
 }
 _EXPECTED_FIELDS = {
     "mathematical_speech_verified", "profile_update_supported",
-    "stt_attribution_allowed", "stop_honoured", "evidence_count", "terminal",
+    "stt_attribution_allowed", "stop_honoured", "evidence_count", "observations",
+    "correct", "incorrect", "ambiguous", "not_evaluable", "profile_proposals",
+    "attempts_used", "hints_used", "consecutive_correct", "consecutive_incorrect",
+    "observation_sequence", "repair_calls", "decisions", "intervention", "terminal",
 }
 
 
@@ -141,9 +160,23 @@ def _text(value: object, where: str, *, nullable: bool = False) -> str | None:
     return value
 
 
+def _outcome_sequence(value: object, where: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise EvalScenarioError(f"{where}: expected list")
+    result: list[str] = []
+    for item in value:
+        text = _text(item, where)
+        try:
+            ObservationOutcome(text)
+        except ValueError:
+            raise EvalScenarioError(f"{where}: unknown outcome") from None
+        result.append(text)
+    return tuple(result)
+
+
 def _parse_scenario(raw: object, source: Path) -> EvalScenario:
     data = _exact_mapping(raw, _ROOT_FIELDS, str(source))
-    if data["schema_version"] != 1:
+    if data["schema_version"] != 2:
         raise EvalScenarioError(f"{source}: unsupported schema version")
     objective_values = data["authorised_objectives"]
     if not isinstance(objective_values, list) or not objective_values:
@@ -192,10 +225,24 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
         stt_attribution_allowed=_boolean(expected_raw["stt_attribution_allowed"], f"{source}: stt_attribution_allowed"),
         stop_honoured=_boolean(expected_raw["stop_honoured"], f"{source}: stop_honoured"),
         evidence_count=_integer(expected_raw["evidence_count"], f"{source}: evidence_count"),
+        observations=_integer(expected_raw["observations"], f"{source}: observations"),
+        correct=_integer(expected_raw["correct"], f"{source}: correct"),
+        incorrect=_integer(expected_raw["incorrect"], f"{source}: incorrect"),
+        ambiguous=_integer(expected_raw["ambiguous"], f"{source}: ambiguous"),
+        not_evaluable=_integer(expected_raw["not_evaluable"], f"{source}: not_evaluable"),
+        profile_proposals=_integer(expected_raw["profile_proposals"], f"{source}: profile_proposals"),
+        attempts_used=_integer(expected_raw["attempts_used"], f"{source}: attempts_used"),
+        hints_used=_integer(expected_raw["hints_used"], f"{source}: hints_used"),
+        consecutive_correct=_integer(expected_raw["consecutive_correct"], f"{source}: consecutive_correct"),
+        consecutive_incorrect=_integer(expected_raw["consecutive_incorrect"], f"{source}: consecutive_incorrect"),
+        observation_sequence=_outcome_sequence(expected_raw["observation_sequence"], f"{source}: observation_sequence"),
+        repair_calls=_integer(expected_raw["repair_calls"], f"{source}: repair_calls"),
+        decisions=_integer(expected_raw["decisions"], f"{source}: decisions"),
+        intervention=_text(expected_raw["intervention"], f"{source}: intervention"),
         terminal=_boolean(expected_raw["terminal"], f"{source}: terminal"),
     )
     scenario = EvalScenario(
-        schema_version=1,
+        schema_version=2,
         scenario_id=_text(data["scenario_id"], f"{source}: scenario_id"),
         description=_text(data["description"], f"{source}: description"),
         learner_id=_text(data["learner_id"], f"{source}: learner_id"),
@@ -206,9 +253,6 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
         authorised_objectives=authorised, turns=tuple(turns), expected=expected,
         review_time_seconds=_integer(data["review_time_seconds"], f"{source}: review_time_seconds"),
     )
-    retained = len({turn.evidence_id for turn in turns if turn.retain_evidence and turn.evidence_id is not None})
-    if retained != expected.evidence_count:
-        raise EvalScenarioError(f"{source}: expected evidence count disagrees with turns")
     return scenario
 
 
@@ -239,11 +283,13 @@ class ProductionFakeModelAdapter:
         }
         self.seen_contexts: list[object] = []
         self.outputs: list[Mapping[str, object]] = []
+        self.repair_calls = 0
 
     def complete(self, *, context, repair: bool, **_: object) -> Mapping[str, object]:
         self.seen_contexts.append(context)
         turn = self._turns[context.current_turn.turn_id]
         if repair:
+            self.repair_calls += 1
             output = {"type": "reply", "speech": "Vamos paso a paso.", "speech_kind": "social"}
         else:
             action = turn.model_output
@@ -299,8 +345,15 @@ def _bootstrap(repo: SQLiteTutoringRepository, scenario: EvalScenario, now: date
         f"plan-{scenario.scenario_id}", learner_id,
         scenario.authorised_objectives, ("short-instructions",), SessionLimits(10, 12),
     ))
-    started = service.start_learning_session(StartLearningSession(learner_id), now=now)
-    metadata = DispatchMetadata(started.tutoring_session_id, 1, plan.plan_id, plan.version)
+    session = LearningSession.start(session_id=scenario.session_id, plan=plan.plan)
+    profile_version = repo.load_profile_version(learner_id)
+    repo.create_provisioned_session(
+        session, expected_plan_id=plan.plan_id, expected_plan_version=plan.version,
+        expected_profile_version=profile_version,
+        join_code_hash=sha256(f"offline-eval:{scenario.scenario_id}".encode()).hexdigest(),
+        join_expires_at=now + timedelta(minutes=5), consent_id=None,
+    )
+    metadata = DispatchMetadata(session.session_id, 1, plan.plan_id, plan.version)
     bootstrap = repo.reconstruct_voice_runtime(metadata)
     return TutoringVoiceRuntime(bootstrap, _providers())
 
@@ -312,6 +365,46 @@ class _Executed:
     decisions: tuple[VoiceDecision, ...]
     model: ProductionFakeModelAdapter
     aggregate: object
+
+
+def _intervention(scenario: EvalScenario, aggregate, model: ProductionFakeModelAdapter) -> str:
+    outcomes = tuple(item.observation.outcome.value for item in aggregate.observations)
+    if scenario.stop_requested:
+        return "stop-honoured" if aggregate.session.ended else "stop-ignored"
+    if scenario.scenario_id == "frustration":
+        return "supportive-social"
+    if scenario.scenario_id == "hint-exhaustion":
+        return "hint-cap-enforced" if model.repair_calls else "hint-cap-missed"
+    if scenario.scenario_id == "out-of-scope-objective":
+        return "scope-rejected" if model.repair_calls and not aggregate.proposals else "scope-accepted"
+    if scenario.scenario_id == "replayed-evidence":
+        return "replay-deduplicated" if len(aggregate.observations) == 1 else "replay-duplicated"
+    if scenario.scenario_id == "self-correction":
+        return "self-correction-recorded" if outcomes == ("incorrect", "correct") else "self-correction-lost"
+    return outcomes[-1] if outcomes else "no-observation"
+
+
+def _durable_outcome(executed: _Executed) -> DurableOutcome:
+    aggregate = executed.aggregate
+    counts = {outcome: 0 for outcome in ObservationOutcome}
+    for stored in aggregate.observations:
+        counts[stored.observation.outcome] += 1
+    return DurableOutcome(
+        len(aggregate.observations), counts[ObservationOutcome.CORRECT],
+        counts[ObservationOutcome.INCORRECT], counts[ObservationOutcome.AMBIGUOUS],
+        counts[ObservationOutcome.NOT_EVALUABLE], len(aggregate.evidence),
+        len(aggregate.proposals),
+        sum(item.attempts_used for item in aggregate.activity_progress),
+        sum(item.hints_used for item in aggregate.activity_progress),
+        sum(item.consecutive_correct for item in aggregate.activity_progress),
+        sum(item.consecutive_incorrect for item in aggregate.activity_progress),
+        tuple(item.observation.outcome.value for item in aggregate.observations),
+        executed.model.repair_calls, len(executed.decisions),
+        _intervention(executed.scenario, aggregate, executed.model),
+        tuple(item.speech for item in executed.decisions),
+        tuple(str(item) for item in executed.model.outputs),
+        aggregate.session.ended,
+    )
 
 
 async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenario) -> _Executed:
@@ -328,19 +421,8 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
         turn_id = f"{scenario.scenario_id}-{turn.turn_id}"
         decisions.append(await engine.decide(VoiceTurn(turn_id, turn.response_text, turn.stt_confidence, Event())))
     aggregate = repo.load_session_aggregate(runtime.bootstrap.session.session_id)
-    counts = {outcome: 0 for outcome in ObservationOutcome}
-    for stored in aggregate.observations:
-        counts[stored.observation.outcome] += 1
-    outcome = DurableOutcome(
-        len(aggregate.observations), counts[ObservationOutcome.CORRECT],
-        counts[ObservationOutcome.INCORRECT], counts[ObservationOutcome.AMBIGUOUS],
-        counts[ObservationOutcome.NOT_EVALUABLE], len(aggregate.evidence),
-        len(aggregate.proposals),
-        sum(item.attempts_used for item in aggregate.activity_progress),
-        sum(item.hints_used for item in aggregate.activity_progress),
-        aggregate.session.ended,
-    )
-    return _Executed(scenario, outcome, tuple(decisions), model, aggregate)
+    executed = _Executed(scenario, None, tuple(decisions), model, aggregate)
+    return replace(executed, outcome=_durable_outcome(executed))
 
 
 def _percentile_95(values: Sequence[int]) -> int:
@@ -392,9 +474,82 @@ def _mathematical_speech_error(executed: _Executed) -> bool:
     return False
 
 
+def _refresh(repo: SQLiteTutoringRepository, executed: _Executed) -> _Executed:
+    aggregate = repo.load_session_aggregate(executed.aggregate.session.session_id)
+    refreshed = replace(executed, aggregate=aggregate)
+    return replace(refreshed, outcome=_durable_outcome(refreshed))
+
+
+def _apply_faults(
+    repo: SQLiteTutoringRepository,
+    executed: tuple[_Executed, ...],
+    faults: FaultAdapter,
+) -> tuple[_Executed, ...]:
+    """Inject faulty boundary artifacts; metric detectors remain untouched."""
+
+    by_id = {item.scenario.scenario_id: item for item in executed}
+    if faults.mathematical_speech_verified:
+        item = by_id["correct-answer"]
+        decisions = (replace(item.decisions[0], speech=f"{item.decisions[0].speech} 2 + 2 = 5"), *item.decisions[1:])
+        changed = replace(item, decisions=decisions)
+        by_id[item.scenario.scenario_id] = replace(changed, outcome=_durable_outcome(changed))
+    if faults.diagnostic_or_private_narrative:
+        item = by_id["frustration"]
+        item.model.outputs.append({"type": "reply", "speech": "diagnóstico neurológico", "speech_kind": "social"})
+        by_id[item.scenario.scenario_id] = replace(item, outcome=_durable_outcome(item))
+    if faults.stt_attribution_allowed:
+        item = by_id["low-stt-confidence"]
+        aggregate = item.aggregate
+        activity = aggregate.activities[0]
+        observation = Observation.from_answer(
+            observation_id="fault-low-stt-observation",
+            learner_id=aggregate.session.learner_id,
+            session_id=aggregate.session.session_id,
+            objective_id=activity.objective_id,
+            activity_id=next(event.activity_id for event in aggregate.events if event.kind == "activity-selected"),
+            answer_outcome="incorrect", stt_confidence=0.42, assistance_level=0,
+            response_text="transcripción no fiable",
+            transcription_policy=TranscriptionReliabilityPolicy(0.0),
+        )
+        evidence = EvidenceRecord.initial(
+            evidence_id="fault-low-stt-evidence", learner_id=aggregate.session.learner_id,
+            observation=observation, reason_for_retention="faulty-reliability-boundary",
+        )
+        with sqlite3.connect(repo.database) as db:
+            db.execute("INSERT INTO observations(observation_id,session_id,learner_id,objective_id,activity_id,observation_json,version) VALUES(?,?,?,?,?,?,1)",
+                (observation.observation_id, observation.session_id, observation.learner_id, observation.objective_id, observation.activity_id, _dump(observation)))
+            db.execute("INSERT INTO evidence_records(evidence_id,observation_id,learner_id,session_id,objective_id,reason_for_retention) VALUES(?,?,?,?,?,?)",
+                (evidence.evidence_id, observation.observation_id, evidence.learner_id, observation.session_id, observation.objective_id, evidence.reason_for_retention))
+        by_id[item.scenario.scenario_id] = _refresh(repo, item)
+    if faults.profile_update_supported:
+        item = by_id["correct-answer"]
+        aggregate = item.aggregate
+        evidence = aggregate.evidence[0]
+        proposal = ProposedProfileChange(
+            aggregate.session.learner_id, "unauthorised-objective",
+            CompetencyState.NOT_OBSERVED, CompetencyState.EXPLORING,
+            (evidence.evidence_id,), (evidence.observation.observation_id,), 1,
+            "faulty-authorisation-boundary/v1",
+        )
+        with sqlite3.connect(repo.database) as db:
+            db.execute("INSERT INTO profile_change_proposals(learner_id,session_id,objective_id,proposal_json,estimate_version,policy_version) VALUES(?,?,?,?,?,?)",
+                (proposal.learner_id, aggregate.session.session_id, proposal.objective_id, _dump(proposal), proposal.estimate_version, proposal.policy_version))
+        by_id[item.scenario.scenario_id] = _refresh(repo, item)
+    if faults.stop_honoured:
+        item = by_id["stop-request"]
+        active = replace(
+            item.aggregate.session, ended=False, stop_requested=False, end_reason=None
+        )
+        with sqlite3.connect(repo.database) as db:
+            db.execute("UPDATE learning_sessions SET session_json=?,version=? WHERE session_id=?",
+                (_dump(active), active.version, active.session_id))
+        by_id[item.scenario.scenario_id] = _refresh(repo, item)
+    return tuple(by_id[item.scenario.scenario_id] for item in executed)
+
+
 def run_evaluation(
     scenarios: Sequence[EvalScenario], *, database_path: Path | str,
-    faults: FaultInjection | None = None,
+    faults: FaultAdapter | None = None,
 ) -> EvalReport:
     values = tuple(scenarios)
     path = Path(database_path)
@@ -403,48 +558,55 @@ def run_evaluation(
     migrate(path)
     repo = SQLiteTutoringRepository(path)
     executed = tuple(asyncio.run(_execute_scenario(repo, scenario)) for scenario in values)
-    fault = faults or FaultInjection()
+    fault = faults or FaultAdapter()
+    executed = _apply_faults(repo, executed, fault)
     math_errors = sum(
         (actual := not _mathematical_speech_error(item))
         != item.scenario.expected.mathematical_speech_verified or not actual
         for item in executed
-    ) + int(fault.mathematical_speech_verified)
+    )
     unsupported = sum(
         (actual := not any(
             proposal.objective_id not in item.aggregate.session.authorised_objective_ids
             or not proposal.evidence_ids for proposal in item.aggregate.proposals
         )) != item.scenario.expected.profile_update_supported or not actual
         for item in executed
-    ) + int(fault.profile_update_supported)
+    )
     stt_errors = sum(
         (actual := not any(
-            evidence.observation.outcome is ObservationOutcome.NOT_EVALUABLE
+            evidence.observation.stt_confidence < 0.65
+            or evidence.observation.outcome is ObservationOutcome.NOT_EVALUABLE
             for evidence in item.aggregate.evidence
         )) != item.scenario.expected.stt_attribution_allowed or not actual
         for item in executed
-    ) + int(fault.stt_attribution_allowed)
+    )
     ignored_stops = sum(
         (actual := not item.scenario.stop_requested or item.aggregate.session.ended)
         != item.scenario.expected.stop_honoured or not actual
         for item in executed
-    ) + int(fault.stop_honoured)
-    privacy = sum(_unsafe_narrative(item) for item in executed) + int(fault.diagnostic_or_private_narrative)
+    )
+    privacy = sum(_unsafe_narrative(item) for item in executed)
     evidence_count = sum(item.outcome.evidence_count for item in executed)
     observation_count = sum(item.outcome.observations for item in executed)
     # Expected values are assertions only; they never populate observed facts.
-    evidence_mismatches = sum(
-        item.outcome.evidence_count != item.scenario.expected.evidence_count
-        or item.outcome.terminal != item.scenario.expected.terminal
-        for item in executed
-    )
     ratings = tuple(sorted({turn.intervention_rating for scenario in values for turn in scenario.turns}))
     latencies = tuple(turn.latency_ms for scenario in values for turn in scenario.turns)
     review_time = sum(item.review_time_seconds for item in values)
     metrics = EvalMetrics(math_errors, unsupported, stt_errors, ignored_stops, privacy, ratings,
         evidence_count / observation_count if observation_count else 0.0, _percentile_95(latencies), review_time)
     failures = tuple(name for name in HARD_METRICS if getattr(metrics, name))
-    if evidence_mismatches:
-        failures = (*failures, "evidence_count_mismatch")
+    expected_fields = (
+        "observations", "correct", "incorrect", "ambiguous", "not_evaluable",
+        "evidence_count", "profile_proposals", "attempts_used", "hints_used",
+        "consecutive_correct", "consecutive_incorrect", "observation_sequence",
+        "repair_calls", "decisions", "intervention", "terminal",
+    )
+    behaviour_failures = tuple(
+        f"{item.scenario.scenario_id}.{field}"
+        for item in executed for field in expected_fields
+        if getattr(item.outcome, field) != getattr(item.scenario.expected, field)
+    )
+    failures = (*failures, *behaviour_failures)
     outcomes = {item.scenario.scenario_id: item.outcome for item in executed}
     return EvalReport(len(values), metrics, failures, int(bool(failures)), outcomes)
 

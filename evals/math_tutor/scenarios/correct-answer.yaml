@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 scenario_id: correct-answer
 description: Una respuesta correcta se conserva como evidencia fiable.
 learner_id: learner-eval
@@ -9,5 +9,5 @@ profile_objective: null
 authorised_objectives: [add-within-20]
 turns:
   - {turn_id: turn-1, response_text: "doce", stt_confidence: 0.98, outcome: correct, retain_evidence: true, evidence_id: evidence-correct, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 210}
-expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 1, terminal: false}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 1, correct: 1, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 1, profile_proposals: 0, attempts_used: 1, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [correct], repair_calls: 0, decisions: 1, intervention: correct, terminal: false}
 review_time_seconds: 12
