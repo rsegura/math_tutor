@@ -1,0 +1,13 @@
+schema_version: 1
+scenario_id: conceptual-error
+description: Un error conceptual genera observación incorrecta y apoyo revisable.
+learner_id: learner-eval
+session_id: session-error
+objective_id: units-tens
+stop_requested: false
+profile_objective: null
+authorised_objectives: [units-tens]
+turns:
+  - {turn_id: turn-1, response_text: "el tres vale tres", stt_confidence: 0.96, outcome: incorrect, retain_evidence: true, evidence_id: evidence-error, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 240}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 1, terminal: false}
+review_time_seconds: 18

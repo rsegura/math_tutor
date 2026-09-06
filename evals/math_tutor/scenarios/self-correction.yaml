@@ -1,0 +1,14 @@
+schema_version: 1
+scenario_id: self-correction
+description: La autocorrección conserva hechos separados sin reescribir el primer intento.
+learner_id: learner-eval
+session_id: session-self-correction
+objective_id: subtraction-within-20
+stop_requested: false
+profile_objective: null
+authorised_objectives: [subtraction-within-20]
+turns:
+  - {turn_id: turn-1, response_text: "nueve", stt_confidence: 0.97, outcome: incorrect, retain_evidence: true, evidence_id: evidence-self-1, model_output: {type: tool, name: record_answer}, intervention_rating: needs-review, latency_ms: 250}
+  - {turn_id: turn-2, response_text: "no, ocho", stt_confidence: 0.98, outcome: correct, retain_evidence: true, evidence_id: evidence-self-2, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 220}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, evidence_count: 2, terminal: false}
+review_time_seconds: 24

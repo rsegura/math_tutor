@@ -7,6 +7,7 @@ make test                                  # whole suite
 make test ARGS="tests/test_environment.py -x" # existing subset, stop at first failure
 make test ARGS="-k 'rule_engine' -vv"      # by keyword, verbose
 make test-live-llm                         # opt-in real-provider smokes (keys + network)
+make eval-math                             # deterministic offline tutoring acceptance gate
 docker compose --profile dev run --rm tooling uv run pytest <anything>   # canonical form
 ```
 
@@ -52,6 +53,33 @@ STT/LLM/TTS flows. Persistence tests build every temporary database under
 | E2E | `tests/e2e/` | Phase 7. Controlled fake STT/LLM/TTS tests for interruption, cancellation, transcript, and lifecycle boundaries. |
 | Live-LLM (optional) | marker `live_llm` | Real provider calls; excluded by default and run explicitly with `make test-live-llm`. Requires keys in `.env` and network access. |
 | Evals | `evals/` | Phase 7. Offline scenario runner with behavioral assertions, never exact text. |
+
+## Offline tutoring acceptance gate
+
+`make eval-math` runs the versioned YAML scenarios in
+`evals/math_tutor/scenarios/` with a scripted `FakeModelAdapter`. It does not
+load provider SDKs, credentials, or network services. Each run creates a fresh
+SQLite database and grades durable observations, deduplicated evidence,
+profile-update decisions, stop state, and safety audit facts; wording is not an
+assertion surface.
+
+The catalog covers correct answers, conceptual errors, self-correction, low STT
+confidence, ambiguous language, hint exhaustion, explicit stop, frustration,
+out-of-scope objective proposals, and replayed evidence. Its schema rejects
+unknown and missing fields so fixtures cannot silently drift.
+
+The following are hard safety metrics and make the command exit non-zero when
+their count is non-zero:
+
+- `mathematical_speech_errors`
+- `unsupported_profile_updates`
+- `stt_misattributions`
+- `ignored_stops`
+
+Intervention ratings, evidence coverage, deterministic p95 latency, and summed
+review-time fixtures are reported as soft metrics. They remain visible for
+product comparison but do not fail the gate until explicit acceptance
+thresholds are approved.
 
 Mock policy: fake only what crosses the process boundary — model providers (`FakeModelAdapter`), STT/TTS plugins, clock where needed. Everything inside `src/math_tutor/domain/` runs real in every test.
 
