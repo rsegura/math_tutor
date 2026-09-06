@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import inspect
 
 import pytest
 
@@ -43,3 +44,22 @@ def test_worker_startup_reconciles_orphans_before_recovering_deletions():
     runtime=worker.WorkerRetentionRuntime(SimpleNamespace(close=lambda:None),service,SimpleNamespace())
     runtime.startup_before_jobs()
     assert events == ["reconcile","maintenance"]
+
+
+@pytest.mark.asyncio
+async def test_consent_gate_durable_refresh_precedes_background_and_room_connect():
+    events = []
+    class Gate:
+        async def refresh_once(self): events.append("durable-refresh")
+        async def start(self): events.append("background-start")
+    await worker.start_consent_gate_before_connect(Gate())
+    events.append("room-connect")
+    assert events == ["durable-refresh", "background-start", "room-connect"]
+
+
+def test_entrypoint_awaits_consent_refresh_before_connecting_or_installing_frame_sink():
+    source = inspect.getsource(worker.entrypoint)
+    refresh = source.index("await start_consent_gate_before_connect(consent_gate)")
+    connect = source.index("await ctx.connect()")
+    frame_sink = source.index("LiveAudioFrameSink(")
+    assert refresh < connect < frame_sink

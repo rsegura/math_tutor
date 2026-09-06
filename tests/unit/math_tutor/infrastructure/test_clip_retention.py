@@ -55,3 +55,11 @@ async def test_consent_refresh_is_off_thread_and_revocation_invalidates_cache():
     assert ticks == 20
     assert gate.allows_capture() is False
     await gate.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_true_does_not_authorize_until_initial_durable_refresh():
+    gate = AsyncConsentGate(lambda: False, initially_enabled=True, refresh_seconds=.02)
+    assert gate.allows_capture() is False
+    await gate.refresh_once()
+    assert gate.allows_capture() is False

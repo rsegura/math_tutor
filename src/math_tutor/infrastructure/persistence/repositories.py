@@ -955,7 +955,9 @@ class SQLiteTutoringRepository:
                 db.rollback(); return False
             if db.execute("SELECT 1 FROM evidence_clips WHERE evidence_id=?", (evidence_id,)).fetchone():
                 db.rollback(); return False
-            cursor = db.execute("INSERT OR IGNORE INTO audio_clip_write_intents(clip_id,evidence_id,learner_id,session_id,consent_id,consent_snapshot_id,duration_seconds,storage_key,captured_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (clip_id,evidence_id,auth[0],auth[1],consent_id,snapshot_id,duration_seconds,storage_key,captured_at.isoformat(),expires_at.isoformat()))
+            if db.execute("SELECT 1 FROM audio_orphan_delete_claims WHERE storage_key=?", (storage_key,)).fetchone():
+                db.rollback(); return False
+            cursor = db.execute("INSERT OR IGNORE INTO audio_clip_write_intents(clip_id,evidence_id,learner_id,session_id,consent_id,consent_snapshot_id,duration_seconds,storage_key,captured_at,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (clip_id,evidence_id,auth[0],auth[1],consent_id,snapshot_id,duration_seconds,storage_key,captured_at.isoformat(),expires_at.isoformat(),captured_at.isoformat()))
             db.commit(); return cursor.rowcount == 1
         except Exception:
             db.rollback(); raise
@@ -966,7 +968,7 @@ class SQLiteTutoringRepository:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT i.* FROM audio_clip_write_intents i JOIN audio_consents c ON c.consent_id=i.consent_id WHERE i.clip_id=? AND c.revoked_at IS NULL", (clip_id,)).fetchone()
+            row = db.execute("SELECT i.* FROM audio_clip_write_intents i JOIN audio_consents c ON c.consent_id=i.consent_id WHERE i.clip_id=? AND i.reconciliation_state='pending' AND c.revoked_at IS NULL", (clip_id,)).fetchone()
             if row is None:
                 db.rollback(); return False
             db.execute("INSERT INTO evidence_clips(clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (row['clip_id'],row['evidence_id'],row['learner_id'],row['session_id'],row['duration_seconds'],row['storage_key'],row['expires_at'],row['consent_id'],row['consent_snapshot_id'],row['captured_at']))
@@ -982,12 +984,44 @@ class SQLiteTutoringRepository:
             rows = db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at,'pending',NULL FROM audio_clip_write_intents ORDER BY clip_id").fetchall()
         return tuple(EvidenceClipRecord(*row) for row in rows)
 
-    def abandon_clip_write_intent(self, clip_id: str, *, reason: str, deleted_at: datetime) -> None:
+    def claim_stale_clip_write_intents(self, *, now: datetime, claim_id: str) -> tuple[EvidenceClipRecord, ...]:
+        if now.tzinfo is None:
+            raise ValueError("claim timestamp must be timezone-aware")
+        stale = (now - timedelta(minutes=5)).isoformat()
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE audio_clip_write_intents SET reconciliation_state='reconciling',reconciliation_claim_id=?,reconciliation_claimed_at=? "
+                "WHERE (reconciliation_state='pending' AND datetime(created_at)<=datetime(?)) OR "
+                "(reconciliation_state='reconciling' AND datetime(reconciliation_claimed_at)<=datetime(?))",
+                (claim_id, now.isoformat(), stale, stale),
+            )
+            rows = db.execute(
+                "SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at,'pending',NULL "
+                "FROM audio_clip_write_intents WHERE reconciliation_state='reconciling' AND reconciliation_claim_id=? ORDER BY clip_id",
+                (claim_id,),
+            ).fetchall()
+            db.commit()
+            return tuple(EvidenceClipRecord(*row) for row in rows)
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
+
+    def abandon_clip_write_intent(self, clip_id: str, *, reason: str, deleted_at: datetime,
+                                  claim_id: str | None = None) -> None:
         with self._connect() as db:
-            row = db.execute("SELECT evidence_id,consent_id FROM audio_clip_write_intents WHERE clip_id=?", (clip_id,)).fetchone()
+            if claim_id is None:
+                row = db.execute("SELECT evidence_id,consent_id FROM audio_clip_write_intents WHERE clip_id=? AND reconciliation_state='pending'", (clip_id,)).fetchone()
+            else:
+                row = db.execute("SELECT evidence_id,consent_id FROM audio_clip_write_intents WHERE clip_id=? AND reconciliation_state='reconciling' AND reconciliation_claim_id=?", (clip_id, claim_id)).fetchone()
             if row:
                 db.execute("INSERT OR IGNORE INTO audio_clip_deletion_tombstones(clip_id,evidence_id,consent_id,reason,deleted_at) VALUES(?,?,?,?,?)", (clip_id,row[0],row[1],reason,deleted_at.isoformat()))
-                db.execute("DELETE FROM audio_clip_write_intents WHERE clip_id=?", (clip_id,))
+                if claim_id is None:
+                    db.execute("DELETE FROM audio_clip_write_intents WHERE clip_id=? AND reconciliation_state='pending'", (clip_id,))
+                else:
+                    db.execute("DELETE FROM audio_clip_write_intents WHERE clip_id=? AND reconciliation_claim_id=?", (clip_id, claim_id))
 
     def list_live_clip_storage_keys(self) -> tuple[str, ...]:
         with self._connect() as db:
@@ -996,6 +1030,40 @@ class SQLiteTutoringRepository:
     def record_orphan_file_deletion(self, storage_key: str, *, deleted_at: datetime) -> None:
         with self._connect() as db:
             db.execute("INSERT OR IGNORE INTO audio_orphan_deletion_audit(storage_key,deleted_at,reason) VALUES(?,?,'startup-reconciliation')", (storage_key,deleted_at.isoformat()))
+
+    def claim_orphan_file(self, storage_key: str, *, now: datetime, claim_id: str) -> bool:
+        """Linearization point: a file is orphaned only at this transaction."""
+        stale = (now - timedelta(minutes=5)).isoformat()
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM audio_clip_write_intents WHERE storage_key=?", (storage_key,)).fetchone():
+                db.rollback(); return False
+            if db.execute("SELECT 1 FROM evidence_clips WHERE storage_key=?", (storage_key,)).fetchone():
+                db.rollback(); return False
+            existing = db.execute("SELECT claim_id,claimed_at FROM audio_orphan_delete_claims WHERE storage_key=?", (storage_key,)).fetchone()
+            if existing is not None and existing[0] != claim_id and existing[1] > stale:
+                db.rollback(); return False
+            db.execute("INSERT INTO audio_orphan_delete_claims(storage_key,claim_id,claimed_at) VALUES(?,?,?) ON CONFLICT(storage_key) DO UPDATE SET claim_id=excluded.claim_id,claimed_at=excluded.claimed_at", (storage_key,claim_id,now.isoformat()))
+            db.commit(); return True
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
+
+    def complete_orphan_file_deletion(self, storage_key: str, *, deleted_at: datetime, claim_id: str) -> None:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT 1 FROM audio_orphan_delete_claims WHERE storage_key=? AND claim_id=?", (storage_key,claim_id)).fetchone()
+            if row:
+                db.execute("INSERT OR IGNORE INTO audio_orphan_deletion_audit(storage_key,deleted_at,reason) VALUES(?,?,'startup-reconciliation')", (storage_key,deleted_at.isoformat()))
+                db.execute("DELETE FROM audio_orphan_delete_claims WHERE storage_key=? AND claim_id=?", (storage_key,claim_id))
+            db.commit()
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
 
     def load_session_aggregate(self, session_id: str) -> SessionAggregate | None:
         with self._connect() as db:

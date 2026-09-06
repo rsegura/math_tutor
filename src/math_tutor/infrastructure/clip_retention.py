@@ -130,22 +130,22 @@ class ClipRetentionService:
         """Remove incomplete/unknown files before any clip becomes reviewable."""
         with self._mutation_lock:
             deleted = 0
-            for intent in self.repository.list_clip_write_intents():
+            now = self._now()
+            for intent in self.repository.claim_stale_clip_write_intents(now=now, claim_id=self._claim_id):
                 try:
                     self.store.delete(intent.storage_key)
                 except ValueError:
                     self.store.delete_quarantined_legacy(intent.storage_key)
-                self.repository.abandon_clip_write_intent(intent.clip_id, reason="incomplete-write", deleted_at=self._now())
+                self.repository.abandon_clip_write_intent(intent.clip_id, reason="incomplete-write", deleted_at=self._now(), claim_id=self._claim_id)
                 deleted += 1
-            known = set(self.repository.list_live_clip_storage_keys())
             for storage_key in self.store.list_storage_keys():
-                if storage_key in known:
+                if not self.repository.claim_orphan_file(storage_key, now=self._now(), claim_id=self._claim_id):
                     continue
                 try:
                     self.store.delete(storage_key)
                 except ValueError:
                     self.store.delete_quarantined_legacy(storage_key)
-                self.repository.record_orphan_file_deletion(storage_key, deleted_at=self._now())
+                self.repository.complete_orphan_file_deletion(storage_key, deleted_at=self._now(), claim_id=self._claim_id)
                 deleted += 1
             return deleted
 
@@ -165,7 +165,7 @@ class AsyncConsentGate:
                  refresh_seconds: float = .25, on_revoked: Callable[[], None] | None = None) -> None:
         if not .01 <= refresh_seconds <= 5:
             raise ValueError("consent refresh must be between 0.01 and 5 seconds")
-        self._check, self._active = check, initially_enabled
+        self._check, self._candidate, self._active = check, initially_enabled, False
         self._refresh_seconds, self._on_revoked = refresh_seconds, on_revoked
         self._task: asyncio.Task | None = None
 
@@ -173,28 +173,30 @@ class AsyncConsentGate:
         return self._active
 
     async def refresh_once(self) -> None:
-        if not self._active:
+        if not self._candidate:
             return
         try:
             active = bool(await asyncio.to_thread(self._check))
         except Exception:
             active = False
+        self._active = active
         if not active:
+            self._candidate = False
             self._active = False
             if self._on_revoked is not None:
                 self._on_revoked()
 
     async def _run(self) -> None:
         try:
-            while self._active:
+            while self._candidate:
                 await self.refresh_once()
-                if self._active:
+                if self._candidate:
                     await asyncio.sleep(self._refresh_seconds)
         except asyncio.CancelledError:
             raise
 
     async def start(self) -> None:
-        if self._active and self._task is None:
+        if self._candidate and self._task is None:
             self._task = asyncio.create_task(self._run())
 
     async def aclose(self) -> None:

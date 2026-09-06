@@ -198,9 +198,31 @@ def test_startup_reconciles_crash_after_intent_and_after_file_write(tmp_path):
     store.write(clip_id, selected_audio().payload)  # crash before finalize
     unknown = store.root / "opaque_unknown_clip_12345.wav"
     unknown.write_bytes(selected_audio().payload)
+    now += timedelta(minutes=6)
     retention = ClipRetentionService(repo, store, RetentionSettings(enabled=True), now=lambda: now)
     assert retention.reconcile_startup() == 2
     assert not store.list_storage_keys()
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM audio_clip_write_intents").fetchone()[0] == 0
         assert db.execute("SELECT COUNT(*) FROM audio_orphan_deletion_audit").fetchone()[0] == 1
+
+
+def test_reconciliation_never_deletes_fresh_intent_or_newly_live_file(tmp_path):
+    repo_a, _, consent, session = setup_authorized(tmp_path)
+    repo_b = SQLiteTutoringRepository(repo_a.database)
+    now = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+    store = OpaqueClipStore(tmp_path / "clips")
+    clip_id = "opaque_inflight_clip_12345"
+    storage_key = f"{clip_id}.wav"
+    assert repo_a.create_clip_write_intent(
+        clip_id=clip_id, evidence_id="evidence-clip", consent_id=consent.consent_id,
+        snapshot_id=session.audio_consent_snapshot_id, duration_seconds=1,
+        storage_key=storage_key, captured_at=now, expires_at=now + timedelta(days=1),
+    )
+    store.write(clip_id, selected_audio().payload)
+    reconciler = ClipRetentionService(repo_b, store, RetentionSettings(enabled=True), now=lambda: now)
+    assert reconciler.reconcile_startup() == 0
+    assert storage_key in store.list_storage_keys()
+    assert repo_a.finalize_clip_write_intent(clip_id)
+    assert reconciler.reconcile_startup() == 0
+    assert storage_key in store.list_storage_keys()

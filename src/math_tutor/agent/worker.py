@@ -114,7 +114,7 @@ async def entrypoint(ctx: JobContext) -> None:
     consent_gate = AsyncConsentGate(durable_consent_check,
         initially_enabled=retention_settings.enabled and runtime.bootstrap.clip_capture_enabled,
         on_revoked=lambda: buffers.disable_session(session_id))
-    await consent_gate.start()
+    await start_consent_gate_before_connect(consent_gate)
     engine = BoundedConversationEngine(repository=repository, runtime=runtime, curricula_dir=Path(__file__).resolve().parents[1] / "curricula")
     stt, tts = create_voice_providers(runtime.providers)
     await ctx.connect()
@@ -133,6 +133,12 @@ async def entrypoint(ctx: JobContext) -> None:
     agent.bind_terminal_closer(closer)
     ctx.add_shutdown_callback(closer.aclose)
     await session.start(agent=agent, room=ctx.room)
+
+
+async def start_consent_gate_before_connect(consent_gate: AsyncConsentGate) -> None:
+    """Require one durable authorization before any audio surface is connected."""
+    await consent_gate.refresh_once()
+    await consent_gate.start()
 
 
 def build_worker_options() -> WorkerOptions:
