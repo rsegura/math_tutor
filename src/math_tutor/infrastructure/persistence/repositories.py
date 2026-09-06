@@ -313,8 +313,11 @@ class SQLiteTutoringRepository:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT proposal_id FROM next_objective_proposals WHERE learner_id=? AND source_session_id=? AND source_plan_id=? AND source_plan_version=? AND objective_id=?",(proposal.learner_id,proposal.source_session_id,proposal.source_plan_id,proposal.source_plan_version,proposal.objective_id)).fetchone()
             if existing is not None:
-                db.rollback(); return self.load_next_objective_proposal(existing[0])
-            db.execute("INSERT INTO next_objective_proposals(proposal_id,learner_id,source_session_id,source_plan_id,source_plan_version,objective_id,rationale,created_at) VALUES(?,?,?,?,?,?,?,?)",(proposal.proposal_id,proposal.learner_id,proposal.source_session_id,proposal.source_plan_id,proposal.source_plan_version,proposal.objective_id,proposal.rationale,proposal.created_at.isoformat()))
+                db.rollback()
+                loaded=self.load_next_objective_proposal(existing[0])
+                if loaded is None: raise NextObjectiveError("stale-existing-proposal")
+                return loaded
+            db.execute("INSERT INTO next_objective_proposals(proposal_id,learner_id,source_session_id,source_plan_id,source_plan_version,source_profile_version,objective_id,rationale,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(proposal.proposal_id,proposal.learner_id,proposal.source_session_id,proposal.source_plan_id,proposal.source_plan_version,proposal.source_profile_version,proposal.objective_id,proposal.rationale,proposal.created_at.isoformat()))
             for position,evidence_id in enumerate(proposal.evidence_ids):
                 owner=db.execute("SELECT session_id FROM evidence_records WHERE evidence_id=? AND learner_id=?",(evidence_id,proposal.learner_id)).fetchone()
                 if owner is None: raise NextObjectiveError("proposal-evidence-owner-mismatch")
@@ -326,12 +329,12 @@ class SQLiteTutoringRepository:
 
     def load_next_objective_proposal(self, proposal_id: str) -> NextObjectiveProposal | None:
         with self._connect_read_only() as db:
-            row=db.execute("SELECT p.proposal_id,p.learner_id,p.source_session_id,p.source_plan_id,p.source_plan_version,p.objective_id,p.rationale,p.created_at,d.status,d.revision,d.decided_at FROM next_objective_proposals p LEFT JOIN next_objective_decisions d ON d.proposal_id=p.proposal_id WHERE p.proposal_id=? ORDER BY d.revision DESC LIMIT 1",(proposal_id,)).fetchone()
+            row=db.execute("SELECT p.proposal_id,p.learner_id,p.source_session_id,p.source_plan_id,p.source_plan_version,p.source_profile_version,p.objective_id,p.rationale,p.created_at,d.status,d.revision,d.decided_at FROM next_objective_proposals p LEFT JOIN next_objective_decisions d ON d.proposal_id=p.proposal_id WHERE p.proposal_id=? AND p.stale_reason IS NULL ORDER BY d.revision DESC LIMIT 1",(proposal_id,)).fetchone()
             evidence=tuple(item[0] for item in db.execute("SELECT evidence_id FROM next_objective_proposal_evidence WHERE proposal_id=? ORDER BY position",(proposal_id,))) if row else ()
         if row is None: return None
-        status_value=ProposalDecisionStatus(row[8]) if row[8] else ProposalDecisionStatus.PENDING
-        updated=datetime.fromisoformat(row[10]) if row[10] else datetime.fromisoformat(row[7])
-        return NextObjectiveProposal(row[0],row[1],row[2],row[3],row[4],row[5],row[6],evidence,status_value,row[9] or 0,datetime.fromisoformat(row[7]),updated)
+        status_value=ProposalDecisionStatus(row[9]) if row[9] else ProposalDecisionStatus.PENDING
+        updated=datetime.fromisoformat(row[11]) if row[11] else datetime.fromisoformat(row[8])
+        return NextObjectiveProposal(row[0],row[1],row[2],row[3],row[4],row[5],row[6],row[7],evidence,status_value,row[10] or 0,datetime.fromisoformat(row[8]),updated)
 
     def list_next_objective_proposals(self, learner_id: str, *, source_session_id: str | None = None) -> tuple[NextObjectiveProposal, ...]:
         with self._connect_read_only() as db:
@@ -340,33 +343,35 @@ class SQLiteTutoringRepository:
 
     def resolve_next_objective_decision(self, decision: NextObjectiveDecision) -> NextObjectiveProposal | None:
         with self._connect_read_only() as db:
-            prior=db.execute("SELECT proposal_id,learner_id,status,reason,expected_revision,expected_plan_version FROM next_objective_decisions WHERE command_id=?",(decision.command_id,)).fetchone()
+            prior=db.execute("SELECT proposal_id,learner_id,status,reason,expected_revision,expected_plan_version,expected_profile_version FROM next_objective_decisions WHERE command_id=?",(decision.command_id,)).fetchone()
         if prior is None: return None
-        expected=(decision.proposal_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version)
+        expected=(decision.proposal_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version,decision.expected_profile_version)
         if tuple(prior)!=expected: raise NextObjectiveError("command-id-collision")
         return self.load_next_objective_proposal(decision.proposal_id)
 
     def list_next_objective_decisions(self, proposal_id: str) -> tuple[NextObjectiveDecisionRevision, ...]:
         with self._connect_read_only() as db:
-            rows=db.execute("SELECT proposal_id,revision,status,reason,expected_plan_version,resulting_plan_version,decided_at FROM next_objective_decisions WHERE proposal_id=? ORDER BY revision",(proposal_id,)).fetchall()
-        return tuple(NextObjectiveDecisionRevision(row[0],row[1],ProposalDecisionStatus(row[2]),row[3],row[4],row[5],datetime.fromisoformat(row[6])) for row in rows)
+            rows=db.execute("SELECT proposal_id,revision,status,reason,expected_plan_version,expected_profile_version,resulting_plan_version,decided_at FROM next_objective_decisions WHERE proposal_id=? ORDER BY revision",(proposal_id,)).fetchall()
+        return tuple(NextObjectiveDecisionRevision(row[0],row[1],ProposalDecisionStatus(row[2]),row[3],row[4],row[5],row[6],datetime.fromisoformat(row[7])) for row in rows)
 
     def commit_next_objective_decision(self, decision: NextObjectiveDecision, new_plan: ProvisionedPlan | None) -> NextObjectiveProposal:
         db=self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            prior=db.execute("SELECT proposal_id,learner_id,status,reason,expected_revision,expected_plan_version FROM next_objective_decisions WHERE command_id=?",(decision.command_id,)).fetchone()
-            expected=(decision.proposal_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version)
+            prior=db.execute("SELECT proposal_id,learner_id,status,reason,expected_revision,expected_plan_version,expected_profile_version FROM next_objective_decisions WHERE command_id=?",(decision.command_id,)).fetchone()
+            expected=(decision.proposal_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version,decision.expected_profile_version)
             if prior is not None:
                 db.rollback()
                 if tuple(prior)!=expected: raise NextObjectiveError("command-id-collision")
                 return self.load_next_objective_proposal(decision.proposal_id)
-            proposal=db.execute("SELECT learner_id,source_plan_id,source_plan_version,objective_id FROM next_objective_proposals WHERE proposal_id=?",(decision.proposal_id,)).fetchone()
+            proposal=db.execute("SELECT learner_id,source_plan_id,source_plan_version,source_profile_version,objective_id FROM next_objective_proposals WHERE proposal_id=? AND stale_reason IS NULL",(decision.proposal_id,)).fetchone()
             current_revision=db.execute("SELECT COALESCE(MAX(revision),0) FROM next_objective_decisions WHERE proposal_id=?",(decision.proposal_id,)).fetchone()[0]
             current_plan=db.execute("SELECT plan_id,version FROM provisioned_plans WHERE learner_id=? ORDER BY version DESC LIMIT 1",(decision.learner_id,)).fetchone()
+            current_profile=db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?",(decision.learner_id,)).fetchone()
             if proposal is None or proposal[0]!=decision.learner_id: raise NextObjectiveError("proposal-owner-mismatch")
             if current_revision!=decision.expected_revision: raise NextObjectiveError("stale-proposal-revision")
             if current_plan is None or tuple(current_plan)!=(proposal[1],decision.expected_plan_version) or proposal[2]!=decision.expected_plan_version: raise NextObjectiveError("stale-plan-version")
+            if current_profile is None or current_profile[0]!=proposal[3] or current_profile[0]!=decision.expected_profile_version: raise NextObjectiveError("stale-profile-version")
             resulting=None
             if decision.status is ProposalDecisionStatus.APPROVED:
                 if new_plan is None or new_plan.version!=decision.expected_plan_version+1: raise NextObjectiveError("invalid-approved-plan")
@@ -375,7 +380,7 @@ class SQLiteTutoringRepository:
                 db.execute("INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) VALUES(?,?,?,?,?,?)",(new_plan.plan.plan_id,new_plan.version,decision.learner_id,json.dumps(new_plan.adaptations),new_plan.limits.duration_minutes,new_plan.limits.max_activities))
                 resulting=new_plan.version
             elif new_plan is not None: raise NextObjectiveError("rejection-cannot-change-plan")
-            db.execute("INSERT INTO next_objective_decisions(proposal_id,revision,command_id,learner_id,status,reason,expected_revision,expected_plan_version,resulting_plan_version,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(decision.proposal_id,current_revision+1,decision.command_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version,resulting,decision.decided_at.isoformat()))
+            db.execute("INSERT INTO next_objective_decisions(proposal_id,revision,command_id,learner_id,status,reason,expected_revision,expected_plan_version,expected_profile_version,resulting_plan_version,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(decision.proposal_id,current_revision+1,decision.command_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version,decision.expected_profile_version,resulting,decision.decided_at.isoformat()))
             db.commit()
         except Exception:
             db.rollback(); raise

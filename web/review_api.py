@@ -72,6 +72,7 @@ class NextObjectiveDecisionBody(StrictModel):
     reason: str = Field(min_length=1,max_length=500)
     expected_revision: int = Field(ge=0)
     expected_plan_version: int = Field(ge=1)
+    expected_profile_version: int = Field(ge=1)
 
     @field_validator("command_id","reason")
     @classmethod
@@ -179,7 +180,7 @@ def create_review_router(repository, therapist_token: str | None, *, summary_ser
         next_proposals = repository.list_next_objective_proposals(learner_id,source_session_id=session_id) if hasattr(repository,"list_next_objective_proposals") else ()
         def next_wire(item):
             return {"proposal_id":item.proposal_id,"objective_id":item.objective_id,"source_plan_id":item.source_plan_id,
-                "source_plan_version":item.source_plan_version,"rationale":item.rationale,"evidence_ids":list(item.evidence_ids),
+                "source_plan_version":item.source_plan_version,"source_profile_version":item.source_profile_version,"rationale":item.rationale,"evidence_ids":list(item.evidence_ids),
                 "status":item.status.value,"revision":item.revision,"created_at":item.created_at.isoformat(),"updated_at":item.updated_at.isoformat()}
         next_history=[]
         if hasattr(repository,"list_next_objective_decisions"):
@@ -187,7 +188,7 @@ def create_review_router(repository, therapist_token: str | None, *, summary_ser
                 for decision in repository.list_next_objective_decisions(item.proposal_id):
                     next_history.append({**next_wire(item),"revision":decision.revision,"status":decision.status.value,
                         "decision_reason":decision.reason,"expected_plan_version":decision.expected_plan_version,
-                        "resulting_plan_version":decision.resulting_plan_version,"decided_at":decision.decided_at.isoformat()})
+                        "expected_profile_version":decision.expected_profile_version,"resulting_plan_version":decision.resulting_plan_version,"decided_at":decision.decided_at.isoformat()})
         else:
             next_history=[next_wire(item) for item in next_proposals if item.status is not ProposalDecisionStatus.PENDING]
         return {"learner":{"learner_id":learner.learner_id,"pseudonym":learner.pseudonym,"age_years":learner.age_years},
@@ -217,7 +218,7 @@ def create_review_router(repository, therapist_token: str | None, *, summary_ser
             proposal_id=_safe_id(proposal_id)
             stored = repository.load_next_objective_proposal(proposal_id) if hasattr(repository,"load_next_objective_proposal") else None
             if stored is not None and stored.source_session_id != session_id: raise NextObjectiveError("proposal-owner-mismatch")
-            proposal=next_objective_service.decide(NextObjectiveDecision(body.command_id,proposal_id,learner_id,ProposalDecisionStatus(body.decision),body.reason,body.expected_revision,body.expected_plan_version,datetime.now(timezone.utc)))
+            proposal=next_objective_service.decide(NextObjectiveDecision(body.command_id,proposal_id,learner_id,ProposalDecisionStatus(body.decision),body.reason,body.expected_revision,body.expected_plan_version,body.expected_profile_version,datetime.now(timezone.utc)))
         except NextObjectiveError as error:
             reason=str(error); code=status.HTTP_404_NOT_FOUND if reason=="proposal-owner-mismatch" else status.HTTP_409_CONFLICT
             raise HTTPException(code,reason) from error
