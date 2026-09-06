@@ -46,6 +46,7 @@ class EvidenceClipRecord:
     consent_snapshot_id: str | None = None
     captured_at: str | None = None
     deletion_state: str = "live"
+    deletion_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -856,12 +857,7 @@ class SQLiteTutoringRepository:
                 "WHERE s.snapshot_id=? AND s.learner_id=? AND s.session_id=? AND c.revoked_at IS NULL",
                 (evidence_id, snapshot_id, learner_id, session_id),
             ).fetchone()
-        if row is None:
-            return None
-        granted = datetime.fromisoformat(row[2])
-        if captured_at > granted + timedelta(days=min(row[1], 30)):
-            return None
-        return row[0], row[1]
+        return (row[0], row[1]) if row else None
 
     def authorize_session_clip_buffer(self, *, learner_id: str, session_id: str,
                                       snapshot_id: str, at: datetime) -> bool:
@@ -876,46 +872,14 @@ class SQLiteTutoringRepository:
                 "WHERE s.snapshot_id=? AND s.learner_id=? AND s.session_id=? AND c.revoked_at IS NULL",
                 (snapshot_id, learner_id, session_id),
             ).fetchone()
-        if not row or at > datetime.fromisoformat(row[1]) + timedelta(days=min(row[0], 30)):
+        if not row:
             return False
         session = _load(row[2])
         return isinstance(session, LearningSession) and session.can_continue and not session.ended
 
-    def save_authorized_evidence_clip(self, *, clip_id: str, evidence_id: str, consent_id: str,
-                                      snapshot_id: str, duration_seconds: float, storage_key: str,
-                                      captured_at: datetime, expires_at: datetime) -> bool:
-        if captured_at.tzinfo is None or expires_at.tzinfo is None:
-            raise ValueError("clip timestamps must be timezone-aware")
-        if not 0 < duration_seconds <= 30 or not captured_at < expires_at <= captured_at + timedelta(days=30):
-            raise ValueError("clip duration or expiry is outside hard bounds")
-        db = self._connect()
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            auth = db.execute(
-                "SELECT e.learner_id,e.session_id,s.retention_days,s.granted_at FROM evidence_records e "
-                "JOIN session_audio_consent_snapshots s ON s.snapshot_id=? AND s.session_id=e.session_id AND s.learner_id=e.learner_id "
-                "JOIN audio_consents c ON c.consent_id=s.consent_id "
-                "WHERE e.evidence_id=? AND s.consent_id=? AND c.revoked_at IS NULL",
-                (snapshot_id, evidence_id, consent_id),
-            ).fetchone()
-            if auth is None or captured_at > datetime.fromisoformat(auth[3]) + timedelta(days=min(auth[2], 30)) or expires_at > captured_at + timedelta(days=min(auth[2], 30)):
-                db.rollback()
-                return False
-            db.execute(
-                "INSERT INTO evidence_clips(clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (clip_id,evidence_id,auth[0],auth[1],duration_seconds,storage_key,expires_at.isoformat(),consent_id,snapshot_id,captured_at.isoformat()),
-            )
-            db.commit()
-            return True
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
-
     def claim_evidence_clips(self, *, clip_id: str | None = None, consent_id: str | None = None,
                              expired_before: datetime | None = None, claimed_at: datetime,
-                             claim_id: str) -> tuple[EvidenceClipRecord, ...]:
+                             claim_id: str, reason: str = "expired") -> tuple[EvidenceClipRecord, ...]:
         if claimed_at.tzinfo is None or (expired_before is not None and expired_before.tzinfo is None):
             raise ValueError("claim timestamps must be timezone-aware")
         clauses, values = [], []
@@ -933,12 +897,12 @@ class SQLiteTutoringRepository:
             where = " AND ".join(clauses)
             stale_at = (claimed_at - timedelta(minutes=5)).isoformat()
             db.execute(
-                f"UPDATE evidence_clips SET deletion_state='deleting',deletion_claimed_at=?,deletion_claim_id=? "
+                f"UPDATE evidence_clips SET deletion_state='deleting',deletion_claimed_at=?,deletion_claim_id=?,deletion_reason=COALESCE(deletion_reason,?) "
                 f"WHERE ({where}) AND (deletion_state='live' OR (deletion_state='deleting' AND deletion_claimed_at<=?))",
-                (claimed_at.isoformat(), claim_id, *values, stale_at),
+                (claimed_at.isoformat(), claim_id, reason, *values, stale_at),
             )
             rows = db.execute(
-                f"SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at,deletion_state FROM evidence_clips WHERE ({where}) AND deletion_claim_id=?",
+                f"SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at,deletion_state,deletion_reason FROM evidence_clips WHERE ({where}) AND deletion_claim_id=?",
                 (*values, claim_id),
             ).fetchall()
             db.commit()
@@ -948,21 +912,90 @@ class SQLiteTutoringRepository:
         finally:
             db.close()
 
-    def complete_evidence_clip_deletion(self, clip_id: str, *, reason: str, deleted_at: datetime) -> None:
+    def complete_evidence_clip_deletion(self, clip_id: str, *, reason: str, deleted_at: datetime, claim_id: str) -> None:
         if deleted_at.tzinfo is None:
             raise ValueError("deletion timestamp must be timezone-aware")
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT evidence_id,consent_id FROM evidence_clips WHERE clip_id=? AND deletion_state='deleting'", (clip_id,)).fetchone()
+            row = db.execute("SELECT evidence_id,consent_id,deletion_reason FROM evidence_clips WHERE clip_id=? AND deletion_state='deleting' AND deletion_claim_id=?", (clip_id,claim_id)).fetchone()
             if row is not None:
-                db.execute("INSERT OR IGNORE INTO audio_clip_deletion_tombstones(clip_id,evidence_id,consent_id,reason,deleted_at) VALUES(?,?,?,?,?)", (clip_id,row[0],row[1],reason,deleted_at.isoformat()))
-                db.execute("DELETE FROM evidence_clips WHERE clip_id=? AND deletion_state='deleting'", (clip_id,))
+                db.execute("INSERT OR IGNORE INTO audio_clip_deletion_tombstones(clip_id,evidence_id,consent_id,reason,deleted_at) VALUES(?,?,?,?,?)", (clip_id,row[0],row[1],row[2] or reason,deleted_at.isoformat()))
+                db.execute("DELETE FROM evidence_clips WHERE clip_id=? AND deletion_state='deleting' AND deletion_claim_id=?", (clip_id,claim_id))
             db.commit()
         except Exception:
             db.rollback(); raise
         finally:
             db.close()
+
+    def claim_recoverable_evidence_clips(self, *, now: datetime, claim_id: str) -> tuple[EvidenceClipRecord, ...]:
+        """Claim expired live rows and stale deleting rows independently."""
+        stale = (now - timedelta(minutes=5)).isoformat()
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE evidence_clips SET deletion_state='deleting',deletion_claimed_at=?,deletion_claim_id=?,deletion_reason=COALESCE(deletion_reason,'expired') WHERE (deletion_state='live' AND expires_at<=?) OR (deletion_state='deleting' AND deletion_claimed_at<=?)", (now.isoformat(),claim_id,now.isoformat(),stale))
+            rows = db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at,deletion_state,deletion_reason FROM evidence_clips WHERE deletion_state='deleting' AND deletion_claim_id=?", (claim_id,)).fetchall()
+            db.commit(); return tuple(EvidenceClipRecord(*row) for row in rows)
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
+
+    def create_clip_write_intent(self, *, clip_id: str, evidence_id: str, consent_id: str,
+                                 snapshot_id: str, duration_seconds: float, storage_key: str,
+                                 captured_at: datetime, expires_at: datetime) -> bool:
+        if captured_at.tzinfo is None or expires_at.tzinfo is None:
+            raise ValueError("clip timestamps must be timezone-aware")
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            auth = db.execute("SELECT e.learner_id,e.session_id,s.retention_days FROM evidence_records e JOIN session_audio_consent_snapshots s ON s.snapshot_id=? AND s.session_id=e.session_id AND s.learner_id=e.learner_id JOIN audio_consents c ON c.consent_id=s.consent_id WHERE e.evidence_id=? AND s.consent_id=? AND c.revoked_at IS NULL", (snapshot_id,evidence_id,consent_id)).fetchone()
+            if auth is None or not 0 < duration_seconds <= 30 or not captured_at < expires_at <= captured_at + timedelta(days=min(auth[2],30)):
+                db.rollback(); return False
+            if db.execute("SELECT 1 FROM evidence_clips WHERE evidence_id=?", (evidence_id,)).fetchone():
+                db.rollback(); return False
+            cursor = db.execute("INSERT OR IGNORE INTO audio_clip_write_intents(clip_id,evidence_id,learner_id,session_id,consent_id,consent_snapshot_id,duration_seconds,storage_key,captured_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (clip_id,evidence_id,auth[0],auth[1],consent_id,snapshot_id,duration_seconds,storage_key,captured_at.isoformat(),expires_at.isoformat()))
+            db.commit(); return cursor.rowcount == 1
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
+
+    def finalize_clip_write_intent(self, clip_id: str) -> bool:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT i.* FROM audio_clip_write_intents i JOIN audio_consents c ON c.consent_id=i.consent_id WHERE i.clip_id=? AND c.revoked_at IS NULL", (clip_id,)).fetchone()
+            if row is None:
+                db.rollback(); return False
+            db.execute("INSERT INTO evidence_clips(clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (row['clip_id'],row['evidence_id'],row['learner_id'],row['session_id'],row['duration_seconds'],row['storage_key'],row['expires_at'],row['consent_id'],row['consent_snapshot_id'],row['captured_at']))
+            db.execute("DELETE FROM audio_clip_write_intents WHERE clip_id=?", (clip_id,))
+            db.commit(); return True
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
+
+    def list_clip_write_intents(self) -> tuple[EvidenceClipRecord, ...]:
+        with self._connect() as db:
+            rows = db.execute("SELECT clip_id,evidence_id,learner_id,session_id,duration_seconds,storage_key,expires_at,consent_id,consent_snapshot_id,captured_at,'pending',NULL FROM audio_clip_write_intents ORDER BY clip_id").fetchall()
+        return tuple(EvidenceClipRecord(*row) for row in rows)
+
+    def abandon_clip_write_intent(self, clip_id: str, *, reason: str, deleted_at: datetime) -> None:
+        with self._connect() as db:
+            row = db.execute("SELECT evidence_id,consent_id FROM audio_clip_write_intents WHERE clip_id=?", (clip_id,)).fetchone()
+            if row:
+                db.execute("INSERT OR IGNORE INTO audio_clip_deletion_tombstones(clip_id,evidence_id,consent_id,reason,deleted_at) VALUES(?,?,?,?,?)", (clip_id,row[0],row[1],reason,deleted_at.isoformat()))
+                db.execute("DELETE FROM audio_clip_write_intents WHERE clip_id=?", (clip_id,))
+
+    def list_live_clip_storage_keys(self) -> tuple[str, ...]:
+        with self._connect() as db:
+            return tuple(row[0] for row in db.execute("SELECT storage_key FROM evidence_clips WHERE deletion_state IN ('live','deleting')"))
+
+    def record_orphan_file_deletion(self, storage_key: str, *, deleted_at: datetime) -> None:
+        with self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO audio_orphan_deletion_audit(storage_key,deleted_at,reason) VALUES(?,?,'startup-reconciliation')", (storage_key,deleted_at.isoformat()))
 
     def load_session_aggregate(self, session_id: str) -> SessionAggregate | None:
         with self._connect() as db:

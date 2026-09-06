@@ -161,3 +161,46 @@ def test_incremental_migration_quarantines_preconsent_clip_rows(tmp_path):
         assert db.execute("SELECT COUNT(*) FROM evidence_clips WHERE clip_id='opaque_preconsent_clip'").fetchone()[0] == 0
         assert db.execute("SELECT reason FROM audio_clip_deletion_tombstones WHERE clip_id='opaque_preconsent_clip'").fetchone()[0] == "expired"
     assert not (store.root / "opaque_preconsent_clip.wav").exists()
+
+
+def test_active_consent_does_not_expire_when_its_clip_retention_window_passes(tmp_path):
+    repo, _, _, session = setup_authorized(tmp_path)
+    now = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    retention = ClipRetentionService(repo, OpaqueClipStore(tmp_path / "clips"), RetentionSettings(enabled=True, retention_days=1), now=lambda: now)
+    clip_id = retention.persist_selected(evidence_id="evidence-clip", learner_id="learner-clip", session_id=session.tutoring_session_id, consent_snapshot_id=session.audio_consent_snapshot_id, selected=selected_audio(), evidence_selection_committed=True)
+    assert clip_id is not None
+    assert repo.load_evidence_clip(clip_id).expires_at.startswith("2026-09-21")
+
+
+def test_restart_recovers_stale_revocation_delete_before_clip_expiry(tmp_path):
+    repo, _, _, session = setup_authorized(tmp_path)
+    clock = [datetime(2026, 9, 6, 12, tzinfo=timezone.utc)]
+    store = OpaqueClipStore(tmp_path / "clips")
+    retention = ClipRetentionService(repo, store, RetentionSettings(enabled=True, retention_days=2), now=lambda: clock[0])
+    clip_id = retention.persist_selected(evidence_id="evidence-clip", learner_id="learner-clip", session_id=session.tutoring_session_id, consent_snapshot_id=session.audio_consent_snapshot_id, selected=selected_audio(), evidence_selection_committed=True)
+    claimed = repo.claim_evidence_clips(clip_id=clip_id, claimed_at=clock[0], claim_id="crashed", reason="consent-revoked")
+    assert len(claimed) == 1
+    store.delete(claimed[0].storage_key)  # process dies before durable completion
+    clock[0] += timedelta(minutes=6)
+    restarted = ClipRetentionService(SQLiteTutoringRepository(repo.database), store, RetentionSettings(enabled=True, retention_days=2), now=lambda: clock[0])
+    assert restarted.maintenance() == 1
+    with repo._connect() as db:
+        tombstone = db.execute("SELECT reason FROM audio_clip_deletion_tombstones WHERE clip_id=?", (clip_id,)).fetchone()
+    assert tombstone[0] == "consent-revoked"
+
+
+def test_startup_reconciles_crash_after_intent_and_after_file_write(tmp_path):
+    repo, _, consent, session = setup_authorized(tmp_path)
+    now = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+    store = OpaqueClipStore(tmp_path / "clips")
+    clip_id = "opaque_pending_clip_12345"
+    repo.create_clip_write_intent(clip_id=clip_id, evidence_id="evidence-clip", consent_id=consent.consent_id, snapshot_id=session.audio_consent_snapshot_id, duration_seconds=1, storage_key=f"{clip_id}.wav", captured_at=now, expires_at=now + timedelta(days=1))
+    store.write(clip_id, selected_audio().payload)  # crash before finalize
+    unknown = store.root / "opaque_unknown_clip_12345.wav"
+    unknown.write_bytes(selected_audio().payload)
+    retention = ClipRetentionService(repo, store, RetentionSettings(enabled=True), now=lambda: now)
+    assert retention.reconcile_startup() == 2
+    assert not store.list_storage_keys()
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM audio_clip_write_intents").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM audio_orphan_deletion_audit").fetchone()[0] == 1

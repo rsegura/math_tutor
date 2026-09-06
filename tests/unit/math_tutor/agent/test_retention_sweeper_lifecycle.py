@@ -35,3 +35,11 @@ async def test_worker_runtime_owns_one_periodic_sweeper_and_awaits_it_before_rep
     await runtime.start_periodic()
     await runtime.aclose()
     assert events == ["periodic-start", "periodic-closed", "repository-closed"]
+
+
+def test_worker_startup_reconciles_orphans_before_recovering_deletions():
+    events=[]
+    service=SimpleNamespace(reconcile_startup=lambda:events.append("reconcile"),maintenance=lambda:events.append("maintenance"))
+    runtime=worker.WorkerRetentionRuntime(SimpleNamespace(close=lambda:None),service,SimpleNamespace())
+    runtime.startup_before_jobs()
+    assert events == ["reconcile","maintenance"]

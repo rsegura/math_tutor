@@ -79,39 +79,75 @@ class ClipRetentionService:
             consent_id, consent_days = authorization
             days = min(self.settings.retention_days, consent_days, 30)
             clip_id = secrets.token_urlsafe(24)
-            storage_key = self.store.write(clip_id, selected.payload)
+            storage_key = self.store.storage_key(clip_id)
+            expires_at = at + timedelta(days=days)
+            if not self.repository.create_clip_write_intent(
+                clip_id=clip_id, evidence_id=evidence_id, consent_id=consent_id,
+                snapshot_id=consent_snapshot_id, duration_seconds=selected.duration_seconds,
+                storage_key=storage_key, captured_at=at, expires_at=expires_at):
+                return None
             try:
-                stored = self.repository.save_authorized_evidence_clip(
-                    clip_id=clip_id, evidence_id=evidence_id, consent_id=consent_id,
-                    snapshot_id=consent_snapshot_id, duration_seconds=selected.duration_seconds,
-                    storage_key=storage_key, captured_at=at,
-                    expires_at=at + timedelta(days=days),
-                )
+                self.store.write(clip_id, selected.payload)
+                stored = self.repository.finalize_clip_write_intent(clip_id)
             except BaseException:
                 self.store.delete(storage_key)
+                self.repository.abandon_clip_write_intent(clip_id, reason="write-failed", deleted_at=self._now())
                 raise
             if not stored:
                 self.store.delete(storage_key)
+                self.repository.abandon_clip_write_intent(clip_id, reason="authorization-lost", deleted_at=self._now())
                 return None
             return clip_id
 
     def _purge(self, *, clip_id: str | None = None, consent_id: str | None = None, expired_before: datetime | None = None, reason: str) -> int:
         with self._mutation_lock:
-            claimed = self.repository.claim_evidence_clips(clip_id=clip_id, consent_id=consent_id, expired_before=expired_before, claimed_at=self._now(), claim_id=self._claim_id)
-            deleted = 0
-            for record in claimed:
-                try:
-                    self.store.delete(record.storage_key)
-                except ValueError:
-                    if record.consent_id is not None:
-                        raise
-                    self.store.delete_quarantined_legacy(record.storage_key)
-                self.repository.complete_evidence_clip_deletion(record.clip_id, reason=reason, deleted_at=self._now())
-                deleted += 1
-            return deleted
+            claimed = self.repository.claim_evidence_clips(clip_id=clip_id, consent_id=consent_id, expired_before=expired_before, claimed_at=self._now(), claim_id=self._claim_id, reason=reason)
+            return self._delete_claimed(claimed, fallback_reason=reason)
+
+    def _delete_claimed(self, claimed, *, fallback_reason: str) -> int:
+        deleted = 0
+        for record in claimed:
+            try:
+                self.store.delete(record.storage_key)
+            except ValueError:
+                if record.consent_id is not None:
+                    raise
+                self.store.delete_quarantined_legacy(record.storage_key)
+            self.repository.complete_evidence_clip_deletion(record.clip_id, reason=record.deletion_reason or fallback_reason, deleted_at=self._now(), claim_id=self._claim_id)
+            deleted += 1
+        return deleted
 
     def sweep_expired(self) -> int:
         return self._purge(expired_before=self._now(), reason="expired")
+
+    def maintenance(self) -> int:
+        """Recover expired and stale-deleting rows, regardless of original expiry."""
+        with self._mutation_lock:
+            claimed = self.repository.claim_recoverable_evidence_clips(now=self._now(), claim_id=self._claim_id)
+            return self._delete_claimed(claimed, fallback_reason="expired")
+
+    def reconcile_startup(self) -> int:
+        """Remove incomplete/unknown files before any clip becomes reviewable."""
+        with self._mutation_lock:
+            deleted = 0
+            for intent in self.repository.list_clip_write_intents():
+                try:
+                    self.store.delete(intent.storage_key)
+                except ValueError:
+                    self.store.delete_quarantined_legacy(intent.storage_key)
+                self.repository.abandon_clip_write_intent(intent.clip_id, reason="incomplete-write", deleted_at=self._now())
+                deleted += 1
+            known = set(self.repository.list_live_clip_storage_keys())
+            for storage_key in self.store.list_storage_keys():
+                if storage_key in known:
+                    continue
+                try:
+                    self.store.delete(storage_key)
+                except ValueError:
+                    self.store.delete_quarantined_legacy(storage_key)
+                self.repository.record_orphan_file_deletion(storage_key, deleted_at=self._now())
+                deleted += 1
+            return deleted
 
     def delete_clip(self, clip_id: str, *, authorized: bool) -> int:
         if not authorized:
@@ -121,6 +157,54 @@ class ClipRetentionService:
     def purge_consent_scope(self, consent_id: str, session_ids: tuple[str, ...]) -> None:
         del session_ids  # scope ownership is derived from the durable consent relation
         self._purge(consent_id=consent_id, reason="consent-revoked")
+
+
+class AsyncConsentGate:
+    """Non-blocking cache refreshed off-loop; durable writes still revalidate."""
+    def __init__(self, check: Callable[[], bool], *, initially_enabled: bool,
+                 refresh_seconds: float = .25, on_revoked: Callable[[], None] | None = None) -> None:
+        if not .01 <= refresh_seconds <= 5:
+            raise ValueError("consent refresh must be between 0.01 and 5 seconds")
+        self._check, self._active = check, initially_enabled
+        self._refresh_seconds, self._on_revoked = refresh_seconds, on_revoked
+        self._task: asyncio.Task | None = None
+
+    def allows_capture(self) -> bool:
+        return self._active
+
+    async def refresh_once(self) -> None:
+        if not self._active:
+            return
+        try:
+            active = bool(await asyncio.to_thread(self._check))
+        except Exception:
+            active = False
+        if not active:
+            self._active = False
+            if self._on_revoked is not None:
+                self._on_revoked()
+
+    async def _run(self) -> None:
+        try:
+            while self._active:
+                await self.refresh_once()
+                if self._active:
+                    await asyncio.sleep(self._refresh_seconds)
+        except asyncio.CancelledError:
+            raise
+
+    async def start(self) -> None:
+        if self._active and self._task is None:
+            self._task = asyncio.create_task(self._run())
+
+    async def aclose(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
 
 
 class RetentionSweeper:

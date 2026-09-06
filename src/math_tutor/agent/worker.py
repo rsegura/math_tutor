@@ -15,8 +15,8 @@ from math_tutor.agent.lifecycle import SpeechHandleTracker, StaticFallbackAudioP
 from math_tutor.infrastructure.dispatch import AGENT_NAME, DispatchMetadata
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
-from math_tutor.infrastructure.clip_retention import ClipRetentionService, RetentionSettings, RetentionSweeper
-from math_tutor.infrastructure.evidence_clips import AudioFrame, OpaqueClipStore, SessionAudioBuffers
+from math_tutor.infrastructure.clip_retention import AsyncConsentGate, ClipRetentionService, RetentionSettings, RetentionSweeper
+from math_tutor.infrastructure.evidence_clips import LiveAudioFrameSink, OpaqueClipStore, SessionAudioBuffers
 
 
 _RETENTION_RUNTIME_KEY = "math_tutor_retention_runtime"
@@ -37,10 +37,11 @@ class WorkerRetentionRuntime:
         repository = SQLiteTutoringRepository(database_path)
         settings = RetentionSettings.from_environment(env)
         service = ClipRetentionService(repository, OpaqueClipStore(settings.evidence_directory), settings)
-        return cls(repository, service, RetentionSweeper(service.sweep_expired, interval_seconds=settings.sweep_interval_seconds), settings)
+        return cls(repository, service, RetentionSweeper(service.maintenance, interval_seconds=settings.sweep_interval_seconds), settings)
 
     def startup_before_jobs(self) -> None:
-        self.service.sweep_expired()
+        self.service.reconcile_startup()
+        self.service.maintenance()
 
     async def start_periodic(self) -> None:
         if not self._started:
@@ -92,23 +93,28 @@ async def entrypoint(ctx: JobContext) -> None:
     clip_retention = process_runtime.service
     session_id = metadata.tutoring_session_id
     buffers = None
-    # No frame is allocated until the exact durable learner/session snapshot is
-    # revalidated. A failed check clears and permanently disables this session.
-    def buffer_authorized(candidate_session_id: str, at: datetime) -> bool:
-        snapshot_id = runtime.bootstrap.audio_consent_snapshot_id
-        return bool(snapshot_id and repository.authorize_session_clip_buffer(
-            learner_id=runtime.bootstrap.learner.learner_id,
-            session_id=candidate_session_id, snapshot_id=snapshot_id, at=at))
+    consent_gate = None
     async def close_retention() -> None:
         if buffers is not None:
             buffers.close_session(session_id)
+        if consent_gate is not None:
+            await consent_gate.aclose()
         await process_runtime.aclose()
     ctx.add_shutdown_callback(close_retention)
     # Exact durable reconstruction is deliberately before provider creation or room connection.
     runtime = build_tutoring_runtime(metadata=metadata, repository=repository, env=os.environ)
+    snapshot_id = runtime.bootstrap.audio_consent_snapshot_id
+    def durable_consent_check() -> bool:
+        return bool(snapshot_id and repository.authorize_session_clip_buffer(
+            learner_id=runtime.bootstrap.learner.learner_id,
+            session_id=session_id, snapshot_id=snapshot_id, at=datetime.now(timezone.utc)))
     buffers = SessionAudioBuffers(context_seconds=retention_settings.context_seconds,
         hard_cap_seconds=retention_settings.hard_cap_seconds, enabled=retention_settings.enabled,
-        authorize=buffer_authorized)
+        authorize=lambda candidate_session_id, at: bool(consent_gate and consent_gate.allows_capture()))
+    consent_gate = AsyncConsentGate(durable_consent_check,
+        initially_enabled=retention_settings.enabled and runtime.bootstrap.clip_capture_enabled,
+        on_revoked=lambda: buffers.disable_session(session_id))
+    await consent_gate.start()
     engine = BoundedConversationEngine(repository=repository, runtime=runtime, curricula_dir=Path(__file__).resolve().parents[1] / "curricula")
     stt, tts = create_voice_providers(runtime.providers)
     await ctx.connect()
@@ -116,17 +122,7 @@ async def entrypoint(ctx: JobContext) -> None:
     speech_handles = SpeechHandleTracker()
     session.on("speech_created", speech_handles.observe)
     session_id = runtime.bootstrap.session.session_id
-    def capture_frame(frame) -> None:
-        frame = getattr(frame, "frame", frame)
-        rate = getattr(frame, "sample_rate", 0)
-        samples = getattr(frame, "samples_per_channel", 0)
-        duration = float(samples) / float(rate) if rate and samples else float(getattr(frame, "duration", 0))
-        payload = bytes(getattr(frame, "data", b""))
-        channels = int(getattr(frame, "num_channels", 0) or getattr(frame, "channels", 0))
-        sample_width = int(getattr(frame, "sample_width", 2))
-        if payload and duration > 0 and rate and channels:
-            captured_at = datetime.now(timezone.utc) - __import__('datetime').timedelta(seconds=duration)
-            buffers.append(session_id, AudioFrame(payload, duration, captured_at, int(rate), channels, sample_width))
+    capture_frame = LiveAudioFrameSink(buffers, session_id, clock=lambda: datetime.now(timezone.utc))
     def persist_selection(turn_id: str, evidence_id: str) -> None:
         del turn_id
         clip_retention.persist_selected(evidence_id=evidence_id, learner_id=runtime.bootstrap.learner.learner_id,

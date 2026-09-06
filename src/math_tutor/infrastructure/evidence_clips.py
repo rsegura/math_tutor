@@ -40,7 +40,7 @@ class AudioFrame:
         if self.channels not in (1, 2) or self.sample_width != 2:
             raise ValueError("unsupported PCM layout")
         expected = self.duration_seconds * self.sample_rate * self.channels * self.sample_width
-        if abs(len(self.payload) - expected) > self.channels * self.sample_width:
+        if len(self.payload) % (self.channels * self.sample_width) or abs(len(self.payload) - expected) > self.channels * self.sample_width / 2:
             raise ValueError("audio duration does not match PCM metadata")
 
 
@@ -190,6 +190,24 @@ class SessionAudioBuffers:
             value.close()
 
 
+class LiveAudioFrameSink:
+    """Fast vendor-shape adapter; performs no network or database I/O."""
+    def __init__(self, buffers: SessionAudioBuffers, session_id: str, *, clock: Callable[[], datetime]) -> None:
+        self._buffers, self._session_id, self._clock = buffers, session_id, clock
+
+    def __call__(self, value) -> None:
+        frame = getattr(value, "frame", value)
+        rate = getattr(frame, "sample_rate", 0)
+        samples = getattr(frame, "samples_per_channel", 0)
+        channels = int(getattr(frame, "num_channels", 0) or getattr(frame, "channels", 0))
+        payload = bytes(getattr(frame, "data", b""))
+        if not payload or not rate or not samples or not channels:
+            return
+        duration = float(samples) / float(rate)
+        captured_at = self._clock() - timedelta(seconds=duration)
+        self._buffers.append(self._session_id, AudioFrame(payload, duration, captured_at, int(rate), channels, 2))
+
+
 class OpaqueClipStore:
     """Atomic storage confined to one directory and opaque identifiers."""
 
@@ -241,6 +259,9 @@ class OpaqueClipStore:
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("invalid quarantined clip storage key")
         candidate = self.root / relative
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+            return
         for parent in (candidate, *candidate.parents):
             if parent == self.root:
                 break
@@ -254,6 +275,14 @@ class OpaqueClipStore:
     def read(self, storage_key: str) -> bytes:
         path = self._path(storage_key)
         return path.read_bytes()
+
+    def list_storage_keys(self) -> tuple[str, ...]:
+        """Inventory regular, non-symlink files for startup reconciliation."""
+        values = []
+        for path in self.root.rglob("*"):
+            if path.is_file() or path.is_symlink():
+                values.append(path.relative_to(self.root).as_posix())
+        return tuple(sorted(values))
 
 
 def _normalize_pcm16(payload: bytes, source_rate: int, source_channels: int,

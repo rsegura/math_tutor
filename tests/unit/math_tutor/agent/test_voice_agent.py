@@ -7,6 +7,9 @@ from math_tutor.agent.lifecycle import SpeechHandleTracker, TerminalCloser
 from livekit.agents import Agent
 from livekit.agents.voice.events import SpeechCreatedEvent
 from livekit.agents.voice.speech_handle import SpeechHandle
+from livekit import rtc
+from datetime import datetime, timezone
+from math_tutor.infrastructure.evidence_clips import LiveAudioFrameSink, SessionAudioBuffers
 
 
 def test_low_confidence_turn_requests_confirmation_without_model_call():
@@ -126,6 +129,32 @@ async def test_clip_selection_callback_runs_only_after_committed_evidence_decisi
     value._pending=VoiceTurn("t","cuatro",.9,Event())
     assert await output(value.llm_node(chat("cuatro"),[],None)) == ["Bien"]
     assert selected == [("t","evidence-t")]
+
+
+async def test_actual_rtc_frames_cross_both_stt_and_tts_frame_sinks(monkeypatch):
+    frame = rtc.AudioFrame.create(8_000, 1, 80)
+    captured=[]
+    async def fake_stt(agent, audio, settings):
+        async for item in audio:
+            assert item is frame
+        if False: yield None
+    async def fake_tts(agent, text, settings):
+        yield frame
+    monkeypatch.setattr(Agent.default,"stt_node",fake_stt)
+    monkeypatch.setattr(Agent.default,"tts_node",fake_tts)
+    value=HarnessVoiceAgent(instructions="bounded",initial_prompt="Pregunta",decide=lambda turn:VoiceDecision(""),cancel=lambda:None,audio_frame_sink=captured.append)
+    async def input_audio(): yield frame
+    assert await output(value.stt_node(input_audio(),None)) == []
+    assert await output(value.tts_node("texto",None)) == [frame]
+    assert captured == [frame,frame]
+
+
+def test_actual_rtc_frame_sink_normalizes_without_repository_io():
+    now=datetime.now(timezone.utc)
+    buffers=SessionAudioBuffers(enabled=True,authorize=lambda session_id,at:True)
+    sink=LiveAudioFrameSink(buffers,"session",clock=lambda:now)
+    sink(rtc.AudioFrame.create(8_000,1,80))
+    assert buffers.buffered_duration("session") == .01
 
 
 async def test_tts_fallback_unwinds_node_before_explicit_handle_playout_and_close(monkeypatch):
