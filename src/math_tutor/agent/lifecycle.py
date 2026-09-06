@@ -13,6 +13,20 @@ FALLBACK_AUDIO_TRANSCRIPT_PATH = Path(__file__).parent / "assets" / "fallback_es
 _FRAME_SECONDS = 0.02
 
 
+class SpeechHandleTracker:
+    """Capture the exact scheduler handle for the latest agent reply."""
+    def __init__(self) -> None:
+        self._latest = None
+
+    def observe(self, event) -> None:
+        if getattr(event, "source", None) == "generate_reply" and not getattr(event, "user_initiated", True):
+            self._latest = getattr(event, "speech_handle", None)
+
+    def latest(self):
+        handle, self._latest = self._latest, None
+        return handle
+
+
 class StaticFallbackAudioPlayer:
     """Enqueue reviewed prerecorded audio without waiting inside ``tts_node``."""
     def __init__(self, session, path: Path = FALLBACK_AUDIO_PATH) -> None:

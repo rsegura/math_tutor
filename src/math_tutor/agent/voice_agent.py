@@ -90,7 +90,7 @@ class SilentLLM(livekit_llm.LLM):
 
 class HarnessVoiceAgent(Agent):
     """LiveKit transport adapter whose generated speech comes only from the harness."""
-    def __init__(self, *, instructions: str, initial_prompt: str, decide: Callable[[VoiceTurn], VoiceDecision], cancel: Callable[[], None], confidence_threshold: float = 0.65, tts_watchdog=None, initial_terminal_reason: str | None = None, force_stop: Callable[[str], None] | None = None, fallback_audio=None) -> None:
+    def __init__(self, *, instructions: str, initial_prompt: str, decide: Callable[[VoiceTurn], VoiceDecision], cancel: Callable[[], None], confidence_threshold: float = 0.65, tts_watchdog=None, initial_terminal_reason: str | None = None, force_stop: Callable[[str], None] | None = None, fallback_audio=None, terminal_handle: Callable[[], object | None] | None = None) -> None:
         super().__init__(instructions=instructions)
         self._decide = decide
         self._cancel = cancel
@@ -103,6 +103,7 @@ class HarnessVoiceAgent(Agent):
         self._initial_terminal_reason = initial_terminal_reason
         self._force_stop = force_stop
         self._fallback_audio = fallback_audio
+        self._terminal_handle = terminal_handle or (lambda: None)
         self._tts_fallback_started = False
         self._tts_terminal_pending = None
 
@@ -187,4 +188,4 @@ class HarnessVoiceAgent(Agent):
                 yield decision.speech
         finally:
             if decision.terminal and self._closer is not None:
-                self._closer.trigger(decision.reason)
+                self._closer.trigger(decision.reason, self._terminal_handle())

@@ -10,7 +10,7 @@ from livekit.plugins import silero
 
 from math_tutor.agent.runtime_factory import BoundedConversationEngine, build_tutoring_runtime, create_voice_providers
 from math_tutor.agent.voice_agent import HarnessVoiceAgent, SilentLLM
-from math_tutor.agent.lifecycle import StaticFallbackAudioPlayer, TTSWatchdog, TerminalCloser
+from math_tutor.agent.lifecycle import SpeechHandleTracker, StaticFallbackAudioPlayer, TTSWatchdog, TerminalCloser
 from math_tutor.infrastructure.dispatch import AGENT_NAME, DispatchMetadata
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
@@ -46,7 +46,9 @@ async def entrypoint(ctx: JobContext) -> None:
     stt, tts = create_voice_providers(runtime.providers)
     await ctx.connect()
     session = AgentSession(stt=stt, llm=SilentLLM(), tts=tts, vad=silero.VAD.load(), preemptive_generation=False)
-    agent = HarnessVoiceAgent(instructions=_instructions(runtime), initial_prompt=engine.initial_prompt, decide=engine.decide, cancel=engine.cancel, tts_watchdog=TTSWatchdog(), initial_terminal_reason=engine.startup_terminal_reason, force_stop=engine.force_stop, fallback_audio=StaticFallbackAudioPlayer(session))
+    speech_handles = SpeechHandleTracker()
+    session.on("speech_created", speech_handles.observe)
+    agent = HarnessVoiceAgent(instructions=_instructions(runtime), initial_prompt=engine.initial_prompt, decide=engine.decide, cancel=engine.cancel, tts_watchdog=TTSWatchdog(), initial_terminal_reason=engine.startup_terminal_reason, force_stop=engine.force_stop, fallback_audio=StaticFallbackAudioPlayer(session), terminal_handle=speech_handles.latest)
     closer = TerminalCloser(ctx, session)
     agent.bind_terminal_closer(closer)
     ctx.add_shutdown_callback(closer.aclose)

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from threading import Event
 
 from math_tutor.agent.voice_agent import HarnessVoiceAgent, TurnCoordinator, VoiceDecision, VoiceTurn
-from math_tutor.agent.lifecycle import TerminalCloser
+from math_tutor.agent.lifecycle import SpeechHandleTracker, TerminalCloser
 from livekit.agents import Agent
 
 
@@ -67,12 +67,30 @@ async def test_harness_agent_rejects_uncorrelated_and_low_confidence_turns_witho
 
 async def test_terminal_closer_triggers_when_terminal_yield_is_interrupted():
     reasons=[]; value=agent(lambda turn:VoiceDecision("Paramos",terminal=True,reason="stop"))
-    value.bind_terminal_closer(SimpleNamespace(trigger=lambda reason:reasons.append(reason)))
+    value.bind_terminal_closer(SimpleNamespace(trigger=lambda reason,handle=None:reasons.append(reason)))
     value._pending=VoiceTurn("t","quiero parar",.1,Event())
     node=value.llm_node(chat("quiero parar"),[],None)
     assert await anext(node) == "Paramos"
     await node.aclose()
     assert reasons == ["stop"]
+
+
+async def test_normal_terminal_speech_uses_scheduler_created_exact_handle_before_close():
+    order=[]; node_advanced=asyncio.Event()
+    class Handle:
+        async def wait_for_playout(self): await node_advanced.wait(); order.append("speech-complete")
+    handle=Handle(); tracker=SpeechHandleTracker()
+    tracker.observe(SimpleNamespace(source="generate_reply",user_initiated=False,speech_handle=handle))
+    class Session:
+        async def aclose(self): order.append("aclose")
+    async def delete(): order.append("delete")
+    closer=TerminalCloser(SimpleNamespace(delete_room=delete,shutdown=lambda **kw:None),Session(),grace_seconds=.1)
+    value=HarnessVoiceAgent(instructions="bounded",initial_prompt="Pregunta",decide=lambda turn:VoiceDecision("Paramos",terminal=True,reason="stop"),cancel=lambda:None,terminal_handle=tracker.latest)
+    value.bind_terminal_closer(closer); value._pending=VoiceTurn("t","quiero parar",.9,Event())
+    node=value.llm_node(chat("quiero parar"),[],None)
+    assert await anext(node) == "Paramos"
+    await node.aclose(); node_advanced.set(); await closer.aclose()
+    assert order == ["speech-complete","aclose","delete"]
 
 
 async def test_interrupted_harness_generation_cancels_authoritative_generation():
