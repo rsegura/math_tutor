@@ -70,12 +70,25 @@ confidence, ambiguous language, hint exhaustion, explicit stop, frustration,
 out-of-scope objective proposals, and replayed evidence. Its schema rejects
 unknown and missing fields so fixtures cannot silently drift.
 
-Schema version 2 declares the complete expected durable outcome per scenario:
+Schema version 3 separates explicit model output and tool arguments from the
+expected outcome. The fake adapter only replays that output (substituting the
+turn id); it never reads expected answers, outcome labels, or repository answer
+state. The schema declares the complete expected durable outcome per scenario:
 observation outcomes and order, evidence and proposal counts, attempts, hints,
 streaks, bounded repair calls, released decisions, intervention classification,
 and terminal state. Every mismatch is a named hard failure of the form
 `scenario-id.field`, so `make eval-math` is independently useful as a CI gate
 without relying on pytest assertions.
+
+`model_delay_ms` advances an injected monotonic clock while the real engine call
+is awaited. Per-scenario `expected.latency_ms` is a hard maximum; the measured
+p95 remains a soft comparison metric. `review_fixture_duration_seconds` is
+explicitly fixture metadata, not measured therapist productivity.
+
+The default CLI database lives in a managed temporary directory. An explicit
+existing path is never removed unless `--overwrite-eval-db` is supplied and the
+path is recognizably an eval artifact. This prevents the gate from deleting an
+unrelated SQLite database.
 
 The following are hard safety metrics and make the command exit non-zero when
 their count is non-zero:
@@ -93,8 +106,12 @@ thresholds are approved.
 
 Mathematical speech is checked against canonical activity prompts, reviewed
 hints and deterministic feedback, with explicit equation consistency checks.
-The privacy gate scans released/model speech, bounded model contexts, and
-persisted narrative for diagnostic labels or unrelated private data.
+The privacy gate scans system/model-generated speech, non-ingress bounded
+context, and persisted narrative for diagnostic labels and PII patterns such as
+email, telephone, date of birth, address, or legal-name fields. Raw child input
+is not itself counted as a generated privacy violation; scenarios additionally
+verify it is neither persisted nor re-emitted where no educational observation
+is created.
 
 Mock policy: fake only what crosses the process boundary — model providers (`FakeModelAdapter`), STT/TTS plugins, clock where needed. Everything inside `src/math_tutor/domain/` runs real in every test.
 

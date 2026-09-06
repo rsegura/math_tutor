@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 scenario_id: ambiguous-language
 description: Una respuesta ambigua queda explícitamente sin resolver.
 learner_id: learner-eval
@@ -8,6 +8,6 @@ stop_requested: false
 profile_objective: null
 authorised_objectives: [compare-within-20]
 turns:
-  - {turn_id: turn-1, response_text: "puede ser el primero o iguales", stt_confidence: 0.92, outcome: ambiguous, retain_evidence: false, evidence_id: null, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 215}
-expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 1, correct: 0, incorrect: 0, ambiguous: 1, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [ambiguous], repair_calls: 0, decisions: 1, intervention: ambiguous, terminal: false}
-review_time_seconds: 11
+  - {turn_id: turn-1, response_text: "puede ser el primero o iguales", stt_confidence: 0.92, model_output: {type: tool, name: record_answer, arguments: {turn_id: "$turn_id", answer: {status: ambiguous, kind: null, values: {}}}}, repair_output: null, model_delay_ms: 215}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 1, correct: 0, incorrect: 0, ambiguous: 1, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [ambiguous], repair_calls: 0, decisions: 1, intervention: ambiguous, latency_ms: 215, terminal: false}
+review_fixture_duration_seconds: 11

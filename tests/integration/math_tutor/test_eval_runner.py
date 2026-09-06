@@ -1,11 +1,13 @@
 from pathlib import Path
-import sqlite3
+import inspect
+from dataclasses import replace
 
 import pytest
 
 from evals.math_tutor.runner import (
     FaultAdapter,
     EvalScenarioError,
+    ProductionFakeModelAdapter,
     load_scenarios,
     run_evaluation,
 )
@@ -34,11 +36,64 @@ def test_offline_eval_catalog_is_strict_and_covers_required_behaviours(tmp_path)
     (tmp_path / "unknown.yaml").write_text(source + "unknown: true\n")
     with pytest.raises(EvalScenarioError, match="unknown field"):
         load_scenarios(tmp_path)
-
+    (tmp_path / "unknown.yaml").unlink()
     (tmp_path / "missing.yaml").write_text("schema_version: 1\n")
     with pytest.raises(EvalScenarioError, match="missing field"):
         load_scenarios(tmp_path)
 
+
+def test_fake_model_replays_explicit_fixture_without_oracle_or_repository_access():
+    source = inspect.getsource(ProductionFakeModelAdapter)
+    assert "expected" not in source
+    assert "_repository" not in source
+
+
+def test_unrelated_transcript_does_not_turn_explicit_wrong_arguments_into_correct_answer(tmp_path):
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "correct-answer")
+    turn = replace(scenario.turns[0], response_text="esto no contiene la respuesta")
+    wrong_output = dict(turn.model_output)
+    wrong_output["arguments"] = dict(wrong_output["arguments"])
+    wrong_output["arguments"]["answer"] = {
+        "status": "evaluable", "kind": "integer", "values": {"answer": 999}
+    }
+    turn = replace(turn, model_output=wrong_output)
+    report = run_evaluation((replace(scenario, turns=(turn,)),), database_path=tmp_path / "wrong.db")
+    assert report.durable_outcomes["correct-answer"].incorrect == 1
+    assert "correct-answer.correct" in report.hard_failures
+
+
+def test_existing_unrelated_database_is_never_overwritten(tmp_path):
+    path = tmp_path / "customer.db"
+    path.write_bytes(b"keep-me")
+    with pytest.raises(EvalScenarioError, match="already exists"):
+        run_evaluation(load_scenarios(SCENARIOS), database_path=path)
+    assert path.read_bytes() == b"keep-me"
+
+    safe_dir = tmp_path / "math-tutor-eval-reusable"
+    safe_dir.mkdir()
+    safe = safe_dir / "eval-artifact.sqlite3"
+    safe.write_bytes(b"old-eval")
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "frustration")
+    report = run_evaluation(
+        (scenario,), database_path=safe, overwrite_eval_db=True
+    )
+    assert report.exit_code == 0
+    assert safe.read_bytes() != b"old-eval"
+    with pytest.raises(EvalScenarioError, match="non-eval"):
+        run_evaluation(
+            load_scenarios(SCENARIOS), database_path=path, overwrite_eval_db=True
+        )
+    assert path.read_bytes() == b"keep-me"
+
+
+def test_sensitive_child_ingress_is_not_itself_a_privacy_violation(tmp_path):
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "frustration")
+    turn = replace(scenario.turns[0], response_text="mi correo es menor@example.com")
+    report = run_evaluation((replace(scenario, turns=(turn,)),), database_path=tmp_path / "ingress.db")
+    assert report.metrics.diagnostic_or_privacy_violations == 0
+    outcome = report.durable_outcomes["frustration"]
+    assert outcome.observations == 0
+    assert "menor@example.com" not in " ".join(outcome.released_speech + outcome.model_artifacts)
 
 def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     scenarios = load_scenarios(SCENARIOS)
@@ -56,10 +111,11 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     assert first.metrics.ignored_stops == 0
     assert first.metrics.evidence_coverage > 0
     assert first.metrics.latency_ms_p95 >= 0
-    assert first.metrics.review_time_seconds >= 0
+    assert first.metrics.review_fixture_duration_seconds >= 0
     assert set(first.metrics.intervention_ratings) == {
-        "appropriate",
-        "needs-review",
+        "ambiguous", "correct", "hint-cap-enforced", "incorrect",
+        "not-evaluable", "replay-deduplicated", "scope-rejected",
+        "self-correction-recorded", "stop-honoured", "supportive-social",
     }
     assert first.durable_outcomes["low-stt-confidence"].not_evaluable == 1
     assert first.durable_outcomes["low-stt-confidence"].evidence_count == 0
@@ -93,6 +149,16 @@ def test_any_versioned_expected_behaviour_mismatch_fails_the_cli_gate(tmp_path):
     )
     assert report.exit_code != 0
     assert "correct-answer.correct" in report.hard_failures
+
+
+def test_measured_latency_above_scenario_budget_is_a_hard_failure(tmp_path):
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "correct-answer")
+    scenario = replace(
+        scenario, expected=replace(scenario.expected, max_latency_ms=209)
+    )
+    report = run_evaluation((scenario,), database_path=tmp_path / "slow.db")
+    assert report.metrics.latency_ms_p95 == 210
+    assert "correct-answer.latency_budget_ms" in report.hard_failures
 
 
 @pytest.mark.parametrize(
@@ -148,6 +214,16 @@ def test_diagnostic_or_private_narrative_is_a_hard_failure(tmp_path):
         for outcome in report.durable_outcomes.values()
         for speech in outcome.model_artifacts
     )
+
+
+def test_generated_phone_and_email_leak_is_detected_without_diagnostic_words(tmp_path):
+    report = run_evaluation(
+        load_scenarios(SCENARIOS),
+        database_path=tmp_path / "pii.db",
+        faults=FaultAdapter(private_data_leak=True),
+    )
+    assert report.metrics.diagnostic_or_privacy_violations == 1
+    assert "diagnostic_or_privacy_violations" in report.hard_failures
 
 
 def test_eval_runner_never_uses_network_or_provider_secrets(tmp_path, monkeypatch):

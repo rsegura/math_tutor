@@ -25,7 +25,7 @@ class EvalMetrics:
     intervention_ratings: tuple[str, ...]
     evidence_coverage: float
     latency_ms_p95: int
-    review_time_seconds: int
+    review_fixture_duration_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +55,7 @@ class DurableOutcome:
     repair_calls: int
     decisions: int
     intervention: str
+    latency_ms: int
     released_speech: tuple[str, ...]
     model_artifacts: tuple[str, ...]
     terminal: bool

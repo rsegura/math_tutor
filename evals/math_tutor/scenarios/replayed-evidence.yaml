@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 scenario_id: replayed-evidence
 description: Repetir el mismo identificador de evidencia no duplica el hecho durable.
 learner_id: learner-eval
@@ -8,7 +8,7 @@ stop_requested: false
 profile_objective: null
 authorised_objectives: [add-within-20]
 turns:
-  - {turn_id: turn-1, response_text: "once", stt_confidence: 0.98, outcome: correct, retain_evidence: true, evidence_id: evidence-replay, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 200}
-  - {turn_id: turn-1, response_text: "once", stt_confidence: 0.98, outcome: correct, retain_evidence: true, evidence_id: evidence-replay, model_output: {type: tool, name: record_answer}, intervention_rating: appropriate, latency_ms: 200}
-expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 1, correct: 1, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 1, profile_proposals: 0, attempts_used: 1, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [correct], repair_calls: 0, decisions: 2, intervention: replay-deduplicated, terminal: false}
-review_time_seconds: 14
+  - {turn_id: turn-1, response_text: "once", stt_confidence: 0.98, model_output: {type: tool, name: record_answer, arguments: {turn_id: "$turn_id", answer: {status: evaluable, kind: integer, values: {answer: 9}}}}, repair_output: null, model_delay_ms: 200}
+  - {turn_id: turn-1, response_text: "once", stt_confidence: 0.98, model_output: {type: tool, name: record_answer, arguments: {turn_id: "$turn_id", answer: {status: evaluable, kind: integer, values: {answer: 9}}}}, repair_output: null, model_delay_ms: 200}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 1, correct: 1, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 1, profile_proposals: 0, attempts_used: 1, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [correct], repair_calls: 0, decisions: 2, intervention: replay-deduplicated, latency_ms: 200, terminal: false}
+review_fixture_duration_seconds: 14

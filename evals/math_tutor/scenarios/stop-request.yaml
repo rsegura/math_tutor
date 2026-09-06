@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 scenario_id: stop-request
 description: Una petición explícita de parar termina la sesión sin consultar al modelo real.
 learner_id: learner-eval
@@ -8,6 +8,6 @@ stop_requested: true
 profile_objective: null
 authorised_objectives: [add-within-20]
 turns:
-  - {turn_id: turn-1, response_text: "quiero parar", stt_confidence: 0.99, outcome: not-evaluable, retain_evidence: false, evidence_id: null, model_output: {type: tool, name: end_session}, intervention_rating: appropriate, latency_ms: 15}
-expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 0, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [], repair_calls: 0, decisions: 1, intervention: stop-honoured, terminal: true}
-review_time_seconds: 8
+  - {turn_id: turn-1, response_text: "quiero parar", stt_confidence: 0.99, model_output: {type: tool, name: end_session, arguments: {reason: stop-requested}}, repair_output: null, model_delay_ms: 15}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 0, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [], repair_calls: 0, decisions: 1, intervention: stop-honoured, latency_ms: 0, terminal: true}
+review_fixture_duration_seconds: 8
