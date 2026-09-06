@@ -58,7 +58,7 @@ class Queries:
         })()
     def list_next_objective_proposals(self,learner_id,source_session_id=None):
         at=datetime(2026,9,5,tzinfo=timezone.utc)
-        return (NextObjectiveProposal("next-1",learner_id,source_session_id,"plan-1",2,3,"add-within-10","Prerrequisito consolidado",("evidence-1",),ProposalDecisionStatus.PENDING,0,at,at),)
+        return (NextObjectiveProposal("next-1",learner_id,source_session_id,"plan-1",2,3,7,"add-within-10","Prerrequisito consolidado",("evidence-1",),ProposalDecisionStatus.PENDING,0,at,at),)
 
 
 class Summary:
@@ -134,7 +134,7 @@ def test_stale_undecided_next_objective_is_kept_in_history_not_actions():
     body=TestClient(app).get("/api/review/learners/learner-1/sessions/session-1",headers=HEADERS).json()
     assert body["next_objective_proposals"]==[]
     assert body["next_objective_history"][0]["status"]=="stale"
-    assert body["next_objective_history"][0]["decision_reason"]=="profile-version-superseded"
+    assert body["next_objective_history"][0]["decision_reason"]=="source-snapshot-superseded"
 
 
 def test_cross_owner_paths_fail_closed():
@@ -169,7 +169,7 @@ def test_next_objective_generation_and_decision_are_authenticated_strict_and_ver
     assert api.post(f"{base}/generate").status_code==401
     generated=api.post(f"{base}/generate",headers=HEADERS)
     assert generated.status_code==200 and generated.json()["status"]=="pending"
-    body={"command_id":"next-command","decision":"approved","reason":"Objetivo adecuado","expected_revision":0,"expected_plan_version":2,"expected_profile_version":3}
+    body={"command_id":"next-command","decision":"approved","reason":"Objetivo adecuado","expected_revision":0,"expected_plan_version":2,"expected_profile_version":3,"expected_learning_state_version":7}
     decided=api.post(f"{base}/next-1/decision",headers=HEADERS,json=body)
     assert decided.status_code==200 and decided.json()["status"]=="approved"
     assert api.post(f"{base}/next-1/decision",headers=HEADERS,json={**body,"extra":1}).status_code==422

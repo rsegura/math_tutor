@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Thread
@@ -56,7 +57,7 @@ def test_proposal_approval_is_atomic_idempotent_and_preserves_append_only_histor
     repo,curriculum,session=setup(tmp_path); service=NextObjectiveService(repo,curriculum)
     proposal=service.propose_available("learner-next",session.tutoring_session_id)
     assert proposal.objective_id=="number-sequence-within-20"
-    command=NextObjectiveDecision("approve-next",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Adecuado",0,1,1,datetime.now(timezone.utc))
+    command=NextObjectiveDecision("approve-next",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Adecuado",0,1,1,proposal.source_learning_state_version,datetime.now(timezone.utc))
     approved=service.decide(command)
     assert approved.status is ProposalDecisionStatus.APPROVED and approved.revision==1
     assert repo.load_current_provisioned_plan("learner-next").version==2
@@ -65,9 +66,9 @@ def test_proposal_approval_is_atomic_idempotent_and_preserves_append_only_histor
     history=repo.list_next_objective_decisions(proposal.proposal_id)
     assert [(item.revision,item.status,item.reason,item.resulting_plan_version) for item in history]==[(1,ProposalDecisionStatus.APPROVED,"Adecuado",2)]
     with pytest.raises(NextObjectiveError,match="command-id-collision"):
-        service.decide(NextObjectiveDecision("approve-next",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Otro",0,1,1,datetime.now(timezone.utc)))
+        service.decide(NextObjectiveDecision("approve-next",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Otro",0,1,1,proposal.source_learning_state_version,datetime.now(timezone.utc)))
     with pytest.raises(NextObjectiveError,match="command-id-collision"):
-        service.decide(NextObjectiveDecision("approve-next",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Adecuado",0,1,2,datetime.now(timezone.utc)))
+        service.decide(NextObjectiveDecision("approve-next",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Adecuado",0,1,2,proposal.source_learning_state_version,datetime.now(timezone.utc)))
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM next_objective_proposals").fetchone()[0]==1
         assert db.execute("SELECT COUNT(*) FROM next_objective_decisions").fetchone()[0]==1
@@ -75,14 +76,26 @@ def test_proposal_approval_is_atomic_idempotent_and_preserves_append_only_histor
         with pytest.raises(Exception): db.execute("DELETE FROM next_objective_decisions WHERE proposal_id=?",(proposal.proposal_id,))
 
 
+def test_learning_state_revision_tracks_authoritative_mutation_tables(tmp_path):
+    repo,_,_=setup(tmp_path)
+    assert repo.load_learning_state_version("learner-next")==4
+    with repo._connect() as db:
+        db.execute("UPDATE observations SET version=2 WHERE observation_id='observation-next'")
+        db.execute("INSERT INTO evidence_interpretations(evidence_id,version,interpretation,reason) VALUES(?,?,?,?)",("evidence-next",1,"Respuesta fiable","revisión"))
+    assert repo.load_learning_state_version("learner-next")==6
+    current=repo.load_estimate("learner-next","count-to-20")
+    repo.save_estimate(replace(current,version=current.version+1),expected_version=current.version)
+    assert repo.load_learning_state_version("learner-next")==7
+
+
 def test_reject_keeps_plan_and_concurrent_stale_decision_fails(tmp_path):
     repo,curriculum,session=setup(tmp_path); service=NextObjectiveService(repo,curriculum)
     proposal=service.propose_available("learner-next",session.tutoring_session_id)
-    rejected=service.decide(NextObjectiveDecision("reject-next",proposal.proposal_id,"learner-next",ProposalDecisionStatus.REJECTED,"Esperar",0,1,1,datetime.now(timezone.utc)))
+    rejected=service.decide(NextObjectiveDecision("reject-next",proposal.proposal_id,"learner-next",ProposalDecisionStatus.REJECTED,"Esperar",0,1,1,proposal.source_learning_state_version,datetime.now(timezone.utc)))
     assert rejected.status is ProposalDecisionStatus.REJECTED
     assert repo.load_current_provisioned_plan("learner-next").version==1
     with pytest.raises(NextObjectiveError,match="stale-proposal-revision"):
-        service.decide(NextObjectiveDecision("other",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Ahora",0,1,1,datetime.now(timezone.utc)))
+        service.decide(NextObjectiveDecision("other",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Ahora",0,1,1,proposal.source_learning_state_version,datetime.now(timezone.utc)))
 
 
 def test_profile_cas_blocks_approval_when_review_changes_evidence_after_validation(tmp_path):
@@ -93,7 +106,7 @@ def test_profile_cas_blocks_approval_when_review_changes_evidence_after_validati
         entered.set(); release.wait(5); return original(decision,new_plan)
     repo.commit_next_objective_decision=delayed
     outcome=[]
-    command=NextObjectiveDecision("racing-approval",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Adecuado",0,1,1,datetime.now(timezone.utc))
+    command=NextObjectiveDecision("racing-approval",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Adecuado",0,1,1,proposal.source_learning_state_version,datetime.now(timezone.utc))
     def approve():
         try: outcome.append(service.decide(command))
         except NextObjectiveError as error: outcome.append(error)
@@ -139,6 +152,47 @@ def test_profile_cas_blocks_proposal_created_after_generation_snapshot(tmp_path)
     assert str(outcome[0])=="stale-profile-version"
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM next_objective_proposals").fetchone()[0]==0
+
+
+def test_learning_state_cas_blocks_approval_when_harness_updates_estimate(tmp_path):
+    repo,curriculum,session=setup(tmp_path); other=SQLiteTutoringRepository(repo.database)
+    service=NextObjectiveService(repo,curriculum); proposal=service.propose_available("learner-next",session.tutoring_session_id)
+    entered,release=Event(),Event(); original=repo.commit_next_objective_decision
+    def delayed(decision,new_plan):
+        entered.set(); release.wait(5); return original(decision,new_plan)
+    repo.commit_next_objective_decision=delayed; outcome=[]
+    command=NextObjectiveDecision("learning-race",proposal.proposal_id,"learner-next",ProposalDecisionStatus.APPROVED,"Adecuado",0,1,1,proposal.source_learning_state_version,datetime.now(timezone.utc))
+    def approve():
+        try: outcome.append(service.decide(command))
+        except NextObjectiveError as error: outcome.append(error)
+    thread=Thread(target=approve); thread.start(); assert entered.wait(5)
+    current=other.load_estimate("learner-next","count-to-20")
+    other.save_estimate(replace(current,version=current.version+1),expected_version=current.version)
+    release.set(); thread.join(5)
+    assert len(outcome)==1 and isinstance(outcome[0],NextObjectiveError)
+    assert str(outcome[0])=="stale-learning-state"
+    assert repo.load_current_provisioned_plan("learner-next").version==1
+    assert repo.list_next_objective_decisions(proposal.proposal_id)==()
+    assert repo.load_next_objective_proposal(proposal.proposal_id).status is ProposalDecisionStatus.STALE
+
+
+def test_plan_cas_blocks_concurrent_creation_and_existing_proposal_becomes_stale(tmp_path):
+    repo,curriculum,session=setup(tmp_path); other=SQLiteTutoringRepository(repo.database)
+    service=NextObjectiveService(repo,curriculum); old=service.propose_available("learner-next",session.tutoring_session_id)
+    entered,release=Event(),Event(); original=repo.create_next_objective_proposal
+    def delayed(proposal):
+        entered.set(); release.wait(5); return original(proposal)
+    repo.create_next_objective_proposal=delayed; outcome=[]
+    def generate():
+        try: outcome.append(service.propose_available("learner-next",session.tutoring_session_id))
+        except NextObjectiveError as error: outcome.append(error)
+    thread=Thread(target=generate); thread.start(); assert entered.wait(5)
+    current=other.load_current_provisioned_plan("learner-next")
+    assert other.update_provisioned_plan(replace(current,plan=replace(current.plan,version=2)),expected_version=1)
+    release.set(); thread.join(5)
+    assert len(outcome)==1 and isinstance(outcome[0],NextObjectiveError)
+    assert str(outcome[0])=="stale-plan-version"
+    assert repo.load_next_objective_proposal(old.proposal_id).status is ProposalDecisionStatus.STALE
 
 
 def test_incremental_profile_version_migration_backfills_only_pending_proposals(tmp_path):

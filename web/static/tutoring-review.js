@@ -32,7 +32,7 @@ async function decideNext(item,decision) {
   const reason=document.querySelector("#reason").value.trim();
   if (!reason) { statusNode.textContent="Escribe un motivo para la decisión."; return; }
   try {
-    await request(`/api/review/learners/${encodeURIComponent(current.learner.learner_id)}/sessions/${encodeURIComponent(current.session_id)}/next-objective-proposals/${encodeURIComponent(item.proposal_id)}/decision`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({command_id:crypto.randomUUID(),decision,reason,expected_revision:item.revision,expected_plan_version:item.source_plan_version,expected_profile_version:item.source_profile_version})});
+    await request(`/api/review/learners/${encodeURIComponent(current.learner.learner_id)}/sessions/${encodeURIComponent(current.session_id)}/next-objective-proposals/${encodeURIComponent(item.proposal_id)}/decision`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({command_id:crypto.randomUUID(),decision,reason,expected_revision:item.revision,expected_plan_version:item.source_plan_version,expected_profile_version:item.source_profile_version,expected_learning_state_version:item.source_learning_state_version})});
     await showSession(current.learner.learner_id,current.session_id);
   } catch (_) { statusNode.textContent="La propuesta o el plan han cambiado. Recarga antes de decidir."; }
 }

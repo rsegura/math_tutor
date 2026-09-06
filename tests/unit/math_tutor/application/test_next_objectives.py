@@ -10,7 +10,7 @@ def objective(identifier, requires=()):
 
 
 class Repo:
-    def __init__(self): self.created=[]; self.state=CompetencyState.INDEPENDENT; self.profile_version=4; self.proposals={}; self.commits=[]
+    def __init__(self): self.created=[]; self.state=CompetencyState.INDEPENDENT; self.profile_version=4; self.learning_version=7; self.proposals={}; self.commits=[]
     def load_current_provisioned_plan(self, learner_id):
         plan=LearningPlan(learner_id,("count",),("count",),PresentationProfile.for_age(8),"plan",2)
         return ProvisionedPlan(plan,(),SessionLimits(10,3))
@@ -19,6 +19,7 @@ class Repo:
         estimate=SkillEstimate("learner","count",self.state,2,("evidence-1",),("observation-1",))
         return type("Aggregate",(),{"session":session,"estimates":(estimate,)})()
     def load_profile_version(self,learner_id): return self.profile_version
+    def load_learning_state_version(self,learner_id): return self.learning_version
     def create_next_objective_proposal(self, proposal): self.created.append(proposal); self.proposals[proposal.proposal_id]=proposal; return proposal
     def load_next_objective_proposal(self, proposal_id): return self.proposals.get(proposal_id)
     def commit_next_objective_decision(self, decision, plan): self.commits.append((decision,plan)); return replace(self.proposals[decision.proposal_id],status=decision.status,revision=1,updated_at=decision.decided_at)
@@ -31,6 +32,7 @@ def test_deterministic_producer_only_proposes_unlocked_catalog_objectives_with_e
     assert proposal.evidence_ids==("evidence-1",)
     assert proposal.status is ProposalDecisionStatus.PENDING
     assert proposal.source_profile_version==4
+    assert proposal.source_learning_state_version==7
     assert repo.created==[proposal]
 
 
@@ -43,12 +45,12 @@ def test_producer_does_not_propose_when_prerequisites_are_not_independent():
 def test_approval_adds_objective_in_new_plan_version_but_rejection_does_not():
     repo=Repo(); catalog=CurriculumCatalog((objective("count"),objective("place",("count",))))
     service=NextObjectiveService(repo,catalog); proposal=service.propose_available("learner","session")
-    approved=service.decide(NextObjectiveDecision("cmd",proposal.proposal_id,"learner",ProposalDecisionStatus.APPROVED,"Adecuado",0,2,4,datetime.now(timezone.utc)))
+    approved=service.decide(NextObjectiveDecision("cmd",proposal.proposal_id,"learner",ProposalDecisionStatus.APPROVED,"Adecuado",0,2,4,7,datetime.now(timezone.utc)))
     assert approved.status is ProposalDecisionStatus.APPROVED
     assert repo.commits[0][1].version==3
     assert repo.commits[0][1].plan.authorised_objective_ids==("count","place")
     repo=Repo(); service=NextObjectiveService(repo,catalog); proposal=service.propose_available("learner","session")
-    service.decide(NextObjectiveDecision("cmd-r",proposal.proposal_id,"learner",ProposalDecisionStatus.REJECTED,"Aún no",0,2,4,datetime.now(timezone.utc)))
+    service.decide(NextObjectiveDecision("cmd-r",proposal.proposal_id,"learner",ProposalDecisionStatus.REJECTED,"Aún no",0,2,4,7,datetime.now(timezone.utc)))
     assert repo.commits[0][1] is None
 
 
@@ -57,6 +59,6 @@ def test_decision_rejects_stale_plan_and_cross_owner():
     service=NextObjectiveService(repo,catalog); proposal=service.propose_available("learner","session")
     for learner,version in (("other",2),("learner",1)):
         with pytest.raises(NextObjectiveError):
-            service.decide(NextObjectiveDecision("cmd",proposal.proposal_id,learner,ProposalDecisionStatus.APPROVED,"Motivo",0,version,4,datetime.now(timezone.utc)))
+            service.decide(NextObjectiveDecision("cmd",proposal.proposal_id,learner,ProposalDecisionStatus.APPROVED,"Motivo",0,version,4,7,datetime.now(timezone.utc)))
 from dataclasses import replace
 from datetime import datetime, timezone
