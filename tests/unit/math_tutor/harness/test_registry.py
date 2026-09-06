@@ -7,6 +7,8 @@ from math_tutor.application.service import CanonicalHintResult, RecordAnswerResu
 from math_tutor.domain.evidence import ObservationOutcome
 from math_tutor.domain.activities import AnswerInputStatus
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
+from math_tutor.domain.activities import Activity, StructuredAnswer
+from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.harness.contracts import ToolName, ToolProposal
 from math_tutor.harness.context import ActivityContext, LearnerState, TurnEvidence, build_harness_context
 from math_tutor.harness.limits import HarnessLimits
@@ -26,7 +28,13 @@ class CapturingService:
         return self._apply(command, RecordAnswerResult(check, ObservationOutcome.CORRECT))
 
     def commit_hint(self, command): return self._apply(command, CanonicalHintResult(command.hint_id, "Pista uno"))
-    def select_next_activity(self, command): return self._apply(command)
+    def select_next_activity(self, command):
+        return self._apply(command, Activity(
+            command.template_id, command.objective_id, command.difficulty,
+            "Pregunta canónica nueva", {"number": 24},
+            StructuredAnswer.evaluable(ExpectedAnswerKind.INTEGER, {"answer": 4}),
+            (), (),
+        ))
     def propose_profile_change(self, command): return self._apply(command, "proposal")
     def stop_now(self, command): return self._apply(command)
 
@@ -99,6 +107,18 @@ def test_adaptation_moves_one_step_and_stays_inside_active_objectives(context):
 
     with pytest.raises(ToolRejected, match="arguments-invalid"):
         registry.execute(ToolProposal(ToolName.ADAPT_DIFFICULTY, {"objective_id": "units-tens", "difficulty": 3, "seed": 1.5, "activity_id": "next"}), context)
+
+
+def test_adaptation_releases_the_new_canonical_activity_prompt(context):
+    result = PedagogicalToolRegistry(CapturingService(), HarnessLimits()).execute(
+        ToolProposal(ToolName.ADAPT_DIFFICULTY, {
+            "objective_id": "units-tens", "difficulty": 3,
+            "seed": 7, "activity_id": "next",
+        }),
+        context,
+    )
+
+    assert result.speech == "Pregunta canónica nueva"
 
 
 def test_skill_update_only_calls_proposal_service(context):

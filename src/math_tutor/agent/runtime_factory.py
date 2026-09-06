@@ -4,17 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Mapping
+import asyncio
 
 from math_tutor.infrastructure.dispatch import DispatchMetadata, VoiceBootstrap
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.application.service import EndSession, PedagogicalMutationPolicy, SelectNextActivity, TutoringService
 from math_tutor.application.session_runtime import SessionRuntime
-from math_tutor.domain.evidence import TranscriptionReliabilityPolicy
+from math_tutor.domain.evidence import ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import AssistanceThreshold, CompetencyState, ProgressionPolicy
 from math_tutor.harness.context import ActivityContext, LearnerState, TurnEvidence, build_harness_context
+from math_tutor.harness.contracts import ToolName
 from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.loop import PedagogicalHarness
 from math_tutor.harness.registry import PedagogicalToolRegistry, SessionCapExceeded
@@ -51,6 +54,8 @@ class ProviderSettings:
     tts_model: str
     tts_voice_id: str
     tts_api_key: str
+    llm_first_response_seconds: float = 4.0
+    llm_total_seconds: float = 10.0
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> "ProviderSettings":
@@ -61,10 +66,19 @@ class ProviderSettings:
         for field, supported in _SUPPORTED.items():
             if values[field] not in supported:
                 raise ProviderConfigError(f"unsupported {field}: {values[field]!r}")
+        first, total = (_deadline(env, "LLM_FIRST_RESPONSE_SECONDS", 4.0), _deadline(env, "LLM_TOTAL_SECONDS", 10.0))
+        if first > total: raise ProviderConfigError("LLM first response deadline must not exceed total deadline")
         return cls(*(values[name] for name in (
             "STT_PROVIDER", "STT_MODEL", "STT_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY",
             "TTS_PROVIDER", "TTS_MODEL", "TTS_VOICE_ID", "TTS_API_KEY",
-        )))
+        )), first, total)
+
+
+def _deadline(env: Mapping[str,str], name: str, default: float) -> float:
+    try: value=float(env.get(name,str(default)))
+    except (TypeError,ValueError): raise ProviderConfigError(f"{name} must be numeric") from None
+    if not 2 <= value <= 15: raise ProviderConfigError(f"{name} must be between 2 and 15 seconds")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,12 +117,14 @@ def create_voice_providers(settings: ProviderSettings):
 
 class OpenAIHarnessAdapter:
     """Unstructured provider output; the bounded harness validates and repairs it."""
-    def __init__(self, *, api_key: str, model: str, client=None) -> None:
+    def __init__(self, *, api_key: str, model: str, client=None, first_response_seconds: float = 4.0) -> None:
+        if not 2 <= first_response_seconds <= 15: raise ProviderConfigError("LLM first response deadline must be between 2 and 15 seconds")
         if client is None:
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key, max_retries=0)
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=api_key, max_retries=0)
         self._client = client
         self._model = model
+        self._first_response_seconds = first_response_seconds
 
     @staticmethod
     def _tools(context) -> list[dict[str, object]]:
@@ -143,7 +159,7 @@ class OpenAIHarnessAdapter:
         # exact schemas guide generation and the harness remains authoritative.
         return [{"type":"function","name":name,"description":"Acción pedagógica validada por el harness.","parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":False},"strict":False} for name,(properties,required) in schemas.items()]
 
-    def complete(self, *, prompt: str, context, repair: bool, validation_error: str | None = None) -> object:
+    async def complete(self, *, prompt: str, context, repair: bool, validation_error: str | None = None) -> object:
         tools = self._tools(context)
         compact = {
             "turn_id": context.current_turn.turn_id,
@@ -165,13 +181,8 @@ class OpenAIHarnessAdapter:
             "validation_error": None if validation_error is None else {"code":validation_error},
             "allowed_contract": {tool["name"]: tool["parameters"] for tool in tools},
         }
-        response = self._client.responses.create(
-            model=self._model,
-            input=[{"role":"system","content":prompt},{"role":"user","content":json.dumps(compact, ensure_ascii=False)}],
-            tools=tools,
-            tool_choice="auto",
-            parallel_tool_calls=False,
-        )
+        async with asyncio.timeout(self._first_response_seconds):
+            response = await self._client.responses.create(model=self._model,input=[{"role":"system","content":prompt},{"role":"user","content":json.dumps(compact, ensure_ascii=False)}],tools=tools,tool_choice="auto",parallel_tool_calls=False)
         calls = [item for item in getattr(response, "output", ()) if getattr(item, "type", None) == "function_call"]
         if calls:
             if len(calls) != 1 or calls[0].name not in {tool["name"] for tool in tools}:
@@ -216,8 +227,9 @@ class BoundedConversationEngine:
             self._harness = None
             return
         self._ensure_initial_activity()
-        model = model or OpenAIHarnessAdapter(api_key=runtime.providers.llm_api_key, model=runtime.providers.llm_model)
+        model = model or OpenAIHarnessAdapter(api_key=runtime.providers.llm_api_key, model=runtime.providers.llm_model, first_response_seconds=runtime.providers.llm_first_response_seconds)
         self._harness = PedagogicalHarness(model, PedagogicalToolRegistry(self._service, limits, guard=self._runtime_cap_reason), limits)
+        self._llm_total_seconds = runtime.providers.llm_total_seconds
 
     def _runtime_cap_reason(self) -> str | None:
         return self._cap_reason(self._repository.load_session_aggregate(self._bootstrap.session.session_id))
@@ -289,10 +301,58 @@ class BoundedConversationEngine:
     def cancel(self) -> None:
         self._runtime.cancel_generation(self._bootstrap.session.session_id)
 
-    def decide(self, turn: VoiceTurn) -> VoiceDecision:
+    def _next_activity_after_correct(self, *, turn_id: str, source_activity_id: str, source_activity) -> str:
+        """Persist and return the reviewed follow-up selected from trusted state."""
+        session_id = self._bootstrap.session.session_id
+        transition_key = f"{session_id}:{source_activity.template_id}:{turn_id}"
+        digest = sha256(transition_key.encode("utf-8")).hexdigest()
+        activity_id = f"activity-{digest[:16]}"
+        existing = self._repository.load_activity(session_id, activity_id)
+        if existing is not None:
+            return existing.prompt_es
+        state = self._repository.load_state(session_id)
+        if state is None or state.session.ended:
+            raise RuntimeError("session is no longer active")
+        generation = self._runtime.start_generation(session_id)
+        result = self._service.select_next_activity(SelectNextActivity(
+            command_id=f"follow-up:{digest}", session_id=session_id,
+            expected_session_version=state.session.version,
+            expected_profile_version=state.profile_version,
+            generation_id=generation.generation_id,
+            activity_id=activity_id,
+            source_activity_id=source_activity_id,
+            objective_id=source_activity.objective_id,
+            template_id=source_activity.template_id,
+            seed=int(digest[16:24], 16),
+            difficulty=source_activity.difficulty,
+        ))
+        if getattr(result.status, "value", None) not in {"applied", "replayed"}:
+            raise RuntimeError(f"follow-up activity rejected: {result.reason}")
+        if not hasattr(result.payload, "prompt_es"):
+            raise RuntimeError("follow-up activity has no canonical prompt")
+        return result.payload.prompt_es
+
+    async def decide(self, turn: VoiceTurn) -> VoiceDecision:
         aggregate = self._repository.load_session_aggregate(self._bootstrap.session.session_id)
         if aggregate is None or aggregate.session.ended:
             raise RuntimeError("session is no longer active")
+        prior_observation = self._repository.load_observation(
+            aggregate.session.session_id, f"obs-{turn.turn_id}"
+        )
+        if (
+            prior_observation is not None
+            and prior_observation.observation.outcome is ObservationOutcome.CORRECT
+        ):
+            source_id = prior_observation.observation.activity_id
+            source = self._repository.load_activity(aggregate.session.session_id, source_id)
+            if source is None:
+                raise RuntimeError("recorded answer activity is missing")
+            next_prompt = self._next_activity_after_correct(
+                turn_id=turn.turn_id,
+                source_activity_id=source_id,
+                source_activity=source,
+            )
+            return VoiceDecision(f"Sí, esa respuesta es correcta. {next_prompt}")
         cap = self._cap_reason(aggregate)
         if cap is not None:
             self._stop(cap)
@@ -320,13 +380,28 @@ class BoundedConversationEngine:
             max_activities=self._bootstrap.plan.limits.max_activities, activities_used=len(aggregate.activities),
         )
         try:
-            decision = self._harness.run(context, stop_requested=is_stop_request(turn.text))
+            decision = await self._harness.run_async(context, stop_requested=is_stop_request(turn.text), total_seconds=self._llm_total_seconds)
         except SessionCapExceeded as error:
             self._stop(str(error))
             return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=str(error))
+        except asyncio.CancelledError:
+            self.cancel()
+            raise
+        except Exception:
+            self.cancel()
+            reason = self._runtime_cap_reason() or "llm-provider-unavailable"
+            self._stop(reason)
+            return VoiceDecision("No puedo continuar ahora. Terminamos por hoy.",terminal=True,reason=reason)
         cap = self._runtime_cap_reason()
         if cap is not None:
             self._stop(cap)
             return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=cap)
+        if decision.applied_tool is ToolName.RECORD_ANSWER and decision.reason == "answer-correct":
+            next_prompt = self._next_activity_after_correct(
+                turn_id=turn.turn_id,
+                source_activity_id=activity_id,
+                source_activity=activity,
+            )
+            return VoiceDecision(f"{decision.speech} {next_prompt}")
         speech = "De acuerdo, paramos aquí." if decision.terminal else (decision.speech or "Vamos paso a paso.")
         return VoiceDecision(speech, terminal=decision.terminal, reason="stop-requested" if decision.terminal else decision.reason)

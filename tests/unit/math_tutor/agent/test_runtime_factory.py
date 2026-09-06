@@ -1,4 +1,5 @@
 import json
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +12,7 @@ from math_tutor.harness.contracts import ToolName
 
 class Responses:
     def __init__(self, response): self.response=response; self.calls=[]
-    def create(self, **kwargs): self.calls.append(kwargs); return self.response
+    async def create(self, **kwargs): self.calls.append(kwargs); return self.response
 
 
 def context():
@@ -24,10 +25,11 @@ def context():
     )
 
 
-def test_adapter_sends_exact_bounded_tool_contract_and_canonical_answer_shape():
+@pytest.mark.asyncio
+async def test_adapter_sends_exact_bounded_tool_contract_and_canonical_answer_shape():
     output=SimpleNamespace(output=[SimpleNamespace(type="function_call",name="record_answer",arguments=json.dumps({"turn_id":"turn-1","answer":{"status":"evaluable","kind":"integer-pair","values":{"tens":3,"units":2}}}))],output_text="")
     responses=Responses(output); adapter=OpenAIHarnessAdapter(api_key="x",model="pinned",client=SimpleNamespace(responses=responses))
-    result=adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
+    result=await adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
     assert result["arguments"]["answer"]["kind"] == "integer-pair"
     assert _parse(result).name is ToolName.RECORD_ANSWER
     call=responses.calls[0]
@@ -42,19 +44,21 @@ def test_adapter_sends_exact_bounded_tool_contract_and_canonical_answer_shape():
     assert sent["session_limits"] == {"duration_minutes":10,"max_activities":4}
 
 
-def test_repair_request_contains_validation_error_and_same_allowed_contract():
+@pytest.mark.asyncio
+async def test_repair_request_contains_validation_error_and_same_allowed_contract():
     response=SimpleNamespace(output=[],output_text='{"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}')
     responses=Responses(response); adapter=OpenAIHarnessAdapter(api_key="x",model="pinned",client=SimpleNamespace(responses=responses))
-    adapter.complete(prompt="repair",context=context(),repair=True,validation_error="structured-answer-invalid")
+    await adapter.complete(prompt="repair",context=context(),repair=True,validation_error="structured-answer-invalid")
     call=responses.calls[0]
     assert "structured-answer-invalid" in call["input"][1]["content"]
     assert "allowed_contract" in call["input"][1]["content"]
 
 
-def test_adapter_rejects_unstructured_or_unknown_function_output():
+@pytest.mark.asyncio
+async def test_adapter_rejects_unstructured_or_unknown_function_output():
     response=SimpleNamespace(output=[SimpleNamespace(type="function_call",name="invented",arguments="{}")],output_text="")
     adapter=OpenAIHarnessAdapter(api_key="x",model="pinned",client=SimpleNamespace(responses=Responses(response)))
-    with pytest.raises(ValueError): adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
+    with pytest.raises(ValueError): await adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
 
 
 def test_record_answer_schema_has_evaluable_and_empty_uncertain_branches():
@@ -70,11 +74,29 @@ def test_record_answer_schema_has_evaluable_and_empty_uncertain_branches():
     assert uncertain["properties"]["values"] == {"type":"object","properties":{},"required":[],"additionalProperties":False}
 
 
-def test_adapter_roundtrips_empty_ambiguous_answer_contract():
+@pytest.mark.asyncio
+async def test_adapter_roundtrips_empty_ambiguous_answer_contract():
     payload={"turn_id":"turn-1","answer":{"status":"ambiguous","kind":None,"values":{}}}
     output=SimpleNamespace(output=[SimpleNamespace(type="function_call",name="record_answer",arguments=json.dumps(payload))],output_text="")
     adapter=OpenAIHarnessAdapter(api_key="x",model="pinned",client=SimpleNamespace(responses=Responses(output)))
-    result=adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
+    result=await adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
     proposal=_parse(result)
     assert proposal.name is ToolName.RECORD_ANSWER
     assert proposal.arguments["answer"] == payload["answer"]
+
+
+@pytest.mark.asyncio
+async def test_adapter_timeout_and_caller_cancellation_abort_underlying_request():
+    cancelled=[]
+    class Blocked:
+        async def create(self,**kwargs):
+            try: await asyncio.Event().wait()
+            finally: cancelled.append(True)
+    adapter=OpenAIHarnessAdapter(api_key="x",model="pinned",client=SimpleNamespace(responses=Blocked()))
+    adapter._first_response_seconds=.01
+    with pytest.raises(TimeoutError): await adapter.complete(prompt="system",context=context(),repair=False)
+    assert cancelled == [True]
+    task=asyncio.create_task(adapter.complete(prompt="system",context=context(),repair=False))
+    await asyncio.sleep(0); task.cancel()
+    with pytest.raises(asyncio.CancelledError): await task
+    assert cancelled == [True,True]

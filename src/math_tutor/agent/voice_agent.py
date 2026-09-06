@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from threading import Event
 from typing import Callable
 import asyncio
+import inspect
 import unicodedata
 
 from livekit.agents import Agent, stt
@@ -171,7 +172,7 @@ class HarnessVoiceAgent(Agent):
             return
         if is_stop_request(turn.text):
             try:
-                decision = await asyncio.to_thread(self._decide, turn)
+                value = self._decide(turn); decision = await value if inspect.isawaitable(value) else value
             except asyncio.CancelledError:
                 self._cancel()
                 raise
@@ -179,7 +180,7 @@ class HarnessVoiceAgent(Agent):
             decision = VoiceDecision(CONFIRMATION_ES, needs_confirmation=True, reason="low-stt-confidence")
         else:
             try:
-                decision = await asyncio.to_thread(self._decide, turn)
+                value = self._decide(turn); decision = await value if inspect.isawaitable(value) else value
             except asyncio.CancelledError:
                 self._cancel()
                 raise

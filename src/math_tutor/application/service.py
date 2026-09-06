@@ -389,18 +389,24 @@ class TutoringService:
             if source_activity.template_id != command.template_id:
                 return self._rejected(command, "source-template-mismatch")
             progress, existed = self._progress(state, source_id, source_activity.difficulty)
-            if command.difficulty - progress.difficulty not in (-1, 1):
+            difficulty_step = command.difficulty - progress.difficulty
+            if difficulty_step not in (-1, 0, 1):
                 return self._rejected(command, "difficulty-step-must-be-one")
-            repeated = progress.consecutive_correct if command.difficulty > progress.difficulty else progress.consecutive_incorrect
-            if repeated < self._pedagogical_policy.min_repeated_outcomes_for_adaptation:
-                return self._rejected(command, "insufficient-repeated-evidence")
+            if difficulty_step == 0:
+                if progress.consecutive_correct < 1:
+                    return self._rejected(command, "correct-answer-required")
+                reason = "correct-answer"
+            else:
+                repeated = progress.consecutive_correct if difficulty_step > 0 else progress.consecutive_incorrect
+                if repeated < self._pedagogical_policy.min_repeated_outcomes_for_adaptation:
+                    return self._rejected(command, "insufficient-repeated-evidence")
+                reason = "repeated-correct" if difficulty_step > 0 else "repeated-incorrect"
             consumed_progress, expected_progress = self._progress_changes(
                 progress,
                 existed,
                 consecutive_correct=0,
                 consecutive_incorrect=0,
             )
-            reason = "repeated-correct" if command.difficulty > progress.difficulty else "repeated-incorrect"
         else:
             consumed_progress, expected_progress, reason = None, (), "initial-selection"
         try:
@@ -410,7 +416,7 @@ class TutoringService:
         session = replace(state.session, version=state.session.version + 1)
         next_progress = ActivityProgress(
             command.activity_id, 0, 0, activity.difficulty,
-            version=progress.version + 1 if source_id is not None else 1,
+            version=1,
         )
         progress_changes = (
             (consumed_progress, next_progress)

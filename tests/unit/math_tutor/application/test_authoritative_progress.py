@@ -84,7 +84,7 @@ def test_repeated_authoritative_evidence_allows_exactly_one_difficulty_step_and_
     result = service(repo, runtime).select_next_activity(command(SelectNextActivity, source_activity_id="activity-1", objective_id="units-tens", template_id="place-value-units-count", seed=1, difficulty=2, activity_id="new"))
     assert result.status is CommandStatus.APPLIED
     assert repo.batches[-1].expected_activity_progress[0].version == 3
-    assert repo.batches[-1].activity_progress[-1].version == 4
+    assert repo.batches[-1].activity_progress[-1].version == 1
     assert repo.batches[-1].events[-1].detail.endswith("repeated-correct:1->2")
 
 

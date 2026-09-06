@@ -13,12 +13,14 @@ from typing import Any
 
 from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, ProvisioningConflict, StoredCommandResult, StoredObservation)
 from math_tutor.application.results import CommandResult, CommandStatus
+from math_tutor.application.service import CanonicalHintResult, RecordAnswerResult
 from math_tutor.application.review import CorrectSkillEstimateReview, DiscardEvidenceReview, ProfileRecalculation, ReviewCommandIdentity, ReviewMutation, ReviewResult, ReviewStatus
 from math_tutor.application.summary import SessionSummarySource, SummaryActivityRef
 from math_tutor.domain.activities import Activity, AnswerInputStatus, StructuredAnswer
 from math_tutor.domain.evidence import EvidenceRecord, EvidenceRevision, Observation, ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import CompetencyState, LearningPlan, LearningSession, PresentationProfile, ProposedProfileChange, SkillEstimate
 from math_tutor.domain.templates import ExpectedAnswerKind
+from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.domain.audio_consent import AudioConsent
 from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits
 from math_tutor.infrastructure.dispatch import VoiceBootstrap, VoiceBootstrapError, verify_join_code
@@ -91,6 +93,9 @@ class SessionAggregate:
 
 _WIRE_TYPES = {
     "command-result/v1": CommandResult,
+    "record-answer-result/v1": RecordAnswerResult,
+    "canonical-hint-result/v1": CanonicalHintResult,
+    "answer-check/v1": AnswerCheck,
     "activity/v1": Activity,
     "structured-answer/v1": StructuredAnswer,
     "learning-plan/v1": LearningPlan,
@@ -108,6 +113,7 @@ _WIRE_TYPES = {
 }
 _WIRE_ENUMS = {
     "command-status/v1": CommandStatus,
+    "answer-outcome/v1": AnswerOutcome,
     "answer-input-status/v1": AnswerInputStatus,
     "expected-answer-kind/v1": ExpectedAnswerKind,
     "observation-outcome/v1": ObservationOutcome,

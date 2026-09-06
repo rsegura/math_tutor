@@ -109,11 +109,11 @@ async def test_tracker_accepts_real_livekit_generate_reply_for_both_origins_and_
 
 
 async def test_interrupted_harness_generation_cancels_authoritative_generation():
-    entered=Event(); release=Event(); cancellations=[]
-    def decide(turn): entered.set(); release.wait(1); return VoiceDecision("late")
+    entered=asyncio.Event(); release=asyncio.Event(); cancellations=[]
+    async def decide(turn): entered.set(); await release.wait(); return VoiceDecision("late")
     value=agent(decide,lambda:cancellations.append(True)); value._pending=VoiceTurn("t","uno",.9,Event())
     task=asyncio.create_task(anext(value.llm_node(chat("uno"),[],None)))
-    await asyncio.to_thread(entered.wait,1)
+    await asyncio.wait_for(entered.wait(),1)
     task.cancel()
     with __import__('pytest').raises(asyncio.CancelledError): await task
     release.set()

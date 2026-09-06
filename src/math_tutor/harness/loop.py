@@ -1,5 +1,7 @@
 """One-turn bounded orchestration around a probabilistic model."""
 from collections.abc import Mapping
+import asyncio
+import inspect
 from math_tutor.harness.context import HarnessContext
 from math_tutor.harness.contracts import ConversationReply, HarnessDecision, SpeechKind, ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
@@ -58,3 +60,22 @@ class PedagogicalHarness:
                 last_error = exc
         assert last_error is not None
         raise HarnessBudgetExceeded("model-call-budget-exhausted") from last_error
+
+    async def run_async(self, context: HarnessContext, *, stop_requested: bool=False, total_seconds: float = 10.0) -> HarnessDecision:
+        if not 2 <= total_seconds <= 15: raise ValueError("LLM total deadline must be between 2 and 15 seconds")
+        if stop_requested: return self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason":"stop-requested"}), context)
+        async with asyncio.timeout(total_seconds):
+            last_error = None
+            for call_index in range(self._limits.max_model_calls):
+                try:
+                    value = self._model.complete(prompt=REPAIR_PROMPT if call_index else SYSTEM_PROMPT,context=context,repair=bool(call_index),validation_error=None if last_error is None else str(last_error))
+                    output = await value if inspect.isawaitable(value) else value
+                    action = _parse(output)
+                    if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
+                    try: return self._registry.execute(action, context)
+                    except ToolRejected as exc:
+                        if exc.crossed_fence: raise
+                        last_error = exc
+                except ToolRejected: raise
+                except ValueError as exc: last_error = exc
+            raise HarnessBudgetExceeded("model-call-budget-exhausted") from last_error

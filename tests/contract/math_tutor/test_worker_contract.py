@@ -33,6 +33,17 @@ def test_provider_configuration_is_explicit_and_has_no_fallback():
         })
 
 
+def test_llm_deadlines_are_short_configurable_and_strict():
+    env={
+        "STT_PROVIDER":"deepgram", "STT_MODEL":"m", "STT_API_KEY":"k",
+        "LLM_PROVIDER":"openai", "LLM_MODEL":"m", "LLM_API_KEY":"k",
+        "TTS_PROVIDER":"elevenlabs", "TTS_MODEL":"m", "TTS_VOICE_ID":"v", "TTS_API_KEY":"k",
+    }
+    assert (ProviderSettings.from_environment(env).llm_first_response_seconds,ProviderSettings.from_environment(env).llm_total_seconds) == (4,10)
+    with pytest.raises(ProviderConfigError): ProviderSettings.from_environment(env|{"LLM_FIRST_RESPONSE_SECONDS":"16"})
+    with pytest.raises(ProviderConfigError): ProviderSettings.from_environment(env|{"LLM_FIRST_RESPONSE_SECONDS":"8","LLM_TOTAL_SECONDS":"4"})
+
+
 def test_agent_image_and_make_target_run_real_worker():
     dockerfile = Path("docker/Dockerfile.agent").read_text()
     makefile = Path("Makefile").read_text()

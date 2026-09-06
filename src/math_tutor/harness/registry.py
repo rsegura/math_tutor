@@ -5,7 +5,7 @@ from typing import Protocol
 from math_tutor.application.results import CommandStatus
 from math_tutor.application.service import CanonicalHintResult, CommitHint, EndSession, ProposeProfileChange, RecordAnswer, RecordAnswerResult, SelectNextActivity
 from math_tutor.domain.evidence import ObservationOutcome
-from math_tutor.domain.activities import AnswerInputStatus, StructuredAnswer
+from math_tutor.domain.activities import Activity, AnswerInputStatus, StructuredAnswer
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.harness.context import HarnessContext
@@ -71,7 +71,8 @@ class PedagogicalToolRegistry:
                 speech = "No estoy seguro de haber oído bien. ¿Puedes repetirlo?"
             else:
                 speech = {AnswerOutcome.CORRECT:"Sí, esa respuesta es correcta.", AnswerOutcome.INCORRECT:"Esa respuesta todavía no es correcta. Vamos paso a paso.", AnswerOutcome.AMBIGUOUS:"No estoy seguro de haber entendido. ¿Puedes repetirlo?", AnswerOutcome.NOT_EVALUABLE:"No he podido comprobar la respuesta. ¿Puedes decirla de otra forma?"}[result.payload.mathematical_check.outcome]
-            return HarnessDecision(speech=speech, applied_tool=name)
+            reason = "answer-correct" if result.payload.mathematical_check.outcome is AnswerOutcome.CORRECT else "accepted"
+            return HarnessDecision(speech=speech, applied_tool=name, reason=reason)
         if name is ToolName.GIVE_HINT:
             self._keys(args, required=set())
             index = context.activity.hints_used
@@ -92,7 +93,9 @@ class PedagogicalToolRegistry:
             try: command = SelectNextActivity(**base, activity_id=activity_id, source_activity_id=context.activity.activity_id, objective_id=str(objective), template_id=context.activity.template_id, seed=seed, difficulty=difficulty)
             except (KeyError, TypeError, ValueError): raise ToolRejected("adaptation-arguments-invalid") from None
             result = self._service.select_next_activity(command); self._applied(result)
-            return HarnessDecision(applied_tool=name)
+            if not isinstance(result.payload, Activity) or not result.payload.prompt_es:
+                raise ToolRejected("canonical-activity-result-missing", crossed_fence=True)
+            return HarnessDecision(speech=result.payload.prompt_es, applied_tool=name)
         if name is ToolName.PROPOSE_SKILL_UPDATE:
             self._keys(args, required={"objective_id"})
             objective = args.get("objective_id")

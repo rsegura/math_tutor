@@ -101,7 +101,79 @@ class SimpleModel:
     def complete(self,**kwargs): raise AssertionError("model must not run")
 
 
-def test_completed_activity_cap_stops_before_next_model_call(tmp_path):
+class CorrectAnswerModel:
+    def __init__(self, activity): self.activity = activity
+    def complete(self, **kwargs):
+        return {
+            "type": "tool",
+            "name": "record_answer",
+            "arguments": {
+                "turn_id": kwargs["context"].current_turn.turn_id,
+                "answer": {
+                    "status": "evaluable",
+                    "kind": self.activity.expected_answer.kind.value,
+                    "values": dict(self.activity.expected_answer.values),
+                },
+            },
+        }
+
+
+@pytest.mark.asyncio
+async def test_correct_answer_persists_and_speaks_next_canonical_activity(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    first_engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    first=repo.load_activity(metadata.tutoring_session_id,"activity-1")
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=CorrectAnswerModel(first))
+
+    decision=await engine.decide(VoiceTurn("turn-correct","respuesta",.9,Event()))
+
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    selected=[event.activity_id for event in aggregate.events if event.kind=="activity-selected"]
+    assert len(selected) == 2
+    next_activity=repo.load_activity(metadata.tutoring_session_id,selected[-1])
+    assert selected[-1] != "activity-1"
+    assert decision.speech == f"Sí, esa respuesta es correcta. {next_activity.prompt_es}"
+
+
+@pytest.mark.asyncio
+async def test_retry_of_correct_turn_replays_the_same_follow_up_without_new_mutation(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    first=repo.load_activity(metadata.tutoring_session_id,"activity-1")
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=CorrectAnswerModel(first))
+    turn=VoiceTurn("retried-turn","respuesta",.9,Event())
+
+    initial=await engine.decide(turn)
+    replay=await engine.decide(turn)
+
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    assert replay == initial
+    assert len(aggregate.observations) == 1
+    assert len([event for event in aggregate.events if event.kind=="activity-selected"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_correct_answer_at_activity_cap_ends_without_creating_another_activity(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    with sqlite3.connect(repo.database) as db:
+        db.execute("UPDATE provisioned_plans SET max_activities=1 WHERE plan_id=?",(metadata.plan_id,))
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    bootstrap_engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    first=repo.load_activity(metadata.tutoring_session_id,"activity-1")
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=CorrectAnswerModel(first))
+
+    decision=await engine.decide(VoiceTurn("last-turn","respuesta",.9,Event()))
+
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    assert decision.terminal and decision.reason == "activity-cap-reached"
+    assert len(aggregate.activities) == 1
+    assert aggregate.session.ended
+
+
+@pytest.mark.asyncio
+async def test_completed_activity_cap_stops_before_next_model_call(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     with sqlite3.connect(repo.database) as db:
         db.execute("UPDATE provisioned_plans SET max_activities=1 WHERE plan_id=?",(metadata.plan_id,))
@@ -109,12 +181,13 @@ def test_completed_activity_cap_stops_before_next_model_call(tmp_path):
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
     with sqlite3.connect(repo.database) as db:
         db.execute("UPDATE activity_progress SET progress_json=? WHERE session_id=?",(_dump(ActivityProgress("activity-1",1,0,1,1)),metadata.tutoring_session_id))
-    decision=engine.decide(VoiceTurn("turn","uno",.9,Event()))
+    decision=await engine.decide(VoiceTurn("turn","uno",.9,Event()))
     assert decision.terminal and decision.reason == "activity-cap-reached"
     assert repo.load_state(metadata.tutoring_session_id).session.ended
 
 
-def test_duration_rechecked_after_model_before_tool_mutation_or_speech(tmp_path):
+@pytest.mark.asyncio
+async def test_duration_rechecked_after_model_before_tool_mutation_or_speech(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
     current=[runtime.bootstrap.session_started_at+timedelta(minutes=10)]
@@ -123,13 +196,14 @@ def test_duration_rechecked_after_model_before_tool_mutation_or_speech(tmp_path)
             current[0] += timedelta(minutes=2)
             return {"type":"tool","name":"give_hint","arguments":{}}
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),now=lambda:current[0],model=CrossingModel())
-    decision=engine.decide(VoiceTurn("turn","una pista",.9,Event()))
+    decision=await engine.decide(VoiceTurn("turn","una pista",.9,Event()))
     assert decision.terminal and decision.reason == "duration-cap-reached"
     progress=repo.load_state(metadata.tutoring_session_id).progress_for("activity-1")
     assert progress.hints_used == 0
 
 
-def test_slow_social_reply_is_suppressed_and_session_ends_durably(tmp_path):
+@pytest.mark.asyncio
+async def test_slow_social_reply_is_suppressed_and_session_ends_durably(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
     current=[runtime.bootstrap.session_started_at+timedelta(minutes=10)]
@@ -138,9 +212,22 @@ def test_slow_social_reply_is_suppressed_and_session_ends_durably(tmp_path):
             current[0] += timedelta(minutes=2)
             return {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),now=lambda:current[0],model=SlowSocialModel())
-    decision=engine.decide(VoiceTurn("turn","hola",.9,Event()))
+    decision=await engine.decide(VoiceTurn("turn","hola",.9,Event()))
     assert decision == __import__('math_tutor.agent.voice_agent',fromlist=['VoiceDecision']).VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason="duration-cap-reached")
     assert repo.load_state(metadata.tutoring_session_id).session.ended
+
+
+@pytest.mark.asyncio
+async def test_provider_error_returns_reviewed_terminal_response_and_stops_durably(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class Broken:
+        async def complete(self,**kwargs): raise RuntimeError("secret provider detail")
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Broken())
+    decision=await engine.decide(VoiceTurn("turn","cuatro",.9,Event()))
+    assert decision.speech == "No puedo continuar ahora. Terminamos por hoy."
+    assert decision.terminal and decision.reason == "llm-provider-unavailable"
+    events=repo.load_session_aggregate(metadata.tutoring_session_id).events
+    assert [(event.kind,event.detail) for event in events if event.kind=="session-stop-requested"] == [("session-stop-requested","llm-provider-unavailable")]
 
 
 @pytest.mark.asyncio
