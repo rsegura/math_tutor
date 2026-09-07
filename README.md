@@ -38,7 +38,7 @@ model-provider SDKs, so the core can be tested offline.
 - Python 3.12 and `uv`
 - LiveKit Agents and a local LiveKit server
 - Deepgram or OpenAI speech-to-text
-- OpenAI Responses API for the pedagogical model
+- OpenAI or OpenRouter Responses API for the pedagogical model
 - ElevenLabs or OpenAI text-to-speech
 - FastAPI and a small static learner/reviewer UI
 - SQLite for learner, session, evidence, consent, and review state
@@ -91,12 +91,33 @@ not expose it to the learner client or commit `.env`.
 For a live voice session, also configure:
 
 - `STT_PROVIDER`, `STT_MODEL`, `STT_API_KEY`
-- `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`
-- `TTS_PROVIDER`, `TTS_MODEL`, `TTS_VOICE_ID`, `TTS_API_KEY`
+- `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, and optional `LLM_BASE_URL`
+- `TTS_PROVIDER`, `TTS_MODEL`, optional `TTS_VOICE_ID`, and `TTS_API_KEY`
 - optionally, bounded `LLM_FIRST_RESPONSE_SECONDS` and `LLM_TOTAL_SECONDS`
 
-Supported combinations are Deepgram or OpenAI for STT, OpenAI for the LLM, and
-ElevenLabs or OpenAI for TTS. `STORE_TRANSCRIPT` appears in `.env.example` but
+Supported combinations are Deepgram or OpenAI for STT, OpenAI or OpenRouter for
+the LLM, and ElevenLabs or OpenAI for TTS. For OpenAI, set
+`LLM_PROVIDER=openai`, use an OpenAI model such as
+`gpt-4o-mini-2024-07-18`, and leave `LLM_BASE_URL` empty. For OpenRouter, use:
+
+```dotenv
+LLM_PROVIDER=openrouter
+LLM_MODEL=openai/gpt-4o-mini
+LLM_API_KEY=your-openrouter-key
+LLM_BASE_URL=https://openrouter.ai/api/v1
+```
+
+The selected OpenRouter model must support both the Responses API and tool
+calling. `LLM_BASE_URL` is active but deliberately restricted: OpenAI must use
+the SDK endpoint, and OpenRouter accepts only its canonical HTTPS endpoint.
+Gemini is a possible future adapter and is **not implemented**.
+
+For ElevenLabs, `TTS_VOICE_ID` may be empty; the runtime then omits `voice_id`
+and lets the pinned LiveKit plugin select its default. Successful construction
+does not prove that this default is available under a particular ElevenLabs
+account or entitlement. OpenAI TTS still requires an explicit voice ID.
+
+`STORE_TRANSCRIPT` appears in `.env.example` but
 is not currently passed into the Compose services and must not be treated as
 an active runtime control.
 
@@ -179,14 +200,17 @@ model outputs and deterministic scenarios to fail closed on mathematical,
 state, stop-handling, and safety regressions. Its fixture ratings and fixture
 review durations are not observations from a therapist.
 
-Real-provider checks are opt-in and require credentials and network access:
+The OpenRouter check is opt-in, makes one bounded Responses request with a real
+user-defined tool, and requires dedicated environment variables:
 
 ```bash
+export OPENROUTER_API_KEY=your-openrouter-key
+export OPENROUTER_MODEL=openai/gpt-4o-mini
 make test-live-llm
 ```
 
-No live-provider tests are currently implemented. The dated automated results
-and their exact scope are recorded in
+It reports `PASS`, `SKIP` (credentials/model absent), or `FAIL` distinctly.
+The dated automated results and their exact scope are recorded in
 [docs/math-tutor-poc-verification.md](docs/math-tutor-poc-verification.md).
 
 ## Privacy and therapist review

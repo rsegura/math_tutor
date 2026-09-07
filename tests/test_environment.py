@@ -81,8 +81,31 @@ def test_python_base_image_is_pinned_to_a_patch_and_digest() -> None:
         assert f"FROM {PYTHON_IMAGE}" in dockerfile
 
 
-def test_live_model_target_preserves_failures_but_allows_no_tests() -> None:
+def test_live_model_target_reports_pass_skip_and_failure_without_hiding_no_tests() -> None:
     makefile = (ROOT / "Makefile").read_text()
 
-    assert 'if [ "$$status" -eq 5 ]' in makefile
+    assert "tests/live_llm/test_openrouter_responses_live.py" in makefile
+    assert "PASS: OpenRouter Responses tool smoke" in makefile
+    assert "SKIP: OpenRouter credentials or model not configured" in makefile
+    assert "FAIL: OpenRouter Responses tool smoke" in makefile
+    assert "SKIPPED \\[" in makefile
+    assert 'if [ "$$status" -eq 5 ]' not in makefile
     assert 'exit "$$status"' in makefile
+
+
+def test_operator_configuration_documents_exact_provider_contracts() -> None:
+    example = (ROOT / ".env.example").read_text()
+    readme = (ROOT / "README.md").read_text()
+    docker = (ROOT / "docs" / "DOCKER.md").read_text()
+    compose = (ROOT / "docker-compose.yml").read_text()
+    combined = "\n".join((example, readme, docker))
+
+    assert "LLM_PROVIDER=openrouter" in example
+    assert "LLM_BASE_URL=https://openrouter.ai/api/v1" in example
+    assert "TTS_VOICE_ID=" in example
+    assert "LLM_PROVIDER: ${LLM_PROVIDER:-}" in compose
+    assert "LLM_BASE_URL: ${LLM_BASE_URL:-}" in compose
+    assert "Responses" in combined and "tool calling" in combined
+    assert "Gemini" in combined and "not implemented" in combined
+    assert "ElevenLabs" in combined and "default" in combined
+    assert "OpenAI TTS" in combined and "required" in combined

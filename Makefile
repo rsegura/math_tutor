@@ -19,7 +19,13 @@ test: ## Run pytest inside the network-independent tooling container
 	$(COMPOSE) run --rm tooling uv run pytest $(ARGS)
 
 test-live-llm: ## Run only opt-in real-provider checks
-	$(COMPOSE) run --rm tooling sh -c 'uv run pytest -m live_llm $(ARGS); status=$$?; if [ "$$status" -eq 5 ]; then echo "SKIP: no live_llm tests are implemented yet"; exit 0; fi; exit "$$status"'
+	@result_file=$$(mktemp); \
+	$(COMPOSE) run --rm -e OPENROUTER_API_KEY -e OPENROUTER_MODEL tooling \
+		uv run pytest -m live_llm -rA tests/live_llm/test_openrouter_responses_live.py $(ARGS) >"$$result_file" 2>&1; \
+	status=$$?; cat "$$result_file"; \
+	if [ "$$status" -ne 0 ]; then echo "FAIL: OpenRouter Responses tool smoke"; rm -f "$$result_file"; exit "$$status"; fi; \
+	if grep -Eq 'SKIPPED \[' "$$result_file"; then echo "SKIP: OpenRouter credentials or model not configured"; else echo "PASS: OpenRouter Responses tool smoke"; fi; \
+	rm -f "$$result_file"
 
 eval-math: ## Run deterministic offline tutoring scenarios and safety gate
 	$(COMPOSE) run --rm tooling uv run python -m evals.math_tutor.runner

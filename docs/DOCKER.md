@@ -48,6 +48,44 @@ available. A live voice run also needs configured STT, LLM, and TTS provider
 values and credentials in `.env`. The offline `make test` and `make eval-math`
 commands need neither provider credentials nor network access.
 
+For the pedagogical LLM, use one of these exact profiles:
+
+```dotenv
+# OpenAI: SDK default endpoint; LLM_BASE_URL must be empty
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini-2024-07-18
+LLM_API_KEY=your-openai-key
+LLM_BASE_URL=
+
+# OpenRouter: canonical endpoint only
+LLM_PROVIDER=openrouter
+LLM_MODEL=openai/gpt-4o-mini
+LLM_API_KEY=your-openrouter-key
+LLM_BASE_URL=https://openrouter.ai/api/v1
+```
+
+An OpenRouter model is usable only if it supports the Responses API and tool
+calling. `LLM_BASE_URL` is active and fail-closed; it is not a generic proxy or
+arbitrary OpenAI-compatible endpoint. Gemini is a future extension point and
+is not implemented.
+
+`TTS_VOICE_ID` is optional for ElevenLabs. When empty, the factory omits that
+argument and the pinned LiveKit plugin chooses its default; construction alone
+does not prove that an account is entitled to use that default. OpenAI TTS has
+no such fallback and an explicit voice ID is required.
+
+The opt-in OpenRouter smoke uses separate operator variables so it cannot
+silently select another configured provider:
+
+```bash
+export OPENROUTER_API_KEY=your-openrouter-key
+export OPENROUTER_MODEL=openai/gpt-4o-mini
+make test-live-llm
+```
+
+It makes one Responses request with a real tool contract and reports `PASS`,
+`SKIP` (missing credentials/model), or `FAIL`. A skip is not a provider pass.
+
 ## Runtime configuration
 
 Compose passes the following provider settings to `agent`: `STT_PROVIDER`,
