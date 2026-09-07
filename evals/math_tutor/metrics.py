@@ -22,7 +22,10 @@ class EvalMetrics:
     stt_misattributions: int
     ignored_stops: int
     diagnostic_or_privacy_violations: int
-    intervention_ratings: tuple[str, ...]
+    intervention_classifications: tuple[str, ...]
+    intervention_rating_fixtures: tuple[str, ...]
+    adequate_or_correctable_proportion: float
+    intervention_adequacy_target: float
     evidence_coverage: float
     latency_ms_p95: int
     review_fixture_duration_seconds: int

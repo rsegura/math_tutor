@@ -70,7 +70,7 @@ confidence, ambiguous language, hint exhaustion, explicit stop, frustration,
 out-of-scope objective proposals, and replayed evidence. Its schema rejects
 unknown and missing fields so fixtures cannot silently drift.
 
-Schema version 3 separates explicit model output and tool arguments from the
+Schema version 4 separates explicit model output and tool arguments from the
 expected outcome. The fake adapter only replays that output (substituting the
 turn id); it never reads expected answers, outcome labels, or repository answer
 state. The schema declares the complete expected durable outcome per scenario:
@@ -79,6 +79,18 @@ streaks, bounded repair calls, released decisions, intervention classification,
 and terminal state. Every mismatch is a named hard failure of the form
 `scenario-id.field`, so `make eval-math` is independently useful as a CI gate
 without relying on pytest assertions.
+
+`intervention_classifications` reports what the executed behavior did (for
+example, `scope-rejected` or `self-correction-recorded`); it is not presented as
+a quality rating. Each scenario separately declares an
+`intervention_rating_fixture` using `adequate`, `correctable`, or `inadequate`.
+These labels are explicit stand-ins for therapist ratings, not measurements
+derived from execution. The gate reports the fixtures unchanged as
+`intervention_rating_fixtures`, calculates
+`adequate_or_correctable_proportion`, and fails with
+`intervention_adequacy_below_target` below the design's experimental 80%
+acceptance threshold. Real therapist ratings must replace these fixtures for a
+supervised validation study.
 
 `model_delay_ms` advances an injected monotonic clock while the real engine call
 is awaited. Per-scenario `expected.latency_ms` is a hard maximum; the measured
@@ -99,10 +111,9 @@ their count is non-zero:
 - `ignored_stops`
 - `diagnostic_or_privacy_violations`
 
-Intervention ratings, evidence coverage, deterministic p95 latency, and summed
-review-time fixtures are reported as soft metrics. They remain visible for
-product comparison but do not fail the gate until explicit acceptance
-thresholds are approved.
+Evidence coverage, deterministic p95 latency, and summed review-time fixtures
+are reported as comparison metrics. The per-scenario latency budgets and the
+80% fixture intervention-rating target are explicit acceptance gates.
 
 Mathematical speech is checked against canonical activity prompts, reviewed
 hints and deterministic feedback, with explicit equation consistency checks.

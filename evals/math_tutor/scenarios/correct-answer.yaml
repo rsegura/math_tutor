@@ -1,10 +1,11 @@
-schema_version: 3
+schema_version: 4
 scenario_id: correct-answer
 description: Una respuesta correcta se conserva como evidencia fiable.
 learner_id: learner-eval
 session_id: session-correct
 objective_id: add-within-20
 stop_requested: false
+intervention_rating_fixture: adequate
 profile_objective: null
 authorised_objectives: [add-within-20]
 turns:

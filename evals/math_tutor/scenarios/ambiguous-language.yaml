@@ -1,10 +1,11 @@
-schema_version: 3
+schema_version: 4
 scenario_id: ambiguous-language
 description: Una respuesta ambigua queda explícitamente sin resolver.
 learner_id: learner-eval
 session_id: session-ambiguous
 objective_id: compare-within-20
 stop_requested: false
+intervention_rating_fixture: adequate
 profile_objective: null
 authorised_objectives: [compare-within-20]
 turns:

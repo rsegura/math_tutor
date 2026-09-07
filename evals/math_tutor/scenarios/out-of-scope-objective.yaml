@@ -1,10 +1,11 @@
-schema_version: 3
+schema_version: 4
 scenario_id: out-of-scope-objective
 description: Una propuesta fuera del plan no produce actualización de perfil.
 learner_id: learner-eval
 session_id: session-scope
 objective_id: add-within-20
 stop_requested: false
+intervention_rating_fixture: adequate
 profile_objective: fractions
 authorised_objectives: [add-within-20]
 turns:

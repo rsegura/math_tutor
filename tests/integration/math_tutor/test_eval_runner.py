@@ -112,11 +112,14 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     assert first.metrics.evidence_coverage > 0
     assert first.metrics.latency_ms_p95 >= 0
     assert first.metrics.review_fixture_duration_seconds >= 0
-    assert set(first.metrics.intervention_ratings) == {
+    assert set(first.metrics.intervention_classifications) == {
         "ambiguous", "correct", "hint-cap-enforced", "incorrect",
         "not-evaluable", "replay-deduplicated", "scope-rejected",
         "self-correction-recorded", "stop-honoured", "supportive-social",
     }
+    assert set(first.metrics.intervention_rating_fixtures) == {"adequate", "correctable"}
+    assert first.metrics.adequate_or_correctable_proportion == 1.0
+    assert first.metrics.intervention_adequacy_target == 0.8
     assert first.durable_outcomes["low-stt-confidence"].not_evaluable == 1
     assert first.durable_outcomes["low-stt-confidence"].evidence_count == 0
     assert first.durable_outcomes["stop-request"].terminal
@@ -135,6 +138,33 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     )
     assert first.durable_outcomes["hint-exhaustion"].repair_calls == 3
     assert first.durable_outcomes["frustration"].intervention == "supportive-social"
+
+
+def test_therapist_rating_fixture_is_separate_from_execution_classification_and_gated(tmp_path):
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "correct-answer")
+    assert scenario.intervention_rating_fixture == "adequate"
+
+    report = run_evaluation(
+        (replace(scenario, intervention_rating_fixture="inadequate"),),
+        database_path=tmp_path / "rating.db",
+    )
+
+    assert report.metrics.intervention_classifications == ("correct",)
+    assert report.metrics.intervention_rating_fixtures == ("inadequate",)
+    assert report.metrics.adequate_or_correctable_proportion == 0.0
+    assert "intervention_adequacy_below_target" in report.hard_failures
+    assert report.exit_code != 0
+
+
+def test_scenario_rejects_unknown_intervention_rating_fixture(tmp_path):
+    source = (SCENARIOS / "correct-answer.yaml").read_text().replace(
+        "intervention_rating_fixture: adequate",
+        "intervention_rating_fixture: excellent",
+    )
+    (tmp_path / "rating.yaml").write_text(source)
+
+    with pytest.raises(EvalScenarioError, match="adequate, correctable, or inadequate"):
+        load_scenarios(tmp_path)
 
 
 def test_any_versioned_expected_behaviour_mismatch_fails_the_cli_gate(tmp_path):

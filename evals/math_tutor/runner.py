@@ -109,13 +109,14 @@ class EvalScenario:
     authorised_objectives: tuple[str, ...]
     turns: tuple[EvalTurn, ...]
     expected: ScenarioExpected
+    intervention_rating_fixture: str
     review_fixture_duration_seconds: int
 
 
 _ROOT_FIELDS = {
     "schema_version", "scenario_id", "description", "learner_id", "session_id",
     "objective_id", "stop_requested", "profile_objective", "authorised_objectives",
-    "turns", "expected", "review_fixture_duration_seconds",
+    "turns", "expected", "intervention_rating_fixture", "review_fixture_duration_seconds",
 }
 _TURN_FIELDS = {
     "turn_id", "response_text", "stt_confidence", "model_output", "repair_output", "model_delay_ms",
@@ -163,6 +164,15 @@ def _text(value: object, where: str, *, nullable: bool = False) -> str | None:
     return value
 
 
+def _rating_fixture(value: object, where: str) -> str:
+    rating = _text(value, where)
+    if rating not in {"adequate", "correctable", "inadequate"}:
+        raise EvalScenarioError(
+            f"{where}: expected adequate, correctable, or inadequate"
+        )
+    return rating
+
+
 def _outcome_sequence(value: object, where: str) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise EvalScenarioError(f"{where}: expected list")
@@ -179,7 +189,7 @@ def _outcome_sequence(value: object, where: str) -> tuple[str, ...]:
 
 def _parse_scenario(raw: object, source: Path) -> EvalScenario:
     data = _exact_mapping(raw, _ROOT_FIELDS, str(source))
-    if data["schema_version"] != 3:
+    if data["schema_version"] != 4:
         raise EvalScenarioError(f"{source}: unsupported schema version")
     objective_values = data["authorised_objectives"]
     if not isinstance(objective_values, list) or not objective_values:
@@ -253,7 +263,7 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
         terminal=_boolean(expected_raw["terminal"], f"{source}: terminal"),
     )
     scenario = EvalScenario(
-        schema_version=3,
+        schema_version=4,
         scenario_id=_text(data["scenario_id"], f"{source}: scenario_id"),
         description=_text(data["description"], f"{source}: description"),
         learner_id=_text(data["learner_id"], f"{source}: learner_id"),
@@ -262,6 +272,9 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
         stop_requested=_boolean(data["stop_requested"], f"{source}: stop_requested"),
         profile_objective=_text(data["profile_objective"], f"{source}: profile_objective", nullable=True),
         authorised_objectives=authorised, turns=tuple(turns), expected=expected,
+        intervention_rating_fixture=_rating_fixture(
+            data["intervention_rating_fixture"], f"{source}: intervention_rating_fixture"
+        ),
         review_fixture_duration_seconds=_integer(data["review_fixture_duration_seconds"], f"{source}: review_fixture_duration_seconds"),
     )
     return scenario
@@ -627,11 +640,21 @@ def run_evaluation(
     evidence_count = sum(item.outcome.evidence_count for item in executed)
     observation_count = sum(item.outcome.observations for item in executed)
     # Expected values are assertions only; they never populate observed facts.
-    ratings = tuple(sorted({item.outcome.intervention for item in executed}))
+    classifications = tuple(sorted({item.outcome.intervention for item in executed}))
+    rating_fixtures = tuple(item.scenario.intervention_rating_fixture for item in executed)
+    adequate_or_correctable = sum(
+        rating in {"adequate", "correctable"} for rating in rating_fixtures
+    ) / len(rating_fixtures)
+    intervention_adequacy_target = 0.8
     latencies = tuple(latency for item in executed for latency in item.latencies_ms)
     review_time = sum(item.review_fixture_duration_seconds for item in values)
-    metrics = EvalMetrics(math_errors, unsupported, stt_errors, ignored_stops, privacy, ratings,
-        evidence_count / observation_count if observation_count else 0.0, _percentile_95(latencies), review_time)
+    metrics = EvalMetrics(
+        math_errors, unsupported, stt_errors, ignored_stops, privacy,
+        classifications, rating_fixtures, adequate_or_correctable,
+        intervention_adequacy_target,
+        evidence_count / observation_count if observation_count else 0.0,
+        _percentile_95(latencies), review_time,
+    )
     failures = tuple(name for name in HARD_METRICS if getattr(metrics, name))
     expected_fields = (
         "observations", "correct", "incorrect", "ambiguous", "not_evaluable",
@@ -649,7 +672,11 @@ def run_evaluation(
         for item in executed
         if item.outcome.latency_ms > item.scenario.expected.max_latency_ms
     )
-    failures = (*failures, *behaviour_failures, *latency_failures)
+    rating_failures = (
+        ("intervention_adequacy_below_target",)
+        if adequate_or_correctable < intervention_adequacy_target else ()
+    )
+    failures = (*failures, *behaviour_failures, *latency_failures, *rating_failures)
     outcomes = {item.scenario.scenario_id: item.outcome for item in executed}
     return EvalReport(len(values), metrics, failures, int(bool(failures)), outcomes)
 
