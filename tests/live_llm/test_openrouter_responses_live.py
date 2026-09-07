@@ -50,7 +50,9 @@ async def test_openrouter_responses_returns_canonical_tool_call() -> None:
         max_retries=0,
         timeout=20.0,
     )
-    adapter = OpenResponsesAdapter(client=client, model=model, first_response_seconds=15)
+    adapter = OpenResponsesAdapter(
+        client=client, model=model, first_response_seconds=15, max_output_tokens=64
+    )
     try:
         result = await adapter.complete(
             prompt=(

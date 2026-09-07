@@ -66,6 +66,7 @@ async def test_openrouter_fixture_translates_canonical_function_call():
     assert result["type"] == "tool"
     assert result["name"] == "record_answer"
     assert result["arguments"]["answer"]["values"] == {"tens": 3, "units": 2}
+    assert adapter._client.responses.calls[0]["max_output_tokens"] == 256
 
 
 @pytest.mark.asyncio

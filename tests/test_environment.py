@@ -102,9 +102,11 @@ def test_operator_configuration_documents_exact_provider_contracts() -> None:
 
     assert "LLM_PROVIDER=openrouter" in example
     assert "LLM_BASE_URL=https://openrouter.ai/api/v1" in example
+    assert "LLM_MAX_OUTPUT_TOKENS=256" in example
     assert "TTS_VOICE_ID=" in example
     assert "LLM_PROVIDER: ${LLM_PROVIDER:-}" in compose
     assert "LLM_BASE_URL: ${LLM_BASE_URL:-}" in compose
+    assert "LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-256}" in compose
     assert "Responses" in combined and "tool calling" in combined
     assert "Gemini" in combined and "not implemented" in combined
     assert "ElevenLabs" in combined and "default" in combined

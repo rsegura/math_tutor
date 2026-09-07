@@ -16,12 +16,13 @@ def _field(value: object, name: str, default=None):
 class OpenResponsesAdapter:
     """Translate the common OpenResponses wire contract into harness objects."""
 
-    def __init__(self, *, client, model: str, first_response_seconds: float = 4.0) -> None:
+    def __init__(self, *, client, model: str, first_response_seconds: float = 4.0, max_output_tokens: int = 256) -> None:
         if not 2 <= first_response_seconds <= 15:
             raise ProviderConfigError("LLM first response deadline must be between 2 and 15 seconds")
         self._client = client
         self._model = model
         self._first_response_seconds = first_response_seconds
+        self._max_output_tokens = max_output_tokens
         self._close_lock = asyncio.Lock()
         self._closed = False
 
@@ -91,6 +92,7 @@ class OpenResponsesAdapter:
                 response = await self._client.responses.create(
                     model=self._model, input=[{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(compact, ensure_ascii=False)}],
                     tools=tools, tool_choice="auto", parallel_tool_calls=False,
+                    max_output_tokens=self._max_output_tokens,
                 )
         except TimeoutError:
             raise
@@ -140,4 +142,9 @@ def build_model_adapter(settings: ProviderSettings, *, client_factory=None) -> O
         kwargs["base_url"] = settings.llm_base_url or "https://openrouter.ai/api/v1"
     elif settings.llm_provider != "openai":
         raise ProviderConfigError("unsupported LLM provider")
-    return OpenResponsesAdapter(client=client_factory(**kwargs), model=settings.llm_model, first_response_seconds=settings.llm_first_response_seconds)
+    return OpenResponsesAdapter(
+        client=client_factory(**kwargs),
+        model=settings.llm_model,
+        first_response_seconds=settings.llm_first_response_seconds,
+        max_output_tokens=settings.llm_max_output_tokens,
+    )

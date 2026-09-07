@@ -109,6 +109,7 @@
 
 1. Add or update documentation contract tests for OpenRouter and optional
    ElevenLabs voice configuration.
+   Document and wire the bounded `LLM_MAX_OUTPUT_TOKENS` request budget.
 2. Document exact OpenAI/OpenRouter examples and state that Gemini is an
    unimplemented future adapter.
 3. Remove stale claims that `LLM_BASE_URL` is unwired if it becomes active.

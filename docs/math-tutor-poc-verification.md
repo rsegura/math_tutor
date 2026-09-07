@@ -33,7 +33,8 @@ observed professional review time.
 
 The opt-in OpenRouter smoke was run separately on 2026-09-07 with model
 `openai/gpt-4o-mini`. It exercised one Responses API call, the real `give_hint`
-function contract, and the production canonical parser: `1 passed in 2.04s`,
+function contract, the production canonical parser, and a 64-token output
+budget: `1 passed in 1.50s`,
 followed by `PASS: OpenRouter Responses tool smoke`, process exit `0`. This is
 a provider-contract smoke only; it does not validate voice behavior or
 educational quality. Re-runs require `OPENROUTER_API_KEY` and an

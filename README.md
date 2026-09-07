@@ -93,7 +93,8 @@ For a live voice session, also configure:
 - `STT_PROVIDER`, `STT_MODEL`, `STT_API_KEY`
 - `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, and optional `LLM_BASE_URL`
 - `TTS_PROVIDER`, `TTS_MODEL`, optional `TTS_VOICE_ID`, and `TTS_API_KEY`
-- optionally, bounded `LLM_FIRST_RESPONSE_SECONDS` and `LLM_TOTAL_SECONDS`
+- optionally, bounded `LLM_FIRST_RESPONSE_SECONDS`, `LLM_TOTAL_SECONDS`, and
+  `LLM_MAX_OUTPUT_TOKENS` (default 256; accepted range 64–1024)
 
 Supported combinations are Deepgram or OpenAI for STT, OpenAI or OpenRouter for
 the LLM, and ElevenLabs or OpenAI for TTS. For OpenAI, set
@@ -105,6 +106,7 @@ LLM_PROVIDER=openrouter
 LLM_MODEL=openai/gpt-4o-mini
 LLM_API_KEY=your-openrouter-key
 LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_MAX_OUTPUT_TOKENS=256
 ```
 
 The selected OpenRouter model must support both the Responses API and tool

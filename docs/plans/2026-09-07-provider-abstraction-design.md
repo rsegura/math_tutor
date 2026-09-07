@@ -47,7 +47,8 @@ network-client creation without creating a mutation shortcut.
 ## Configuration
 
 Common settings remain `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, bounded
-response deadlines, and optional `LLM_BASE_URL`. Supported provider values are
+response deadlines, bounded `LLM_MAX_OUTPUT_TOKENS` (default 256, accepted
+range 64–1024), and optional `LLM_BASE_URL`. Supported provider values are
 `openai` and `openrouter`. OpenRouter uses its official endpoint by default;
 the exact URL policy is:
 

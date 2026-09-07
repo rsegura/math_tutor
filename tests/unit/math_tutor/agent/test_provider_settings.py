@@ -113,3 +113,21 @@ def test_validation_error_does_not_echo_a_secret_used_as_an_invalid_deadline():
         )
 
     assert secret not in str(raised.value)
+
+
+def test_llm_output_budget_defaults_and_accepts_a_bounded_override():
+    assert ProviderSettings.from_environment(environment()).llm_max_output_tokens == 256
+    assert (
+        ProviderSettings.from_environment(
+            environment(LLM_MAX_OUTPUT_TOKENS=" 128 ")
+        ).llm_max_output_tokens
+        == 128
+    )
+
+
+@pytest.mark.parametrize("value", ("63", "1025", "many", "128.5"))
+def test_llm_output_budget_rejects_values_outside_the_safe_integer_range(value):
+    with pytest.raises(ProviderConfigError, match="LLM_MAX_OUTPUT_TOKENS"):
+        ProviderSettings.from_environment(
+            environment(LLM_MAX_OUTPUT_TOKENS=value)
+        )

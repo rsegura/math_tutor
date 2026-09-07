@@ -48,6 +48,18 @@ def _deadline(env: Mapping[str, str], name: str, default: float) -> float:
     return value
 
 
+def _output_budget(env: Mapping[str, str]) -> int:
+    name = "LLM_MAX_OUTPUT_TOKENS"
+    raw = env.get(name, "256")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ProviderConfigError(f"{name} must be an integer") from None
+    if not 64 <= value <= 1024:
+        raise ProviderConfigError(f"{name} must be between 64 and 1024")
+    return value
+
+
 def _resolve_llm_base_url(provider: str, configured: str | None) -> str | None:
     if provider == "openai":
         if configured is not None:
@@ -79,6 +91,7 @@ class ProviderSettings:
     tts_api_key: str = field(repr=False)
     llm_first_response_seconds: float = 4.0
     llm_total_seconds: float = 10.0
+    llm_max_output_tokens: int = 256
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> "ProviderSettings":
@@ -125,4 +138,5 @@ class ProviderSettings:
             tts_api_key=values["TTS_API_KEY"],
             llm_first_response_seconds=first,
             llm_total_seconds=total,
+            llm_max_output_tokens=_output_budget(env),
         )
