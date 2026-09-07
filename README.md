@@ -1,10 +1,14 @@
 # Math Tutor Voice PoC
 
-A Spanish-speaking voice tutor for primary-school mathematics (years 1–6),
-designed for learners who may need additional support. This proof of concept
-explores a narrow product question: can a probabilistic language model make a
-conversation natural while deterministic software retains control of
-mathematical correctness, progression, safety, and durable state?
+A Spanish-speaking voice tutor whose product vision covers primary-school
+mathematics (years 1–6) for learners who may need additional support. The
+implemented curriculum is currently a narrow `initial` vertical slice,
+approximately aligned with years 1–2: counting and number sequences to 20,
+comparison, units and tens, composing and decomposing two-digit numbers, the
+number line, and addition and subtraction to 20. This proof of concept explores
+a focused question: can a probabilistic language model make a conversation
+natural while deterministic software retains control of mathematical
+correctness, progression, safety, and durable state?
 
 The current build supports bounded tutoring sessions, evidence-linked progress,
 selective audio evidence, and therapist review. It is suitable for engineering
@@ -119,6 +123,43 @@ Start the live voice worker separately after supplying provider credentials:
 make agent
 ```
 
+### Provision a local tutoring session
+
+The learner page does not create learners, plans, or sessions. With `make up`
+running, use the therapist API and the exact token configured in `.env`. Keep
+the token in a shell variable so it is not copied into each request:
+
+```bash
+printf 'Local THERAPIST_API_TOKEN: '
+read -r -s TUTOR_TOKEN
+printf '\n'
+
+curl --fail-with-body \
+  -H "Authorization: Bearer ${TUTOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"learner_id":"learner-local-1","pseudonym":"Luna","age_years":7}' \
+  http://localhost:8080/api/therapist/learners
+
+curl --fail-with-body \
+  -H "Authorization: Bearer ${TUTOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"plan_id":"plan-local-1","objective_ids":["count-to-20","number-sequence-within-20"],"adaptations":["short-instructions"],"limits":{"duration_minutes":10,"max_activities":4}}' \
+  http://localhost:8080/api/therapist/learners/learner-local-1/plans
+
+curl --fail-with-body \
+  -H "Authorization: Bearer ${TUTOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  http://localhost:8080/api/therapist/learners/learner-local-1/sessions
+```
+
+The final response contains `tutoring_session_id`, `join_code`,
+`join_expires_at`, `plan_id`, `plan_version`, and
+`audio_consent_snapshot_id`. Copy the returned `tutoring_session_id` and
+`join_code` into <http://localhost:8080/> while the join code is valid. This
+minimal flow starts without audio evidence consent; do not add consent merely
+to exercise the learner UI.
+
 Stop the stack with `make down`. Use `make build` after image-affecting changes.
 When dependencies change, edit `pyproject.toml`, then run `make lock && make
 build`; never edit `uv.lock` by hand.
@@ -158,11 +199,12 @@ the retention policy, support explicit deletion, and become ineligible for new
 capture immediately after consent is revoked.
 
 The authenticated therapist surface lets a professional inspect progress,
-assistance, evidence, hypotheses, and change history; correct evidence or
-interpretations; review retained clips; and accept or reject proposed next
-objectives. Reports keep objective observations separate from versioned
-interpretations. Model proposals do not become authoritative merely because
-they appear in a report.
+assistance, evidence, hypotheses, change history, and retained clips. Its
+implemented correction actions are to discard an evidence item and to correct
+a skill estimate; both require a reason and preserve history. The professional
+can also approve or reject a generated next-objective proposal. Reports keep
+objective observations separate from versioned interpretations. Model
+proposals do not become authoritative merely because they appear in a report.
 
 ## Current limitations and human gates
 
