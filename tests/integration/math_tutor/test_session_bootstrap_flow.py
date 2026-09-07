@@ -141,6 +141,22 @@ async def test_engine_close_is_noop_before_creation_and_idempotently_closes_crea
     assert model.closes == 1
 
 
+@pytest.mark.asyncio
+async def test_engine_retries_model_close_after_failure(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class FlakyModel(SimpleModel):
+        def __init__(self): self.closes=0
+        async def aclose(self):
+            self.closes += 1
+            if self.closes == 1: raise RuntimeError("failed")
+    model=FlakyModel()
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=model)
+    with pytest.raises(RuntimeError): await engine.aclose()
+    await engine.aclose()
+    assert model.closes == 2
+
+
 def test_worker_rejects_empty_active_objectives_before_provider_configuration(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     state=repo.load_state(metadata.tutoring_session_id)

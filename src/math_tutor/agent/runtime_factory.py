@@ -109,13 +109,14 @@ class BoundedConversationEngine:
             model = self._model
             if model is None or model is self._closed_model:
                 return
-            self._closed_model = model
             close = getattr(model, "aclose", None)
             if close is None:
+                self._closed_model = model
                 return
             result = close()
             if hasattr(result, "__await__"):
                 await result
+            self._closed_model = model
 
     def _runtime_cap_reason(self) -> str | None:
         return self._cap_reason(self._repository.load_session_aggregate(self._bootstrap.session.session_id))

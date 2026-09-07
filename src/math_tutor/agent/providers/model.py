@@ -30,13 +30,14 @@ class OpenResponsesAdapter:
         async with self._close_lock:
             if self._closed:
                 return
-            self._closed = True
-            close = getattr(self._client, "close", None)
+            close = getattr(self._client, "aclose", None) or getattr(self._client, "close", None)
             if close is None:
+                self._closed = True
                 return
             result = close()
             if inspect.isawaitable(result):
                 await result
+            self._closed = True
 
     @staticmethod
     def _tools(context) -> list[dict[str, object]]:

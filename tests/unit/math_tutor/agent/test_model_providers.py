@@ -1,4 +1,5 @@
 import json
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -102,6 +103,32 @@ async def test_adapter_closes_client_once():
     client=Client(); adapter=OpenResponsesAdapter(client=client,model="provider/model")
     await adapter.aclose(); await adapter.aclose()
     assert client.closes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_error", [RuntimeError("close failed"), asyncio.CancelledError()])
+async def test_failed_or_cancelled_close_can_be_retried(first_error):
+    class Client:
+        def __init__(self): self.responses=Responses({}); self.closes=0
+        async def close(self):
+            self.closes += 1
+            if self.closes == 1: raise first_error
+    client=Client(); adapter=OpenResponsesAdapter(client=client,model="provider/model")
+    with pytest.raises(type(first_error)):
+        await adapter.aclose()
+    await adapter.aclose()
+    assert client.closes == 2
+
+
+@pytest.mark.asyncio
+async def test_adapter_supports_aclose_and_never_double_closes_client():
+    class Client:
+        def __init__(self): self.responses=Responses({}); self.acloses=0; self.closes=0
+        async def aclose(self): self.acloses += 1
+        async def close(self): self.closes += 1
+    client=Client(); adapter=OpenResponsesAdapter(client=client,model="provider/model")
+    await adapter.aclose(); await adapter.aclose()
+    assert (client.acloses,client.closes) == (1,0)
 
 
 @pytest.mark.asyncio
