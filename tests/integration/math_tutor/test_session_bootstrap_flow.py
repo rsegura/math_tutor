@@ -16,6 +16,7 @@ from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
 from math_tutor.infrastructure.persistence.repositories import _dump
 from math_tutor.application.ports import ActivityProgress
+from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.agent.voice_agent import HarnessVoiceAgent, VoiceTurn
 
 
@@ -154,6 +155,63 @@ async def test_replayed_help_turn_returns_exact_receipt_and_does_not_consume_sec
 
 
 @pytest.mark.asyncio
+async def test_stop_preempts_a_support_receipt_with_the_same_turn_id(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+
+    decision=await engine.decide(VoiceTurn("reused","quiero parar",.99,Event()))
+
+    assert decision.terminal and decision.reason == "stop-requested"
+    assert repo.load_state(metadata.tutoring_session_id).session.ended
+
+
+@pytest.mark.asyncio
+async def test_elapsed_cap_preempts_a_support_receipt_replay(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    current=[datetime.now(timezone.utc)]
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel(),now=lambda:current[0])
+    await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+    current[0] += timedelta(minutes=12)
+
+    decision=await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+
+    assert decision.terminal and decision.reason == "duration-cap-reached"
+
+
+@pytest.mark.asyncio
+async def test_activity_cap_preempts_a_support_receipt_replay(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+    engine._bootstrap=replace(engine._bootstrap,plan=replace(engine._bootstrap.plan,limits=SessionLimits(11,1)))
+    progress=repo.load_state(metadata.tutoring_session_id).progress_for("activity-1")
+    completed=replace(progress,attempts_used=1,version=progress.version+1)
+    with sqlite3.connect(repo.database) as db:
+        db.execute("UPDATE activity_progress SET progress_json=?,version=? WHERE session_id=? AND activity_id=?",(_dump(completed),completed.version,metadata.tutoring_session_id,"activity-1"))
+
+    decision=await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+
+    assert decision.terminal and decision.reason == "activity-cap-reached"
+
+
+@pytest.mark.asyncio
+async def test_ended_session_preempts_a_support_receipt_replay(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+    engine.force_stop("therapist-ended")
+
+    decision=await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+
+    assert decision.terminal and decision.reason == "therapist-ended"
+
+
+@pytest.mark.asyncio
 async def test_exhausted_help_repeats_prompt_without_progress_or_competence_mutation(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
@@ -207,6 +265,50 @@ async def test_concurrent_same_help_turn_returns_exact_winner_and_one_hint(tmp_p
     progress=next(item for item in aggregate.activity_progress if item.activity_id == "activity-1")
     assert decisions[0] == decisions[1]
     assert progress.hints_used == 1
+
+
+@pytest.mark.asyncio
+async def test_generation_race_loser_waits_boundedly_for_exact_support_receipt(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    winner=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    loser=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    turn=VoiceTurn("forced-window","ayuda",.99,Event())
+    first_poll=asyncio.Event()
+    loop=asyncio.get_running_loop()
+    original_load=repo.load_support_receipt
+
+    def delayed_load(session_id,turn_id):
+        receipt=original_load(session_id,turn_id)
+        if receipt is None:
+            loop.call_soon_threadsafe(first_poll.set)
+        return receipt
+
+    repo.load_support_receipt=delayed_load
+    loser._service.support_learner=lambda command:CommandResult(command.command_id,CommandStatus.REJECTED,"generation-not-active")
+    losing_task=asyncio.create_task(loser.decide(turn))
+    await asyncio.wait_for(first_poll.wait(),1)
+    winning=await winner.decide(turn)
+    losing=await asyncio.wait_for(losing_task,1)
+
+    assert losing == winning
+    progress=repo.load_state(metadata.tutoring_session_id).progress_for("activity-1")
+    assert progress.hints_used == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_race_winner_uses_a_bounded_number_of_receipt_reads(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    reads=[]
+    engine._service.support_learner=lambda command:CommandResult(command.command_id,CommandStatus.REJECTED,"generation-not-active")
+    repo.load_support_receipt=lambda session_id,turn_id:reads.append((session_id,turn_id))
+
+    with pytest.raises(RuntimeError,match="generation-not-active"):
+        await asyncio.wait_for(engine.decide(VoiceTurn("no-winner","ayuda",.99,Event())),1)
+
+    assert len(reads) == 8
 
 
 @pytest.mark.asyncio
