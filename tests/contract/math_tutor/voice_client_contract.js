@@ -6,6 +6,8 @@ const events = [];
 let submit;
 let latestRoom;
 let blockAudio = false;
+let fetchImpl;
+let nextConnectPromise = null;
 
 const statusNode = {textContent: ""};
 const audioContainer = {
@@ -19,11 +21,16 @@ const fields = {
   "#session": {value: "session-1"},
   "#code": {value: "join-code"},
 };
+const joinButton = {disabled: false};
+const form = {
+  addEventListener: (_event, handler) => { submit = handler; },
+  querySelector: (selector) => selector === "button" ? joinButton : null,
+};
 
 global.document = {
   querySelector(selector) {
     if (selector === "#join") {
-      return {addEventListener: (_event, handler) => { submit = handler; }};
+      return form;
     }
     if (selector === "#status") return statusNode;
     if (selector === "#remote-audio") return audioContainer;
@@ -36,8 +43,9 @@ class FakeRoom {
     this.handlers = new Map();
     this.localParticipant = {
       identity: "learner",
-      setMicrophoneEnabled: async () => { events.push("microphone"); },
+      setMicrophoneEnabled: async (enabled) => { this.microphoneEnabled = enabled; events.push("microphone"); },
     };
+    this.disconnected = false;
     latestRoom = this;
   }
 
@@ -55,9 +63,12 @@ class FakeRoom {
     assert.ok(this.handlers.has("trackUnsubscribed"));
     assert.ok(this.handlers.has("disconnected"));
     events.push("connect");
+    const barrier = nextConnectPromise;
+    if (barrier) await barrier;
   }
 
   disconnect() {
+    this.disconnected = true;
     events.push("disconnect");
     this.handlers.get("disconnected")?.();
   }
@@ -77,13 +88,22 @@ global.LivekitClient = {
   Track: {Kind: {Audio: "audio", Video: "video"}},
 };
 
-global.fetch = async () => {
+const successfulTokenResponse = () => ({
+  ok: true,
+  json: async () => ({server_url: "ws://livekit", participant_token: "token"}),
+});
+
+fetchImpl = async () => {
   events.push("fetch");
-  return {
-    ok: true,
-    json: async () => ({server_url: "ws://livekit", participant_token: "token"}),
-  };
+  return successfulTokenResponse();
 };
+global.fetch = (...args) => fetchImpl(...args);
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((fulfil) => { resolve = fulfil; });
+  return {promise, resolve};
+}
 
 function mediaElement() {
   return {
@@ -156,6 +176,54 @@ async function run() {
   nextRoom.disconnect();
   assert.equal(finalTrack.detachCalls, 1);
   assert.equal(audioContainer.children.length, 0);
+  assert.equal(statusNode.textContent, "La sesión se ha desconectado.");
+
+  blockAudio = false;
+  const delayedToken = deferred();
+  let firstSignal;
+  fetchImpl = (_url, options) => {
+    firstSignal = options.signal;
+    return delayedToken.promise;
+  };
+  const staleJoin = submit({preventDefault() {}});
+  const staleRoom = latestRoom;
+  assert.equal(joinButton.disabled, true);
+
+  fetchImpl = async () => successfulTokenResponse();
+  const currentJoin = submit({preventDefault() {}});
+  const currentRoom = latestRoom;
+  await currentJoin;
+  delayedToken.resolve(successfulTokenResponse());
+  await staleJoin;
+
+  assert.equal(firstSignal.aborted, true, "a newer join must abort the stale token request");
+  assert.equal(staleRoom.disconnected, true);
+  assert.notEqual(currentRoom, staleRoom);
+  assert.equal(currentRoom.disconnected, false);
+  assert.equal(staleRoom.microphoneEnabled, undefined);
+  assert.equal(currentRoom.microphoneEnabled, true);
+  assert.equal(statusNode.textContent, "Sesión conectada");
+  assert.equal(joinButton.disabled, false);
+
+  const delayedConnect = deferred();
+  nextConnectPromise = delayedConnect.promise;
+  const staleConnectJoin = submit({preventDefault() {}});
+  const staleConnectingRoom = latestRoom;
+  await Promise.resolve();
+  await Promise.resolve();
+
+  nextConnectPromise = null;
+  const finalJoin = submit({preventDefault() {}});
+  const finalRoom = latestRoom;
+  await finalJoin;
+  delayedConnect.resolve();
+  await staleConnectJoin;
+
+  assert.equal(staleConnectingRoom.disconnected, true);
+  assert.equal(staleConnectingRoom.microphoneEnabled, undefined);
+  assert.equal(finalRoom.disconnected, false);
+  assert.equal(finalRoom.microphoneEnabled, true);
+  assert.equal(statusNode.textContent, "Sesión conectada");
 }
 
 run().catch((error) => {
