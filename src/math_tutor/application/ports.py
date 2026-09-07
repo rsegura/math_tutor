@@ -80,6 +80,24 @@ class TutoringEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class LearnerSupportReceipt:
+    """Transcript-free canonical result of one learner support turn."""
+
+    session_id: str
+    turn_id: str
+    activity_id: str
+    action: str
+    speech: str
+
+    def __post_init__(self) -> None:
+        for name in ("session_id", "turn_id", "activity_id", "speech"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise ValueError(f"{name.replace('_', ' ')} must be nonempty")
+        if self.action not in {"hint", "repeat"}:
+            raise ValueError("support action must be hint or repeat")
+
+
+@dataclass(frozen=True, slots=True)
 class StoredActivity:
     activity_id: str
     activity: Activity
@@ -119,6 +137,7 @@ class MutationBatch:
     activity_progress: tuple[ActivityProgress, ...] = ()
     expected_activity_progress: tuple[ActivityProgressExpectation, ...] = ()
     expected_absent_activity_ids: tuple[str, ...] = ()
+    support_receipts: tuple[LearnerSupportReceipt, ...] = ()
 
     def __post_init__(self) -> None:
         """Reject ambiguous writes before they reach the durable fence."""
@@ -189,6 +208,10 @@ class TutoringRepository(Protocol):
     def load_command_result(
         self, command_id: str
     ) -> StoredCommandResult | None: ...
+
+    def load_support_receipt(
+        self, session_id: str, turn_id: str
+    ) -> LearnerSupportReceipt | None: ...
 
     def load_state(self, session_id: str) -> PersistedTutoringState | None: ...
 

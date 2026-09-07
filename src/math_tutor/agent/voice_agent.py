@@ -7,6 +7,7 @@ from threading import Event
 from typing import Callable
 import asyncio
 import inspect
+import re
 import unicodedata
 
 from livekit.agents import Agent, stt
@@ -42,10 +43,28 @@ def _normalise(text: str) -> str:
     return "".join(character for character in unicodedata.normalize("NFKD", text.casefold()) if not unicodedata.combining(character))
 
 
+def _normalised_words(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", _normalise(text)))
+
+
 def is_stop_request(text: str) -> bool:
     value = _normalise(text)
     phrases = ("quiero parar", "para ya", "paramos", "no quiero seguir", "terminar")
     return any(phrase in value for phrase in phrases)
+
+
+def is_help_request(text: str) -> bool:
+    """Recognise only short, self-contained Spanish requests for support."""
+    value = _normalised_words(text)
+    if value.endswith(" por favor"):
+        value = value[: -len(" por favor")]
+    return value in {
+        "ayuda", "ayudame", "necesito ayuda",
+        "no entiendo", "no lo entiendo",
+        "repite", "repitelo", "repitemelo", "puedes repetir",
+        "puedes repetirlo", "puedes repetirmelo", "otra vez",
+        "explicalo otra vez", "explicamelo otra vez",
+    }
 
 
 class TurnCoordinator:

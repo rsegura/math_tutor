@@ -11,7 +11,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from math_tutor.application.ports import (ActivityProgress, CommitDecision, MutationBatch, PersistedTutoringState, ProvisioningConflict, StoredCommandResult, StoredObservation)
+from math_tutor.application.ports import (ActivityProgress, CommitDecision, LearnerSupportReceipt, MutationBatch, PersistedTutoringState, ProvisioningConflict, StoredCommandResult, StoredObservation)
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.service import CanonicalHintResult, RecordAnswerResult
 from math_tutor.application.review import CorrectSkillEstimateReview, DiscardEvidenceReview, ProfileRecalculation, ReviewCommandIdentity, ReviewMutation, ReviewResult, ReviewStatus
@@ -113,6 +113,7 @@ _WIRE_TYPES = {
     "observation/v1": Observation,
     "transcription-policy/v1": TranscriptionReliabilityPolicy,
     "activity-progress/v1": ActivityProgress,
+    "learner-support-receipt/v1": LearnerSupportReceipt,
     "discard-evidence-review/v1": DiscardEvidenceReview,
     "correct-skill-estimate-review/v1": CorrectSkillEstimateReview,
     "profile-recalculation/v1": ProfileRecalculation,
@@ -230,6 +231,15 @@ class SQLiteTutoringRepository:
     def close(self) -> None:
         """Repository connections are short-lived; retain an explicit lifecycle port."""
         return None
+
+    def load_support_receipt(self, session_id: str, turn_id: str) -> LearnerSupportReceipt | None:
+        with self._connect_read_only() as db:
+            row = db.execute(
+                "SELECT session_id,turn_id,activity_id,action,speech "
+                "FROM learner_support_receipts WHERE session_id=? AND turn_id=?",
+                (session_id, turn_id),
+            ).fetchone()
+        return LearnerSupportReceipt(*row) if row else None
 
     @staticmethod
     def _has_profile_versions(db: sqlite3.Connection) -> bool:
@@ -901,6 +911,14 @@ class SQLiteTutoringRepository:
                         raise sqlite3.IntegrityError("lost activity progress update")
             for event in batch.events:
                 db.execute("INSERT INTO tutoring_events(command_id,kind,session_id,objective_id,activity_id,detail) VALUES(?,?,?,?,?,?)", (batch.command_id,event.kind,event.session_id,event.objective_id,event.activity_id,event.detail))
+            for receipt in batch.support_receipts:
+                if receipt.session_id != batch.session_id:
+                    raise sqlite3.IntegrityError("support receipt session mismatch")
+                db.execute(
+                    "INSERT INTO learner_support_receipts(session_id,turn_id,activity_id,action,speech) VALUES(?,?,?,?,?)",
+                    (receipt.session_id, receipt.turn_id, receipt.activity_id,
+                     receipt.action, receipt.speech),
+                )
             canonical = _dump(batch.result)
             db.execute("INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES(?,?,?)", (batch.command_id,batch.command_fingerprint,canonical))
             db.commit()

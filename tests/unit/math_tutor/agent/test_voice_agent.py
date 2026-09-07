@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from threading import Event
 
-from math_tutor.agent.voice_agent import HarnessVoiceAgent, TurnCoordinator, VoiceDecision, VoiceTurn
+from math_tutor.agent.voice_agent import HarnessVoiceAgent, TurnCoordinator, VoiceDecision, VoiceTurn, is_help_request
 from math_tutor.agent.lifecycle import SpeechHandleTracker, TerminalCloser
 from livekit.agents import Agent
 from livekit.agents.voice.events import SpeechCreatedEvent
@@ -30,6 +30,15 @@ def test_stop_has_priority_even_when_transcription_confidence_is_low():
 
     assert result.terminal is True
     assert result.reason == "stop-requested"
+
+
+def test_help_intent_is_normalized_and_requires_the_whole_utterance():
+    assert is_help_request("¿Puedes repetírmelo, por favor?")
+    assert is_help_request("NO LO ENTIENDO")
+    assert is_help_request("ayúdame")
+    assert not is_help_request("La respuesta es: no entiendo por qué pone eso")
+    assert not is_help_request("Hay que repetir el número 12 dos veces")
+    assert not is_help_request("ayuda a sumar tres y cuatro")
 
 
 def test_new_turn_cancels_the_prior_generation():

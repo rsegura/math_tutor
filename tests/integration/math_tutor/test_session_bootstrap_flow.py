@@ -112,6 +112,104 @@ async def test_lazy_model_factory_is_cached_for_normal_turns(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_help_turn_commits_one_reviewed_hint_without_observation_or_model(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    created=[]
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model_factory=lambda:created.append(True))
+
+    decision=await engine.decide(VoiceTurn("help-1","No lo entiendo",.99,Event()))
+
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    progress=next(item for item in aggregate.activity_progress if item.activity_id == "activity-1")
+    activity=repo.load_activity(metadata.tutoring_session_id,"activity-1")
+    receipt=repo.load_support_receipt(metadata.tutoring_session_id,"help-1")
+    assert created == []
+    assert aggregate.observations == ()
+    assert progress.hints_used == 1 and progress.attempts_used == 0
+    assert decision.speech == receipt.speech
+    assert decision.speech.endswith(activity.prompt_es)
+    assert receipt.action == "hint"
+    with sqlite3.connect(repo.database) as db:
+        columns={row[1] for row in db.execute("PRAGMA table_info(learner_support_receipts)")}
+    assert "transcript" not in columns and "text" not in columns
+
+
+@pytest.mark.asyncio
+async def test_replayed_help_turn_returns_exact_receipt_and_does_not_consume_second_hint(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    turn=VoiceTurn("same-help","Repítelo",.99,Event())
+
+    first=await engine.decide(turn)
+    replay=await engine.decide(turn)
+
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    progress=next(item for item in aggregate.activity_progress if item.activity_id == "activity-1")
+    assert replay == first
+    assert progress.hints_used == 1
+    with sqlite3.connect(repo.database) as db:
+        assert db.execute("SELECT COUNT(*) FROM learner_support_receipts WHERE session_id=? AND turn_id=?",(metadata.tutoring_session_id,"same-help")).fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_exhausted_help_repeats_prompt_without_progress_or_competence_mutation(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    activity=repo.load_activity(metadata.tutoring_session_id,"activity-1")
+    for index in range(len(activity.hint_ids)):
+        await engine.decide(VoiceTurn(f"hint-{index}","ayúdame",.99,Event()))
+    before=repo.load_session_aggregate(metadata.tutoring_session_id)
+
+    decision=await engine.decide(VoiceTurn("exhausted","otra vez",.99,Event()))
+
+    after=repo.load_session_aggregate(metadata.tutoring_session_id)
+    receipt=repo.load_support_receipt(metadata.tutoring_session_id,"exhausted")
+    assert decision.speech == activity.prompt_es
+    assert receipt.action == "repeat"
+    assert after.activity_progress == before.activity_progress
+    assert after.estimates == before.estimates
+    assert len(after.activities) == len(before.activities)
+
+
+@pytest.mark.asyncio
+async def test_support_receipt_failure_rolls_back_hint_progress_event_and_command(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    with sqlite3.connect(repo.database) as db:
+        db.execute("CREATE TRIGGER reject_support BEFORE INSERT ON learner_support_receipts BEGIN SELECT RAISE(ABORT,'test failure'); END")
+    with pytest.raises(RuntimeError,match="learner support rejected"):
+        await engine.decide(VoiceTurn("atomic-failure","ayuda",.99,Event()))
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    progress=next(item for item in aggregate.activity_progress if item.activity_id == "activity-1")
+    assert progress.hints_used == 0
+    assert not any(event.kind == "hint-committed" for event in aggregate.events)
+    assert repo.load_command_result(f"support:{metadata.tutoring_session_id}:atomic-failure") is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_help_turn_returns_exact_winner_and_one_hint(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    first=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    second=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    turn=VoiceTurn("racing-help","necesito ayuda",.99,Event())
+
+    decisions=await asyncio.gather(
+        asyncio.to_thread(lambda: asyncio.run(first.decide(turn))),
+        asyncio.to_thread(lambda: asyncio.run(second.decide(turn))),
+    )
+
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    progress=next(item for item in aggregate.activity_progress if item.activity_id == "activity-1")
+    assert decisions[0] == decisions[1]
+    assert progress.hints_used == 1
+
+
+@pytest.mark.asyncio
 async def test_concurrent_lazy_initialization_creates_at_most_one_adapter(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)

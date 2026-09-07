@@ -11,7 +11,7 @@ import asyncio
 
 from math_tutor.infrastructure.dispatch import DispatchMetadata, VoiceBootstrap
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
-from math_tutor.application.service import EndSession, PedagogicalMutationPolicy, SelectNextActivity, TutoringService
+from math_tutor.application.service import EndSession, PedagogicalMutationPolicy, SelectNextActivity, SupportLearner, TutoringService
 from math_tutor.application.session_runtime import SessionRuntime
 from math_tutor.domain.evidence import ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import AssistanceThreshold, CompetencyState, ProgressionPolicy
@@ -20,7 +20,7 @@ from math_tutor.harness.contracts import ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.loop import PedagogicalHarness
 from math_tutor.harness.registry import PedagogicalToolRegistry, SessionCapExceeded
-from math_tutor.agent.voice_agent import VoiceDecision, VoiceTurn, is_stop_request
+from math_tutor.agent.voice_agent import VoiceDecision, VoiceTurn, is_help_request, is_stop_request
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
 from math_tutor.agent.providers.model import build_model_adapter
 from math_tutor.agent.providers.voice import create_voice_providers
@@ -201,13 +201,17 @@ class BoundedConversationEngine:
 
     async def decide(self, turn: VoiceTurn) -> VoiceDecision:
         aggregate = self._repository.load_session_aggregate(self._bootstrap.session.session_id)
-        if aggregate is None or aggregate.session.ended:
-            raise RuntimeError("session is no longer active")
-        cap = self._cap_reason(aggregate)
-        if cap is not None:
-            self._stop(cap)
-            return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=cap)
+        if aggregate is None:
+            raise RuntimeError("session is missing")
         stop_requested = is_stop_request(turn.text)
+        if stop_requested:
+            if aggregate.session.ended:
+                return VoiceDecision("De acuerdo, paramos aquí.", terminal=True, reason="stop-requested")
+        prior_support = self._repository.load_support_receipt(aggregate.session.session_id, turn.turn_id)
+        if prior_support is not None:
+            return VoiceDecision(prior_support.speech, reason=f"learner-support-{prior_support.action}")
+        if aggregate.session.ended:
+            return VoiceDecision("La sesión ha terminado por hoy.", terminal=True, reason=aggregate.session.end_reason or "session-ended")
         prior_observation = self._repository.load_observation(
             aggregate.session.session_id, f"obs-{turn.turn_id}"
         )
@@ -252,6 +256,24 @@ class BoundedConversationEngine:
         if stop_requested:
             decision = self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason": "stop-requested"}), context)
             return VoiceDecision("De acuerdo, paramos aquí.", terminal=decision.terminal, reason="stop-requested")
+        cap = self._cap_reason(aggregate)
+        if cap is not None:
+            self._stop(cap)
+            return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=cap)
+        if is_help_request(turn.text):
+            result = self._service.support_learner(SupportLearner(
+                command_id=f"support:{aggregate.session.session_id}:{turn.turn_id}",
+                session_id=aggregate.session.session_id,
+                expected_session_version=aggregate.session.version,
+                expected_profile_version=aggregate.profile_version,
+                generation_id=generation.generation_id,
+                turn_id=turn.turn_id,
+                activity_id=activity_id,
+            ))
+            if getattr(result.status, "value", None) not in {"applied", "replayed"}:
+                raise RuntimeError(f"learner support rejected: {result.reason}")
+            receipt = result.payload
+            return VoiceDecision(receipt.speech, reason=f"learner-support-{receipt.action}")
         try:
             harness = await self._get_harness()
             decision = await harness.run_async(context, total_seconds=self._llm_total_seconds)

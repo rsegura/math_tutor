@@ -13,6 +13,7 @@ from math_tutor.application.ports import (
     ActivityProgress,
     ActivityProgressExpectation,
     MutationBatch,
+    LearnerSupportReceipt,
     ObservationExpectation,
     StoredActivity,
     TutoringEvent,
@@ -59,6 +60,12 @@ class CommitHint(Command):
     activity_id: str
     hint_id: str
     hint_index: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SupportLearner(Command):
+    turn_id: str
+    activity_id: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -357,6 +364,79 @@ class TutoringService:
             activity_progress=(progress,), expected_activity_progress=expected_progress,
             events=(TutoringEvent("hint-committed", command.session_id, activity.objective_id, command.activity_id, command.hint_id),),
             payload=CanonicalHintResult(command.hint_id, speech))
+
+    def support_learner(self, command: SupportLearner) -> CommandResult:
+        """Persist and replay deterministic help without storing learner text."""
+        try:
+            receipt = self._repository.load_support_receipt(command.session_id, command.turn_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if receipt is not None:
+            return CommandResult(
+                command.command_id, CommandStatus.APPLIED, "replayed", receipt,
+                replayed=True,
+            )
+        state, error = self._state(command)
+        if error:
+            return self._support_result_or_race_winner(command, error)
+        try:
+            activity = self._repository.load_activity(command.session_id, command.activity_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if activity is None:
+            return self._rejected(command, "activity-not-found")
+        if activity.objective_id not in state.session.authorised_objective_ids:
+            return self._rejected(command, "objective-not-authorised")
+        progress, existed = self._progress(state, command.activity_id, activity.difficulty)
+        can_hint = (
+            progress.hints_used < self._pedagogical_policy.max_hints_per_activity
+            and progress.hints_used < len(activity.hint_ids)
+        )
+        speech = None
+        if can_hint:
+            hint_id = activity.hint_ids[progress.hints_used]
+            speech = self._reviewed_hint_texts.get(hint_id)
+            can_hint = isinstance(speech, str) and bool(speech.strip())
+        if can_hint:
+            progress, expected_progress = self._progress_changes(
+                progress, existed, hints_used=progress.hints_used + 1
+            )
+            session = replace(state.session, version=state.session.version + 1)
+            receipt = LearnerSupportReceipt(
+                command.session_id, command.turn_id, command.activity_id,
+                "hint", f"{speech} {activity.prompt_es}",
+            )
+            result = self._commit(
+                command, session=session, activity_progress=(progress,),
+                expected_activity_progress=expected_progress,
+                events=(TutoringEvent("hint-committed", command.session_id,
+                                      activity.objective_id, command.activity_id, hint_id),),
+                support_receipts=(receipt,), payload=receipt,
+            )
+            return self._support_result_or_race_winner(command, result)
+        receipt = LearnerSupportReceipt(
+            command.session_id, command.turn_id, command.activity_id,
+            "repeat", activity.prompt_es,
+        )
+        result = self._commit(command, support_receipts=(receipt,), payload=receipt)
+        return self._support_result_or_race_winner(command, result)
+
+    def _support_result_or_race_winner(
+        self, command: SupportLearner, result: CommandResult
+    ) -> CommandResult:
+        if result.status is CommandStatus.APPLIED:
+            return result
+        try:
+            winner = self._repository.load_support_receipt(
+                command.session_id, command.turn_id
+            )
+        except Exception:
+            return result
+        if winner is None:
+            return result
+        return CommandResult(
+            command.command_id, CommandStatus.APPLIED, "replayed", winner, replayed=True
+        )
 
     def select_next_activity(self, command: SelectNextActivity) -> CommandResult:
         state, error = self._state(command)
