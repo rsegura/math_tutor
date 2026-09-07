@@ -19,7 +19,7 @@ They are not deployment credentials.
 ## Routine commands
 
 ```bash
-make up                         # start livekit and web in the background
+make up                         # start livekit and web; requires therapist token below
 make agent                      # run the voice worker in the foreground
 make down                       # stop and remove the Compose stack
 make test                       # offline default pytest suite
@@ -34,6 +34,14 @@ docker compose --profile dev config  # validate and render Compose configuration
 Use `docker compose --profile dev run --rm tooling <command>` for another
 one-off command. Edit `pyproject.toml`, then use `make lock && make build` when
 dependencies change; never edit `uv.lock` manually.
+
+Before `make up`, set `THERAPIST_API_TOKEN` in `.env` to a high-entropy,
+non-placeholder server secret with at least 24 characters and at least 8
+distinct characters. For example, generate it with an approved secret manager
+and keep it server-side; do not copy the placeholder from `.env.example`.
+Compose sets `THERAPIST_API_ENABLED=true`, and `WebSettings` deliberately aborts
+web startup when the token is absent, shorter than 24 characters, has fewer
+than 8 distinct characters, or matches a recognized placeholder.
 
 `make up` does not start the agent. Run `make agent` separately after LiveKit is
 available. A live voice run also needs configured STT, LLM, and TTS provider
@@ -53,10 +61,12 @@ directory, and sweep interval. The web service receives the enabled flag,
 retention days, and directory. Product policy still requires active scoped
 consent before capture; setting an environment variable is not consent.
 
-The web therapist API is enabled in local Compose and requires a non-empty,
-high-entropy `THERAPIST_API_TOKEN` before any meaningful shared or supervised
-environment. The default empty value is suitable only for configuration and
-automated checks, not a supervised voice gate.
+The web therapist API is enabled in local Compose and requires the valid
+`THERAPIST_API_TOKEN` described above for every web startup, including local
+development. An empty or weak value is never a valid startup configuration.
+`docker compose --profile dev config` can still succeed with an empty
+interpolated value because it validates/renders Compose without importing the
+FastAPI application; it is not a web startup check.
 
 Only variables wired in `docker-compose.yml` affect these services.
 `LLM_TEMPERATURE` and `STORE_TRANSCRIPT` are present in `.env.example` but are

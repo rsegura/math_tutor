@@ -17,6 +17,12 @@ The following commands were run from
 | `make eval-math` | 10 scenarios; `hard_failures: []`; process exit `0` | Pass |
 | `docker compose --profile dev config` | Rendered services `agent`, `livekit`, `tooling`, and `web`, plus network `poc_math_default`; no validation error; process exit `0` | Pass |
 
+The Compose result validates rendering only. It was produced with an empty
+interpolated `THERAPIST_API_TOKEN` and does not show that `web` can start:
+Compose enables the therapist API, while `WebSettings` rejects a missing,
+weak, or placeholder token. A non-placeholder token of at least 24 characters
+and 8 distinct characters is a prerequisite for `make up`.
+
 The offline eval additionally reported zero mathematical speech errors,
 unsupported profile updates, STT misattributions, ignored stops, and
 diagnostic/privacy violations. Its deterministic p95 fixture latency was 380

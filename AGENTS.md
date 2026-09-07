@@ -33,6 +33,12 @@ make lock
 docker compose --profile dev config
 ```
 
+Before `make up`, set `THERAPIST_API_TOKEN` in `.env` to a non-placeholder
+server secret of at least 24 characters and at least 8 distinct characters.
+Compose enables the therapist API for `web`; startup fails closed when that
+token is missing or weak. `docker compose --profile dev config` only renders
+and validates Compose and does not prove that the web application can start.
+
 Use `docker compose --profile dev run --rm tooling <command>` for one-off
 container commands. Add dependencies to `pyproject.toml`, then run
 `make lock && make build`. Never edit `uv.lock` by hand and never use floating
