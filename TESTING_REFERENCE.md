@@ -79,6 +79,31 @@ STT/LLM/TTS flows. Persistence tests build every temporary database under
 | Live-LLM (optional) | marker `live_llm` | Real provider calls; excluded by default and run explicitly with `make test-live-llm`. Requires keys in `.env` and network access. |
 | Evals | `evals/` | Phase 7. Offline scenario runner with behavioral assertions, never exact text. |
 
+## Conversation-recovery coverage
+
+The automated suite exercises the recovery path without provider network or
+live audio. Unit and integration tests verify:
+
+- narrow, whole-utterance Spanish help matching and false-positive rejection;
+- stop, terminal session limits, and low-confidence STT taking precedence over
+  help, with help taking precedence over an LLM call;
+- no answer observation or competence mutation for a help turn;
+- ordered reviewed hints, canonical-prompt fallback after hint exhaustion, and
+  atomic durable support receipts;
+- idempotent and concurrent replay of the same turn without consuming another
+  hint or emitting another progress event;
+- two non-terminal current-generation LLM recoveries, a durable terminal stop
+  on the third consecutive failure, reset after valid model/tool results, and
+  neutral cancellation or stale generations;
+- allowlisted error categories whose logs contain no provider exception body,
+  transcript, secret, or exception chain; and
+- shutdown with both helper-owned coroutines and externally owned LiveKit
+  `Task`/`Future` objects, including bounded timeout and cancellation behavior.
+
+These tests establish deterministic control-flow contracts. They do not
+measure conversational quality, provider reliability, speech latency, or
+behavior during a supervised live voice session.
+
 ## Offline tutoring acceptance gate
 
 `make eval-math` runs the versioned YAML scenarios in

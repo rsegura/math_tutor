@@ -114,6 +114,38 @@ calling. `LLM_BASE_URL` is active but deliberately restricted: OpenAI must use
 the SDK endpoint, and OpenRouter accepts only its canonical HTTPS endpoint.
 Gemini is a possible future adapter and is **not implemented**.
 
+### Conversation recovery
+
+The live runtime keeps common requests for help outside the probabilistic model.
+Short, self-contained Spanish turns such as `no lo entiendo`, `repítelo`, or
+`necesito ayuda` are routed deterministically after stop, session-limit, and
+low-confidence-STT checks. The application releases the next reviewed hint, or
+repeats the canonical activity prompt when no hint remains. A help turn does
+not record an answer, mark the learner wrong, or change a competence estimate.
+
+Each help action has a durable receipt keyed by session and turn. Replaying the
+same turn returns the same reviewed speech without consuming a second hint.
+When a hint is used, its progress event and receipt commit atomically through
+the same mutation fence as other tutoring actions. Learner help text is not
+stored in the receipt.
+
+LLM/provider failures are bounded per current voice generation. The first two
+consecutive recoverable failures return a reviewed, non-terminal retry message
+and repeat the current canonical prompt. A valid conversation reply or an
+applied/replayed tool action resets the counter; deterministic help and
+low-confidence turns preserve it, while cancelled or superseded generations do
+not increment it. A third consecutive failure stops the session durably. Logs
+use stable categories (`provider-timeout`, `provider-rate-limited`,
+`provider-upstream-unavailable`, `provider-invalid-response`,
+`harness-proposal-invalid`, or `harness-contract-exhausted`) and omit provider
+exception text, response bodies, transcripts, and exception chains.
+
+Shutdown accepts either a coroutine or the `Task` returned by LiveKit's
+`delete_room()`. Existing tasks are awaited without transferring cancellation
+ownership, preventing the teardown type error that motivated this change.
+These controls are covered by automated tests; they have not yet passed the
+supervised voice gate described below.
+
 For ElevenLabs, `TTS_VOICE_ID` may be empty; the runtime then omits `voice_id`
 and lets the pinned LiveKit plugin select its default. Successful construction
 does not prove that this default is available under a particular ElevenLabs

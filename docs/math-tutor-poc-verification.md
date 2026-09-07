@@ -13,7 +13,7 @@ The following commands were run from
 
 | Command | Observed result | Status |
 |---|---|---|
-| `make test` | `612 passed in 32.63s`; process exit `0` | Pass |
+| `make test` | `723 passed, 1 deselected in 36.30s`; process exit `0` | Pass |
 | `make eval-math` | 10 scenarios; `hard_failures: []`; process exit `0` | Pass |
 | `docker compose --profile dev config` | Rendered services `agent`, `livekit`, `tooling`, and `web`, plus network `poc_math_default`; no validation error; process exit `0` | Pass |
 
@@ -31,10 +31,10 @@ but those intervention ratings are explicit scenario fixtures, not therapist
 ratings. The reported 146-second review fixture total is likewise not an
 observed professional review time.
 
-The opt-in OpenRouter smoke was run separately on 2026-09-07 with model
-`openai/gpt-4o-mini`. It exercised one Responses API call, the real `give_hint`
-function contract, the production canonical parser, and a 64-token output
-budget: `1 passed in 1.50s`,
+The opt-in OpenRouter smoke was re-run on 2026-09-07 using the locally configured
+OpenRouter model and credential mapping without printing the credential. It
+exercised one Responses API call, the real `give_hint` function contract, the
+production canonical parser, and a 64-token output budget: `1 passed in 1.67s`,
 followed by `PASS: OpenRouter Responses tool smoke`, process exit `0`. This is
 a provider-contract smoke only; it does not validate voice behavior or
 educational quality. Re-runs require `OPENROUTER_API_KEY` and an
@@ -71,6 +71,9 @@ does not promote a partial criterion to a supervised-use approval.
 | Every retained clip has a reason, evidence ID, and bounded duration | Covered by automated tests; real selective-capture inspection pending |
 | Therapist can correct the agent and reconstruct prior state | UI/API tests pass; tabletop operator attestation pending |
 | Acceptance gate fails closed on safety regressions | Covered by the automated suite and successful offline gate run |
+| Help/repeat does not create wrong-answer evidence | Covered by automated deterministic routing, persistence, replay, and mutation-fence tests; live voice replay pending |
+| LLM failure recovery is bounded | Automated tests cover two non-terminal recoveries and a durable stop on the third consecutive current-generation failure; live-provider voice recovery pending |
+| LiveKit shutdown accepts an existing `Task` | Covered by lifecycle tests for completion, timeout, cancellation ownership, later cleanup, and idempotency; live teardown replay pending |
 
 Items marked pending are not treated as passed for supervised operation.
 
@@ -109,13 +112,30 @@ latency trace, or signed result is recorded.
 
 Open exceptions:
 
-- live STT/LLM/TTS connectivity and end-to-end latency are unverified;
+- An informal adult-operated engineering session connected the live voice stack
+  and exposed the motivating failure: repeated requests for help were followed
+  by a provider failure, an immediate terminal response, and a shutdown
+  `TypeError` because `delete_room()` returned an existing `Task`. This is useful
+  defect evidence, not a passed or completed supervised voice gate. The bounded
+  recovery and Task-aware teardown have automated coverage but have not been
+  replayed under the required attested scenario.
+- end-to-end voice latency remains unmeasured under the formal gate;
 - interruption and immediate stop are unverified on a real audio session;
 - selective clip capture, revocation, deletion, and retention are unverified
   end to end on a real session;
 - therapist review time and usability are unmeasured;
 - OpenRouter passed its one-call contract smoke; end-to-end voice remains
   unverified.
+
+The implemented recovery contract is deterministic: recognised help/repeat
+turns use reviewed hints or the canonical prompt and create no wrong-answer
+evidence; a durable receipt makes retries idempotent. Recoverable current-turn
+LLM failures 1 and 2 retry without ending the session, while failure 3 performs
+one durable terminal stop. Valid replies and applied/replayed tools reset the
+counter; help and low-confidence STT preserve it; cancelled or stale turns are
+neutral. Logged failure records are limited to an event name plus category,
+provider, model, session identifier, and consecutive count, with no provider
+message, body, transcript, secret, or exception traceback.
 
 Result: **blocking**. A voice gate uses an adult operator only; it is not itself
 permission to involve children.
