@@ -23,6 +23,7 @@ from math_tutor.harness.registry import PedagogicalToolRegistry, SessionCapExcee
 from math_tutor.agent.voice_agent import VoiceDecision, VoiceTurn, is_stop_request
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
 from math_tutor.agent.providers.model import build_model_adapter
+from math_tutor.agent.providers.voice import create_voice_providers
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,27 +37,6 @@ def build_tutoring_runtime(*, metadata: DispatchMetadata, repository, env: Mappi
     bootstrap = repository.reconstruct_voice_runtime(metadata)
     settings = ProviderSettings.from_environment(env)
     return TutoringVoiceRuntime(bootstrap, settings)
-
-
-def create_voice_providers(settings: ProviderSettings):
-    """Instantiate only the explicitly configured, pinned provider choices."""
-    if settings.stt_provider == "deepgram":
-        from livekit.plugins import deepgram
-        stt = deepgram.STT(api_key=settings.stt_api_key, model=settings.stt_model, language="es")
-    elif settings.stt_provider == "openai":
-        from livekit.plugins import openai as openai_plugin
-        stt = openai_plugin.STT(api_key=settings.stt_api_key, model=settings.stt_model, language="es")
-    else:  # guarded by ProviderSettings, kept fail-closed for forged instances
-        raise ProviderConfigError("unsupported STT provider")
-    from livekit.plugins import openai as openai_plugin
-    if settings.tts_provider == "elevenlabs":
-        from livekit.plugins import elevenlabs
-        tts = elevenlabs.TTS(api_key=settings.tts_api_key, model=settings.tts_model, voice_id=settings.tts_voice_id, language="es")
-    elif settings.tts_provider == "openai":
-        tts = openai_plugin.TTS(api_key=settings.tts_api_key, model=settings.tts_model, voice=settings.tts_voice_id)
-    else:
-        raise ProviderConfigError("unsupported TTS provider")
-    return stt, tts
 
 
 class BoundedConversationEngine:

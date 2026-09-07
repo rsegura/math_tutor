@@ -41,6 +41,13 @@ def test_runtime_factory_reexports_provider_neutral_settings_during_migration():
     assert ProviderConfigError is NeutralError
 
 
+def test_runtime_factory_reexports_voice_factory_during_migration():
+    from math_tutor.agent.providers.voice import create_voice_providers as neutral_factory
+    from math_tutor.agent.runtime_factory import create_voice_providers as legacy_factory
+
+    assert legacy_factory is neutral_factory
+
+
 def test_llm_deadlines_are_short_configurable_and_strict():
     env={
         "STT_PROVIDER":"deepgram", "STT_MODEL":"m", "STT_API_KEY":"k",
