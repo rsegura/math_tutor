@@ -257,6 +257,7 @@ class BoundedConversationEngine:
         aggregate = self._repository.load_session_aggregate(self._bootstrap.session.session_id)
         if aggregate is None:
             raise RuntimeError("session is missing")
+        epoch = await self._begin_llm_turn()
         stop_requested = is_stop_request(turn.text)
         if aggregate.session.ended:
             if stop_requested:
@@ -294,7 +295,7 @@ class BoundedConversationEngine:
             decision = self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason": "stop-requested"}), context)
             return VoiceDecision("De acuerdo, paramos aquí.", terminal=decision.terminal, reason="stop-requested")
         if turn.confidence is None or turn.confidence < 0.65:
-            self.cancel()
+            await self._cancel_llm_turn(epoch, generation.generation_id)
             return VoiceDecision(
                 CONFIRMATION_ES, needs_confirmation=True,
                 reason="low-stt-confidence",
@@ -315,8 +316,7 @@ class BoundedConversationEngine:
                 source_activity_id=source_id,
                 source_activity=source,
             )
-            replay_epoch = await self._begin_llm_turn()
-            await self._llm_succeeded(replay_epoch)
+            await self._llm_succeeded(epoch)
             return VoiceDecision(f"Sí, esa respuesta es correcta. {next_prompt}")
         if is_help_request(turn.text):
             async with self._support_lock:
@@ -340,7 +340,6 @@ class BoundedConversationEngine:
                 raise RuntimeError(f"learner support rejected: {result.reason}")
             receipt = result.payload
             return VoiceDecision(receipt.speech, reason=f"learner-support-{receipt.action}")
-        epoch = await self._begin_llm_turn()
         try:
             harness = await self._get_harness()
             decision = await harness.run_async(context, total_seconds=self._llm_total_seconds)

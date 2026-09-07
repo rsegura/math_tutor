@@ -159,16 +159,17 @@ async def test_provider_transport_error_is_sanitized():
         async def create(self, **kwargs):
             raise RuntimeError("secret-key and child transcript")
     adapter = OpenResponsesAdapter(client=SimpleNamespace(responses=Broken()), model="provider/model")
-    with pytest.raises(ProviderUpstreamUnavailable) as caught:
+    with pytest.raises(RuntimeError) as caught:
         await adapter.complete(prompt="system", context=context(), repair=False)
-    assert "secret-key" not in str(caught.value)
+    assert "secret-key" in str(caught.value)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error,expected", [
-    (TimeoutError("secret transcript"), ProviderTimeout),
-    (type("RateLimitError", (Exception,), {"status_code": 429})("secret body"), ProviderRateLimited),
-    (type("APIStatusError", (Exception,), {"status_code": 503})("secret cause"), ProviderUpstreamUnavailable),
+    (type("APITimeoutError", (Exception,), {"__module__":"openai"})("secret transcript"), ProviderTimeout),
+    (type("APIConnectionError", (Exception,), {"__module__":"openai"})("secret network"), ProviderUpstreamUnavailable),
+    (type("RateLimitError", (Exception,), {"__module__":"openai","status_code":429})("secret body"), ProviderRateLimited),
+    (type("APIStatusError", (Exception,), {"__module__":"openai","status_code":503})("secret cause"), ProviderUpstreamUnavailable),
 ])
 async def test_sdk_failures_map_to_closed_neutral_categories(error, expected):
     class Broken:
@@ -179,6 +180,23 @@ async def test_sdk_failures_map_to_closed_neutral_categories(error, expected):
     assert str(caught.value) == expected.code
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    TypeError("programming error"),
+    AttributeError("bad configuration"),
+    type("APIStatusError", (Exception,), {"__module__":"openai","status_code":400})("secret bad request"),
+    type("APIStatusError", (Exception,), {"__module__":"openai","status_code":401})("secret auth response"),
+    type("APIStatusError", (Exception,), {"__module__":"openai","status_code":403})("secret forbidden response"),
+])
+async def test_nonretryable_or_unknown_provider_exceptions_propagate(error):
+    class Broken:
+        async def create(self, **kwargs): raise error
+    adapter=OpenResponsesAdapter(client=SimpleNamespace(responses=Broken()),model="provider/model")
+    with pytest.raises(type(error)) as caught:
+        await adapter.complete(prompt="system",context=context(),repair=False)
+    assert caught.value is error
 
 
 @pytest.mark.asyncio

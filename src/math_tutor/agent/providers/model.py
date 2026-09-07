@@ -13,15 +13,20 @@ from math_tutor.harness.model import (
 )
 
 
-def _request_failure(error: BaseException) -> ProviderFailure:
+def _request_failure(error: BaseException) -> ProviderFailure | None:
     """Classify only stable SDK type/status metadata, never its text or body."""
     status = getattr(error, "status_code", None)
-    name = type(error).__name__.lower()
-    if isinstance(error, (TimeoutError, asyncio.TimeoutError)) or "timeout" in name or status == 408:
+    name = type(error).__name__
+    from_openai_sdk = type(error).__module__.split(".", 1)[0] == "openai"
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)) or (from_openai_sdk and name == "APITimeoutError"):
         return ProviderTimeout()
-    if status == 429 or "ratelimit" in name or "rate_limit" in name:
+    if from_openai_sdk and (name == "RateLimitError" or (name == "APIStatusError" and status == 429)):
         return ProviderRateLimited()
-    return ProviderUpstreamUnavailable()
+    if from_openai_sdk and name == "APIConnectionError":
+        return ProviderUpstreamUnavailable()
+    if from_openai_sdk and name in {"APIStatusError", "InternalServerError"} and isinstance(status, int) and 500 <= status <= 599:
+        return ProviderUpstreamUnavailable()
+    return None
 
 def _field(value: object, name: str, default=None):
     return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
@@ -102,6 +107,7 @@ class OpenResponsesAdapter:
             "allowed_contract": {tool["name"]: tool["parameters"] for tool in tools},
         }
         request_failure = None
+        request_error = None
         try:
             async with asyncio.timeout(self._first_response_seconds):
                 response = await self._client.responses.create(
@@ -113,8 +119,11 @@ class OpenResponsesAdapter:
             raise
         except Exception as error:
             request_failure = _request_failure(error)
+            request_error = error
         if request_failure is not None:
             raise request_failure from None
+        if request_error is not None:
+            raise request_error
         status = _field(response, "status")
         if status != "completed" or _field(response, "error") is not None:
             raise ProviderInvalidResponse() from None

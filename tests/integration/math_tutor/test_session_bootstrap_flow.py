@@ -700,6 +700,34 @@ async def test_unexpected_programming_or_mutation_errors_are_not_conversationall
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("newer_kind", ["help", "low-confidence", "stop"])
+async def test_newer_deterministic_turn_invalidates_older_llm_completion(tmp_path,newer_kind):
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    entered=asyncio.Event(); release=asyncio.Event()
+    class DelayedSocial:
+        async def complete(self,**kwargs):
+            entered.set(); await release.wait()
+            return {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=DelayedSocial())
+    engine._consecutive_llm_failures=2
+    older=asyncio.create_task(engine.decide(VoiceTurn("older","respuesta",.9,Event()))); await entered.wait()
+    newer_turn={
+        "help": VoiceTurn("new-help","no lo entiendo",.9,Event()),
+        "low-confidence": VoiceTurn("new-low","respuesta",.2,Event()),
+        "stop": VoiceTurn("new-stop","quiero parar",.9,Event()),
+    }[newer_kind]
+    newer=await engine.decide(newer_turn)
+    release.set()
+    with pytest.raises(asyncio.CancelledError): await older
+    if newer_kind == "help":
+        assert newer.reason.startswith("learner-support-") and engine._consecutive_llm_failures == 2
+    elif newer_kind == "low-confidence":
+        assert newer.needs_confirmation and engine._consecutive_llm_failures == 2
+    else:
+        assert newer.terminal and newer.reason == "stop-requested"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reason", ["tts-first-audio-timeout", "tts-total-timeout", "tts-provider-error"])
 async def test_tts_fail_safe_stops_durably_then_falls_back_and_closes_once(tmp_path, reason):
     repo,_,_,_,_,metadata=setup(tmp_path)
