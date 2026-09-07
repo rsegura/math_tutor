@@ -52,6 +52,16 @@ class SessionRuntime:
             if generation is not None:
                 generation._cancelled.set()
 
+    def cancel_generation_if_active(self, session_id: str, generation_id: str) -> bool:
+        """Cancel only the captured generation, never a newer concurrent turn."""
+        with self._lock:
+            generation = self._active.get(session_id)
+            if generation is None or generation.generation_id != generation_id:
+                return False
+            generation._cancelled.set()
+            del self._active[session_id]
+            return True
+
     def active_generation(self, session_id: str) -> Generation | None:
         with self._lock:
             return self._active.get(session_id)

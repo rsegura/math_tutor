@@ -21,7 +21,7 @@ from math_tutor.harness.contracts import ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.loop import PedagogicalHarness
 from math_tutor.harness.loop import HarnessContractExhausted, HarnessProposalInvalid
-from math_tutor.harness.model import ProviderFailure, ProviderUpstreamUnavailable
+from math_tutor.harness.model import ProviderFailure
 from math_tutor.harness.registry import PedagogicalToolRegistry, SessionCapExceeded
 from math_tutor.agent.voice_agent import CONFIRMATION_ES, VoiceDecision, VoiceTurn, is_help_request, is_stop_request
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
@@ -196,12 +196,24 @@ class BoundedConversationEngine:
             self._turn_epoch += 1
             return self._turn_epoch
 
-    async def _llm_failed(self, epoch: int) -> int | None:
+    async def _llm_failed(self, epoch: int, generation_id: str | None = None) -> int | None:
         async with self._turn_state_lock:
             if epoch != self._turn_epoch:
                 return None
+            if generation_id is not None:
+                self._runtime.cancel_generation_if_active(
+                    self._bootstrap.session.session_id, generation_id
+                )
             self._consecutive_llm_failures += 1
             return self._consecutive_llm_failures
+
+    async def _cancel_llm_turn(self, epoch: int, generation_id: str) -> bool:
+        async with self._turn_state_lock:
+            if epoch != self._turn_epoch:
+                return False
+            return self._runtime.cancel_generation_if_active(
+                self._bootstrap.session.session_id, generation_id
+            )
 
     async def _llm_succeeded(self, epoch: int) -> bool:
         async with self._turn_state_lock:
@@ -336,12 +348,10 @@ class BoundedConversationEngine:
             self._stop(str(error))
             return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=str(error))
         except asyncio.CancelledError:
-            self.cancel()
+            await self._cancel_llm_turn(epoch, generation.generation_id)
             raise
-        except Exception as error:
-            self.cancel()
-            failure = error if isinstance(error, (ProviderFailure, HarnessProposalInvalid, HarnessContractExhausted)) else ProviderUpstreamUnavailable()
-            count = await self._llm_failed(epoch)
+        except (ProviderFailure, HarnessProposalInvalid, HarnessContractExhausted) as failure:
+            count = await self._llm_failed(epoch, generation.generation_id)
             if count is None:
                 raise asyncio.CancelledError
             logger.warning(
@@ -363,6 +373,9 @@ class BoundedConversationEngine:
                 f"Ahora mismo me cuesta responder. Vamos a intentarlo otra vez. {activity.prompt_es}",
                 reason="llm-temporarily-unavailable",
             )
+        except Exception:
+            await self._cancel_llm_turn(epoch, generation.generation_id)
+            raise
         if not await self._llm_succeeded(epoch):
             raise asyncio.CancelledError
         cap = self._runtime_cap_reason()

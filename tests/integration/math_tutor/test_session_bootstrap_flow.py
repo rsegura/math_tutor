@@ -568,9 +568,10 @@ async def test_slow_social_reply_is_suppressed_and_session_ends_durably(tmp_path
 
 @pytest.mark.asyncio
 async def test_provider_error_returns_reviewed_terminal_response_and_stops_durably(tmp_path):
+    from math_tutor.harness.model import ProviderUpstreamUnavailable
     repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
     class Broken:
-        async def complete(self,**kwargs): raise RuntimeError("secret provider detail")
+        async def complete(self,**kwargs): raise ProviderUpstreamUnavailable()
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Broken())
     current_prompt=engine.initial_prompt
     decisions=[]
@@ -587,9 +588,10 @@ async def test_provider_error_returns_reviewed_terminal_response_and_stops_durab
 
 @pytest.mark.asyncio
 async def test_success_resets_llm_failure_counter_and_help_preserves_it(tmp_path):
+    from math_tutor.harness.model import ProviderUpstreamUnavailable
     repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
     class Sequence:
-        def __init__(self): self.values=iter([RuntimeError("secret"), {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}, RuntimeError("secret"), RuntimeError("secret"), RuntimeError("secret")])
+        def __init__(self): self.values=iter([ProviderUpstreamUnavailable(), {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}, ProviderUpstreamUnavailable(), ProviderUpstreamUnavailable(), ProviderUpstreamUnavailable()])
         async def complete(self,**kwargs):
             value=next(self.values)
             if isinstance(value,Exception): raise value
@@ -654,6 +656,47 @@ async def test_cancelled_llm_turn_does_not_increment_failure_counter(tmp_path):
     await entered.wait(); task.cancel()
     with pytest.raises(asyncio.CancelledError): await task
     assert engine._consecutive_llm_failures == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("older_action", ["fails", "cancelled"])
+async def test_stale_older_turn_cannot_cancel_newer_domain_generation(tmp_path, older_action):
+    from math_tutor.harness.model import ProviderUpstreamUnavailable
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    entered={"older":asyncio.Event(),"newer":asyncio.Event()}; release={"older":asyncio.Event(),"newer":asyncio.Event()}; generations={}
+    class Racing:
+        async def complete(self,**kwargs):
+            key="older" if kwargs["context"].current_turn.turn_id == "older" else "newer"
+            generations[key]=kwargs["context"].generation_id; entered[key].set(); await release[key].wait()
+            if key == "older": raise ProviderUpstreamUnavailable()
+            return {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Racing())
+    older=asyncio.create_task(engine.decide(VoiceTurn("older","respuesta",.9,Event()))); await entered["older"].wait()
+    newer=asyncio.create_task(engine.decide(VoiceTurn("newer","respuesta",.9,Event()))); await entered["newer"].wait()
+    if older_action == "cancelled": older.cancel()
+    else: release["older"].set()
+    with pytest.raises(asyncio.CancelledError): await older
+    assert engine._runtime.is_active(metadata.tutoring_session_id,generations["newer"])
+    assert engine._consecutive_llm_failures == 0
+    release["newer"].set(); assert (await newer).speech == "Vamos paso a paso."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["model", "mutation"])
+async def test_unexpected_programming_or_mutation_errors_are_not_conversationally_recovered(tmp_path,caplog,boundary):
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class Model:
+        async def complete(self,**kwargs):
+            if boundary == "model": raise RuntimeError("unexpected secret programming bug")
+            return {"type":"tool","name":"give_hint","arguments":{}}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Model())
+    if boundary == "mutation":
+        engine._service.commit_hint=lambda *args,**kwargs: (_ for _ in ()).throw(RuntimeError("unexpected mutation bug"))
+    with caplog.at_level("WARNING"), pytest.raises(RuntimeError,match="unexpected"):
+        await engine.decide(VoiceTurn("turn","respuesta",.9,Event()))
+    assert engine._consecutive_llm_failures == 0
+    assert not any(record.getMessage()=="llm_turn_failed" for record in caplog.records)
+    assert not repo.load_state(metadata.tutoring_session_id).session.ended
 
 
 @pytest.mark.asyncio
