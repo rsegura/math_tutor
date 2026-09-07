@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from math_tutor.agent.lifecycle import FALLBACK_AUDIO_PATH, FALLBACK_AUDIO_TRANSCRIPT_PATH, TTS_FALLBACK_ES, StaticFallbackAudioPlayer, TTSWatchdog, TerminalCloser
+from math_tutor.agent.lifecycle import FALLBACK_AUDIO_PATH, FALLBACK_AUDIO_TRANSCRIPT_PATH, TTS_FALLBACK_ES, StaticFallbackAudioPlayer, TTSWatchdog, TerminalCloser, _bounded_step
 
 
 class Source:
@@ -79,6 +79,58 @@ async def test_terminal_close_cancellation_still_reaches_shutdown_once():
     closer=TerminalCloser(SimpleNamespace(delete_room=delete,shutdown=lambda **kw:calls.append("shutdown")),Session(),grace_seconds=.05)
     closer.trigger("stop",Handle()); await asyncio.sleep(0); closer._task.cancel(); await closer.aclose()
     assert calls == ["aclose","delete","shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_bounded_step_accepts_existing_livekit_task_without_rescheduling_it():
+    completed=[]
+    async def delete_room_work(): completed.append("delete")
+    livekit_task=asyncio.create_task(delete_room_work())
+    await _bounded_step(livekit_task,.05)
+    assert completed == ["delete"]
+
+
+@pytest.mark.asyncio
+async def test_bounded_step_does_not_cancel_external_task_on_timeout():
+    release=asyncio.Event()
+    external_task=asyncio.create_task(release.wait())
+    await _bounded_step(external_task,.01)
+    assert not external_task.done()
+    release.set()
+    await external_task
+
+
+@pytest.mark.asyncio
+async def test_bounded_step_cancels_and_drains_owned_coroutine_on_timeout():
+    cancelled=asyncio.Event()
+    async def blocked():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+    await _bounded_step(blocked(),.01)
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_terminal_closer_handles_external_delete_task_and_later_shutdown_once():
+    calls=[]
+    delete_release=asyncio.Event()
+    class Handle:
+        async def wait_for_playout(self): await asyncio.Event().wait()
+    class Session:
+        async def aclose(self): calls.append("aclose")
+    async def delete_work():
+        await delete_release.wait()
+        calls.append("delete")
+    def delete_room(): return asyncio.create_task(delete_work())
+    closer=TerminalCloser(SimpleNamespace(delete_room=delete_room,shutdown=lambda **kw:calls.append("shutdown")),Session(),grace_seconds=.01)
+    closer.trigger("stop",Handle()); await asyncio.sleep(0); closer._task.cancel(); await closer.aclose()
+    assert calls == ["aclose","shutdown"]
+    closer.trigger("other")
+    delete_release.set()
+    await asyncio.sleep(0)
+    assert calls == ["aclose","shutdown","delete"]
 
 
 def test_reviewed_fallback_asset_is_bounded_pcm_and_enqueue_returns_exact_handle():

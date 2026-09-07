@@ -62,8 +62,9 @@ async def _bounded_close(source, seconds: float = 1.0) -> None:
 
 
 async def _bounded_step(awaitable, seconds: float) -> None:
-    """Finish or cancel one teardown step even if the closer is cancelled."""
-    task = asyncio.create_task(awaitable)
+    """Bound teardown work without taking ownership of an existing future."""
+    externally_owned = isinstance(awaitable, asyncio.Future)
+    task = awaitable if externally_owned else asyncio.create_task(awaitable)
     try:
         async with asyncio.timeout(seconds):
             await asyncio.shield(task)
@@ -72,16 +73,17 @@ async def _bounded_step(awaitable, seconds: float) -> None:
             async with asyncio.timeout(seconds):
                 await asyncio.shield(task)
         except (Exception, asyncio.CancelledError):
-            task.cancel()
-    except Exception:
-        task.cancel()
-    finally:
-        if not task.done():
-            task.cancel()
-        try:
-            await task
-        except (Exception, asyncio.CancelledError):
             pass
+    except Exception:
+        pass
+    finally:
+        if not externally_owned and not task.done():
+            task.cancel()
+        if not externally_owned:
+            try:
+                await task
+            except (Exception, asyncio.CancelledError):
+                pass
 
 
 class TTSWatchdog:
