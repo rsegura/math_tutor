@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import os
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -83,14 +85,48 @@ def test_python_base_image_is_pinned_to_a_patch_and_digest() -> None:
 
 def test_live_model_target_reports_pass_skip_and_failure_without_hiding_no_tests() -> None:
     makefile = (ROOT / "Makefile").read_text()
+    runner = (ROOT / "scripts" / "openrouter_smoke.py").read_text()
+    contract = makefile + runner
 
-    assert "tests/live_llm/test_openrouter_responses_live.py" in makefile
-    assert "PASS: OpenRouter Responses tool smoke" in makefile
-    assert "SKIP: OpenRouter credentials or model not configured" in makefile
-    assert "FAIL: OpenRouter Responses tool smoke" in makefile
-    assert "SKIPPED \\[" in makefile
+    assert "tests/live_llm/test_openrouter_responses_live.py" in runner
+    assert "PASS: OpenRouter Responses tool smoke" in contract
+    assert "SKIP: OpenRouter credentials or model not configured" in contract
+    assert "FAIL: OpenRouter Responses tool smoke" in contract
+    assert "scripts/openrouter_smoke.py" in makefile
+    assert "grep -Eq" not in makefile
     assert 'if [ "$$status" -eq 5 ]' not in makefile
-    assert 'exit "$$status"' in makefile
+
+
+def test_live_model_runner_rejects_collect_only_instead_of_reporting_pass() -> None:
+    result = subprocess.run(
+        [sys.executable, "scripts/openrouter_smoke.py", "--collect-only"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "FAIL: OpenRouter Responses tool smoke" in result.stdout
+    assert "PASS:" not in result.stdout
+
+
+def test_live_model_runner_reports_skip_when_credentials_are_absent() -> None:
+    env = os.environ.copy()
+    env.pop("OPENROUTER_API_KEY", None)
+    env.pop("OPENROUTER_MODEL", None)
+    result = subprocess.run(
+        [sys.executable, "scripts/openrouter_smoke.py"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "SKIP: OpenRouter credentials or model not configured" in result.stdout
+    assert "PASS:" not in result.stdout
 
 
 def test_operator_configuration_documents_exact_provider_contracts() -> None:

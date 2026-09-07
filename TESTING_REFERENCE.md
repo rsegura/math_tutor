@@ -13,11 +13,36 @@ docker compose --profile dev run --rm tooling uv run pytest <anything>   # canon
 
 The pytest configuration registers `live_llm` and applies `-m "not live_llm"`
 by default, including for the canonical Docker command. `make test-live-llm`
-selects that marker and is ready for future opt-in provider smokes, but the
-bootstrap scaffold does not contain any live-provider tests yet. Until one is
-added, the target reports `SKIP` and maps only pytest's no-tests exit status to
-success; collection errors and test failures keep their original non-zero
-status.
+selects the implemented one-call OpenRouter Responses smoke. It passes a real
+`give_hint` function contract through the production canonical parser and uses
+a 64-token output budget. It reports exactly one terminal classification:
+`PASS` when that test executed and passed, `SKIP` when its two dedicated
+credentials are absent, or `FAIL` for test, collection, configuration, or
+no-execution outcomes. No-tests exit status is not converted to success, and
+no-run pytest options such as `--collect-only` are rejected.
+
+The target deliberately reads `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`, not
+the agent's generic `LLM_*` variables. Set them directly:
+
+```bash
+export OPENROUTER_API_KEY='your-openrouter-key'
+export OPENROUTER_MODEL='openai/gpt-4o-mini' # must support Responses + tools
+make test-live-llm
+```
+
+If `.env` has been explicitly configured for OpenRouter
+(`LLM_PROVIDER=openrouter`, the canonical
+`LLM_BASE_URL=https://openrouter.ai/api/v1`, a compatible model, and its key),
+it can be sourced and mapped without printing the secret:
+
+```bash
+set -a
+. ./.env
+set +a
+export OPENROUTER_API_KEY="$LLM_API_KEY"
+export OPENROUTER_MODEL="$LLM_MODEL"
+make test-live-llm
+```
 
 ## TDD protocol (Red → Green → Refactor)
 
