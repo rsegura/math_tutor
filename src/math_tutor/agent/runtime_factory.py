@@ -8,6 +8,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Mapping
 import asyncio
+import logging
 
 from math_tutor.infrastructure.dispatch import DispatchMetadata, VoiceBootstrap
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
@@ -19,11 +20,15 @@ from math_tutor.harness.context import ActivityContext, LearnerState, TurnEviden
 from math_tutor.harness.contracts import ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.loop import PedagogicalHarness
+from math_tutor.harness.loop import HarnessContractExhausted, HarnessProposalInvalid
+from math_tutor.harness.model import ProviderFailure, ProviderUpstreamUnavailable
 from math_tutor.harness.registry import PedagogicalToolRegistry, SessionCapExceeded
 from math_tutor.agent.voice_agent import CONFIRMATION_ES, VoiceDecision, VoiceTurn, is_help_request, is_stop_request
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
 from math_tutor.agent.providers.model import build_model_adapter
 from math_tutor.agent.providers.voice import create_voice_providers
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +62,8 @@ class BoundedConversationEngine:
         self._service = TutoringService(repository, self._runtime, templates, TranscriptionReliabilityPolicy(0.65), ProgressionPolicy(thresholds),
             PedagogicalMutationPolicy(max_attempts_per_activity=limits.max_attempts_per_activity,max_hints_per_activity=limits.max_hints_per_activity,min_repeated_outcomes_for_adaptation=2), hints)
         self._bootstrap = runtime.bootstrap
+        self._bootstrap_provider = runtime.providers.llm_provider
+        self._bootstrap_model = runtime.providers.llm_model
         self._curriculum = curriculum
         self._templates = templates
         self._initial_activity_id = "activity-1"
@@ -67,6 +74,9 @@ class BoundedConversationEngine:
         self._harness = PedagogicalHarness(model, self._registry, limits) if model is not None else None
         self._harness_lock = asyncio.Lock()
         self._support_lock = asyncio.Lock()
+        self._turn_state_lock = asyncio.Lock()
+        self._turn_epoch = 0
+        self._consecutive_llm_failures = 0
         self._limits = limits
         self._llm_total_seconds = runtime.providers.llm_total_seconds
         self.startup_terminal_reason = self._cap_reason(self._repository.load_session_aggregate(self._bootstrap.session.session_id))
@@ -181,6 +191,25 @@ class BoundedConversationEngine:
     def cancel(self) -> None:
         self._runtime.cancel_generation(self._bootstrap.session.session_id)
 
+    async def _begin_llm_turn(self) -> int:
+        async with self._turn_state_lock:
+            self._turn_epoch += 1
+            return self._turn_epoch
+
+    async def _llm_failed(self, epoch: int) -> int | None:
+        async with self._turn_state_lock:
+            if epoch != self._turn_epoch:
+                return None
+            self._consecutive_llm_failures += 1
+            return self._consecutive_llm_failures
+
+    async def _llm_succeeded(self, epoch: int) -> bool:
+        async with self._turn_state_lock:
+            if epoch != self._turn_epoch:
+                return False
+            self._consecutive_llm_failures = 0
+            return True
+
     def _next_activity_after_correct(self, *, turn_id: str, source_activity_id: str, source_activity) -> str:
         """Persist and return the reviewed follow-up selected from trusted state."""
         session_id = self._bootstrap.session.session_id
@@ -274,6 +303,8 @@ class BoundedConversationEngine:
                 source_activity_id=source_id,
                 source_activity=source,
             )
+            replay_epoch = await self._begin_llm_turn()
+            await self._llm_succeeded(replay_epoch)
             return VoiceDecision(f"Sí, esa respuesta es correcta. {next_prompt}")
         if is_help_request(turn.text):
             async with self._support_lock:
@@ -297,6 +328,7 @@ class BoundedConversationEngine:
                 raise RuntimeError(f"learner support rejected: {result.reason}")
             receipt = result.payload
             return VoiceDecision(receipt.speech, reason=f"learner-support-{receipt.action}")
+        epoch = await self._begin_llm_turn()
         try:
             harness = await self._get_harness()
             decision = await harness.run_async(context, total_seconds=self._llm_total_seconds)
@@ -306,11 +338,33 @@ class BoundedConversationEngine:
         except asyncio.CancelledError:
             self.cancel()
             raise
-        except Exception:
+        except Exception as error:
             self.cancel()
+            failure = error if isinstance(error, (ProviderFailure, HarnessProposalInvalid, HarnessContractExhausted)) else ProviderUpstreamUnavailable()
+            count = await self._llm_failed(epoch)
+            if count is None:
+                raise asyncio.CancelledError
+            logger.warning(
+                "llm_turn_failed",
+                extra={
+                    "failure_code": failure.code,
+                    "provider": self._bootstrap_provider,
+                    "model": self._bootstrap_model,
+                    "session_id": aggregate.session.session_id,
+                    "consecutive_count": count,
+                },
+                exc_info=False,
+            )
             reason = self._runtime_cap_reason() or "llm-provider-unavailable"
-            self._stop(reason)
-            return VoiceDecision("No puedo continuar ahora. Terminamos por hoy.",terminal=True,reason=reason)
+            if reason != "llm-provider-unavailable" or count >= 3:
+                self._stop(reason)
+                return VoiceDecision("No puedo continuar ahora. Terminamos por hoy.",terminal=True,reason=reason)
+            return VoiceDecision(
+                f"Ahora mismo me cuesta responder. Vamos a intentarlo otra vez. {activity.prompt_es}",
+                reason="llm-temporarily-unavailable",
+            )
+        if not await self._llm_succeeded(epoch):
+            raise asyncio.CancelledError
         cap = self._runtime_cap_reason()
         if cap is not None:
             self._stop(cap)

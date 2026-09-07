@@ -7,7 +7,21 @@ import json
 from collections.abc import Mapping
 
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
+from math_tutor.harness.model import (
+    ProviderFailure, ProviderInvalidResponse, ProviderRateLimited,
+    ProviderTimeout, ProviderUpstreamUnavailable,
+)
 
+
+def _request_failure(error: BaseException) -> ProviderFailure:
+    """Classify only stable SDK type/status metadata, never its text or body."""
+    status = getattr(error, "status_code", None)
+    name = type(error).__name__.lower()
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)) or "timeout" in name or status == 408:
+        return ProviderTimeout()
+    if status == 429 or "ratelimit" in name or "rate_limit" in name:
+        return ProviderRateLimited()
+    return ProviderUpstreamUnavailable()
 
 def _field(value: object, name: str, default=None):
     return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
@@ -87,6 +101,7 @@ class OpenResponsesAdapter:
             "validation_error": None if validation_error is None else {"code": validation_error},
             "allowed_contract": {tool["name"]: tool["parameters"] for tool in tools},
         }
+        request_failure = None
         try:
             async with asyncio.timeout(self._first_response_seconds):
                 response = await self._client.responses.create(
@@ -94,42 +109,44 @@ class OpenResponsesAdapter:
                     tools=tools, tool_choice="auto", parallel_tool_calls=False,
                     max_output_tokens=self._max_output_tokens,
                 )
-        except TimeoutError:
+        except asyncio.CancelledError:
             raise
-        except Exception:
-            raise RuntimeError("model-provider-request-failed") from None
+        except Exception as error:
+            request_failure = _request_failure(error)
+        if request_failure is not None:
+            raise request_failure from None
         status = _field(response, "status")
         if status != "completed" or _field(response, "error") is not None:
-            raise ValueError("model-response-not-completed")
+            raise ProviderInvalidResponse() from None
         output = _field(response, "output", ())
         if not isinstance(output, (list, tuple)):
-            raise ValueError("model-response-invalid")
+            raise ProviderInvalidResponse() from None
         calls = [item for item in output if _field(item, "type") == "function_call"]
         messages = [item for item in output if _field(item, "type") == "message"]
         unexpected = [item for item in output if _field(item, "type") not in {"function_call", "message", "reasoning"}]
         if calls:
             if len(calls) != 1 or messages or unexpected:
-                raise ValueError("model-output-has-invalid-tool-call")
+                raise ProviderInvalidResponse() from None
             call = calls[0]
             allowed = {tool["name"] for tool in tools}
             name = _field(call, "name")
             if name not in allowed:
-                raise ValueError("model-output-has-invalid-tool-call")
+                raise ProviderInvalidResponse() from None
             try:
                 arguments = json.loads(_field(call, "arguments"))
             except (json.JSONDecodeError, TypeError):
-                raise ValueError("model-tool-arguments-must-be-json") from None
+                raise ProviderInvalidResponse() from None
             if not isinstance(arguments, dict):
-                raise ValueError("model-tool-arguments-must-be-object")
+                raise ProviderInvalidResponse() from None
             return {"type": "tool", "name": name, "arguments": arguments}
         if unexpected or len(messages) > 1:
-            raise ValueError("model-output-has-unexpected-items")
+            raise ProviderInvalidResponse() from None
         try:
             result = json.loads(_field(response, "output_text"))
         except (json.JSONDecodeError, TypeError):
-            raise ValueError("model-output-must-be-json") from None
+            raise ProviderInvalidResponse() from None
         if not isinstance(result, dict):
-            raise ValueError("model-output-must-be-object")
+            raise ProviderInvalidResponse() from None
         return result
 
 

@@ -8,6 +8,7 @@ from math_tutor.agent.providers.model import OpenResponsesAdapter
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.harness.loop import _parse
 from math_tutor.harness.contracts import ToolName
+from math_tutor.harness.model import ProviderInvalidResponse, ProviderTimeout
 
 
 class Responses:
@@ -58,7 +59,7 @@ async def test_repair_request_contains_validation_error_and_same_allowed_contrac
 async def test_adapter_rejects_unstructured_or_unknown_function_output():
     response=SimpleNamespace(status="completed",error=None,output=[SimpleNamespace(type="function_call",name="invented",arguments="{}")],output_text="")
     adapter=OpenResponsesAdapter(model="pinned",client=SimpleNamespace(responses=Responses(response)))
-    with pytest.raises(ValueError): await adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
+    with pytest.raises(ProviderInvalidResponse): await adapter.complete(prompt="system",context=context(),repair=False,validation_error=None)
 
 
 def test_record_answer_schema_has_evaluable_and_empty_uncertain_branches():
@@ -94,7 +95,7 @@ async def test_adapter_timeout_and_caller_cancellation_abort_underlying_request(
             finally: cancelled.append(True)
     adapter=OpenResponsesAdapter(model="pinned",client=SimpleNamespace(responses=Blocked()))
     adapter._first_response_seconds=.01
-    with pytest.raises(TimeoutError): await adapter.complete(prompt="system",context=context(),repair=False)
+    with pytest.raises(ProviderTimeout): await adapter.complete(prompt="system",context=context(),repair=False)
     assert cancelled == [True]
     task=asyncio.create_task(adapter.complete(prompt="system",context=context(),repair=False))
     await asyncio.sleep(0); task.cancel()

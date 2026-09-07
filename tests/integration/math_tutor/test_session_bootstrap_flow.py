@@ -572,11 +572,88 @@ async def test_provider_error_returns_reviewed_terminal_response_and_stops_durab
     class Broken:
         async def complete(self,**kwargs): raise RuntimeError("secret provider detail")
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Broken())
-    decision=await engine.decide(VoiceTurn("turn","cuatro",.9,Event()))
-    assert decision.speech == "No puedo continuar ahora. Terminamos por hoy."
-    assert decision.terminal and decision.reason == "llm-provider-unavailable"
+    current_prompt=engine.initial_prompt
+    decisions=[]
+    for index in range(3):
+        decisions.append(await engine.decide(VoiceTurn(f"turn-{index}","cuatro",.9,Event())))
+    assert all(not item.terminal for item in decisions[:2])
+    assert all(current_prompt in item.speech for item in decisions[:2])
+    assert repo.load_session_aggregate(metadata.tutoring_session_id).observations == ()
+    assert decisions[2].speech == "No puedo continuar ahora. Terminamos por hoy."
+    assert decisions[2].terminal and decisions[2].reason == "llm-provider-unavailable"
     events=repo.load_session_aggregate(metadata.tutoring_session_id).events
     assert [(event.kind,event.detail) for event in events if event.kind=="session-stop-requested"] == [("session-stop-requested","llm-provider-unavailable")]
+
+
+@pytest.mark.asyncio
+async def test_success_resets_llm_failure_counter_and_help_preserves_it(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class Sequence:
+        def __init__(self): self.values=iter([RuntimeError("secret"), {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}, RuntimeError("secret"), RuntimeError("secret"), RuntimeError("secret")])
+        async def complete(self,**kwargs):
+            value=next(self.values)
+            if isinstance(value,Exception): raise value
+            return value
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Sequence())
+    first=await engine.decide(VoiceTurn("f1","respuesta",.9,Event()))
+    success=await engine.decide(VoiceTurn("ok","respuesta",.9,Event()))
+    second=await engine.decide(VoiceTurn("f2","respuesta",.9,Event()))
+    help_turn=await engine.decide(VoiceTurn("help","no lo entiendo",.9,Event()))
+    third=await engine.decide(VoiceTurn("f3","respuesta",.9,Event()))
+    terminal=await engine.decide(VoiceTurn("f4","respuesta",.9,Event()))
+    assert not first.terminal and success.speech == "Vamos paso a paso."
+    assert not second.terminal and help_turn.reason.startswith("learner-support-") and not third.terminal
+    assert terminal.terminal and terminal.reason == "llm-provider-unavailable"
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_log_is_allowlisted_and_has_no_exception_chain(tmp_path, caplog):
+    from math_tutor.harness.model import ProviderUpstreamUnavailable
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class Broken:
+        async def complete(self,**kwargs):
+            try: raise RuntimeError("api-key transcript response-body child-name")
+            except RuntimeError: raise ProviderUpstreamUnavailable() from None
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Broken())
+    with caplog.at_level("WARNING"):
+        await engine.decide(VoiceTurn("turn-secret","private transcript",.9,Event()))
+    record=next(record for record in caplog.records if record.getMessage()=="llm_turn_failed")
+    assert record.failure_code == "provider-upstream-unavailable"
+    assert record.provider == runtime.providers.llm_provider
+    assert record.model == runtime.providers.llm_model
+    assert record.session_id == metadata.tutoring_session_id
+    assert record.consecutive_count == 1
+    assert record.exc_info is False
+    rendered=" ".join(str(value) for value in record.__dict__.values())
+    assert "api-key" not in rendered and "private transcript" not in rendered and "response-body" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_turn_epochs_are_monotonic_and_stale_completions_are_neutral(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    first,second=await asyncio.gather(engine._begin_llm_turn(),engine._begin_llm_turn())
+    assert (first,second) == (1,2)
+    assert await engine._llm_failed(first) is None
+    assert await engine._llm_succeeded(first) is False
+    assert await engine._llm_failed(second) == 1
+    assert await engine._llm_succeeded(second) is True
+    assert engine._consecutive_llm_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_llm_turn_does_not_increment_failure_counter(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    entered=asyncio.Event()
+    class Blocked:
+        async def complete(self,**kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Blocked())
+    task=asyncio.create_task(engine.decide(VoiceTurn("cancelled","respuesta",.9,Event())))
+    await entered.wait(); task.cancel()
+    with pytest.raises(asyncio.CancelledError): await task
+    assert engine._consecutive_llm_failures == 0
 
 
 @pytest.mark.asyncio

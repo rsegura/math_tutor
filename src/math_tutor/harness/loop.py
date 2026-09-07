@@ -5,11 +5,22 @@ import inspect
 from math_tutor.harness.context import HarnessContext
 from math_tutor.harness.contracts import ConversationReply, HarnessDecision, SpeechKind, ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
-from math_tutor.harness.model import ModelAdapter
+from math_tutor.harness.model import ModelAdapter, ProviderInvalidResponse, ProviderTimeout
 from math_tutor.harness.prompts import REPAIR_PROMPT, REVIEWED_SOCIAL_REPLIES, SYSTEM_PROMPT
 from math_tutor.harness.registry import PedagogicalToolRegistry, ToolRejected
 
-class HarnessBudgetExceeded(RuntimeError): pass
+class HarnessProposalInvalid(RuntimeError):
+    code = "harness-proposal-invalid"
+    def __init__(self) -> None: super().__init__(self.code)
+
+class HarnessContractExhausted(RuntimeError):
+    code = "harness-contract-exhausted"
+    def __init__(self, last_failure: HarnessProposalInvalid) -> None:
+        super().__init__(self.code)
+        self.last_failure = last_failure
+
+# Backward-compatible import while callers migrate to the closed contract.
+HarnessBudgetExceeded = HarnessContractExhausted
 
 def _parse(output: object) -> ToolProposal | ConversationReply:
     if not isinstance(output, Mapping): raise ValueError("model-output-must-be-object")
@@ -51,7 +62,8 @@ class PedagogicalHarness:
                 action = _parse(output)
                 if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
                 if tool_steps >= self._limits.max_tool_steps:
-                    raise HarnessBudgetExceeded("tool-step-budget-exhausted")
+                    invalid = HarnessProposalInvalid()
+                    raise HarnessContractExhausted(invalid) from invalid
                 try:
                     decision = self._registry.execute(action, context)
                     tool_steps += 1
@@ -59,30 +71,33 @@ class PedagogicalHarness:
                 except ToolRejected as exc:
                     if exc.crossed_fence:
                         tool_steps += 1
-                        raise
-                    last_error = exc
+                        raise HarnessProposalInvalid() from None
+                    last_error = HarnessProposalInvalid()
             except ToolRejected:
-                raise
-            except ValueError as exc:
-                last_error = exc
+                raise HarnessProposalInvalid() from None
+            except (ValueError, ProviderInvalidResponse):
+                last_error = HarnessProposalInvalid()
         assert last_error is not None
-        raise HarnessBudgetExceeded("model-call-budget-exhausted") from last_error
+        raise HarnessContractExhausted(last_error) from last_error
 
     async def run_async(self, context: HarnessContext, *, stop_requested: bool=False, total_seconds: float = 10.0) -> HarnessDecision:
         if not 2 <= total_seconds <= 15: raise ValueError("LLM total deadline must be between 2 and 15 seconds")
         if stop_requested: return self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason":"stop-requested"}), context)
-        async with asyncio.timeout(total_seconds):
-            last_error = None
-            for call_index in range(self._limits.max_model_calls):
-                try:
-                    value = self._model.complete(prompt=REPAIR_PROMPT if call_index else SYSTEM_PROMPT,context=context,repair=bool(call_index),validation_error=None if last_error is None else str(last_error))
-                    output = await value if inspect.isawaitable(value) else value
-                    action = _parse(output)
-                    if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
-                    try: return self._registry.execute(action, context)
-                    except ToolRejected as exc:
-                        if exc.crossed_fence: raise
-                        last_error = exc
-                except ToolRejected: raise
-                except ValueError as exc: last_error = exc
-            raise HarnessBudgetExceeded("model-call-budget-exhausted") from last_error
+        try:
+            async with asyncio.timeout(total_seconds):
+                last_error = None
+                for call_index in range(self._limits.max_model_calls):
+                    try:
+                        value = self._model.complete(prompt=REPAIR_PROMPT if call_index else SYSTEM_PROMPT,context=context,repair=bool(call_index),validation_error=None if last_error is None else str(last_error))
+                        output = await value if inspect.isawaitable(value) else value
+                        action = _parse(output)
+                        if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
+                        try: return self._registry.execute(action, context)
+                        except ToolRejected as exc:
+                            if exc.crossed_fence: raise HarnessProposalInvalid() from None
+                            last_error = HarnessProposalInvalid()
+                    except ToolRejected: raise HarnessProposalInvalid() from None
+                    except (ValueError, ProviderInvalidResponse): last_error = HarnessProposalInvalid()
+                raise HarnessContractExhausted(last_error or HarnessProposalInvalid()) from (last_error or None)
+        except TimeoutError:
+            raise ProviderTimeout() from None

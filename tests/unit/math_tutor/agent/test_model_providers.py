@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from math_tutor.agent.providers.model import OpenResponsesAdapter, build_model_adapter
+from math_tutor.harness.model import ProviderInvalidResponse, ProviderRateLimited, ProviderTimeout, ProviderUpstreamUnavailable
 from math_tutor.agent.providers.settings import ProviderSettings
 from math_tutor.domain.templates import ExpectedAnswerKind
 
@@ -145,7 +146,7 @@ async def test_adapter_supports_aclose_and_never_double_closes_client():
 ])
 async def test_provider_response_failures_are_closed_and_sanitized(fixture):
     adapter = OpenResponsesAdapter(client=SimpleNamespace(responses=Responses(fixture)), model="provider/model")
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(ProviderInvalidResponse) as caught:
         await adapter.complete(prompt="secret prompt", context=context(), repair=False)
     message = str(caught.value)
     assert "secret" not in message
@@ -158,6 +159,34 @@ async def test_provider_transport_error_is_sanitized():
         async def create(self, **kwargs):
             raise RuntimeError("secret-key and child transcript")
     adapter = OpenResponsesAdapter(client=SimpleNamespace(responses=Broken()), model="provider/model")
-    with pytest.raises(RuntimeError, match="model-provider-request-failed") as caught:
+    with pytest.raises(ProviderUpstreamUnavailable) as caught:
         await adapter.complete(prompt="system", context=context(), repair=False)
     assert "secret-key" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error,expected", [
+    (TimeoutError("secret transcript"), ProviderTimeout),
+    (type("RateLimitError", (Exception,), {"status_code": 429})("secret body"), ProviderRateLimited),
+    (type("APIStatusError", (Exception,), {"status_code": 503})("secret cause"), ProviderUpstreamUnavailable),
+])
+async def test_sdk_failures_map_to_closed_neutral_categories(error, expected):
+    class Broken:
+        async def create(self, **kwargs): raise error
+    adapter = OpenResponsesAdapter(client=SimpleNamespace(responses=Broken()), model="provider/model")
+    with pytest.raises(expected) as caught:
+        await adapter.complete(prompt="secret prompt", context=context(), repair=False)
+    assert str(caught.value) == expected.code
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_provider_wire_shape_has_neutral_category():
+    adapter = OpenResponsesAdapter(
+        client=SimpleNamespace(responses=Responses({"status":"completed","output":"secret body"})),
+        model="provider/model",
+    )
+    with pytest.raises(ProviderInvalidResponse) as caught:
+        await adapter.complete(prompt="secret prompt", context=context(), repair=False)
+    assert str(caught.value) == "provider-invalid-response"

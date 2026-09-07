@@ -5,8 +5,9 @@ import pytest
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.harness.context import ActivityContext, LearnerState, TurnEvidence, build_harness_context
 from math_tutor.harness.limits import HarnessLimits
-from math_tutor.harness.loop import HarnessBudgetExceeded, PedagogicalHarness
+from math_tutor.harness.loop import HarnessContractExhausted, HarnessProposalInvalid, PedagogicalHarness
 from math_tutor.harness.registry import PedagogicalToolRegistry
+from math_tutor.harness.model import ProviderInvalidResponse, ProviderUpstreamUnavailable
 
 
 class FakeService:
@@ -51,21 +52,21 @@ def test_invalid_output_gets_exactly_one_bounded_repair(context):
 
 def test_unverified_mathematical_speech_is_never_released(context):
     model = FakeModel([{"type": "reply", "speech": "Cuatro más cuatro son ocho.", "speech_kind": "mathematical"}] * 2)
-    with pytest.raises(HarnessBudgetExceeded) as caught:
+    with pytest.raises(HarnessContractExhausted) as caught:
         PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits()).run(context)
-    assert "mathematical-speech-requires-fence" in str(caught.value.__cause__)
+    assert str(caught.value.__cause__) == "harness-proposal-invalid"
 
 
 def test_model_cannot_bypass_math_fence_by_mislabeling_speech_as_social(context):
     model = FakeModel([{"type": "reply", "speech": "Cuatro más cuatro son ocho.", "speech_kind": "social"}] * 2)
-    with pytest.raises(HarnessBudgetExceeded) as caught:
+    with pytest.raises(HarnessContractExhausted) as caught:
         PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits()).run(context)
-    assert "reply-not-reviewed" in str(caught.value.__cause__)
+    assert str(caught.value.__cause__) == "harness-proposal-invalid"
 
 
 def test_explicit_model_budget_is_hard(context):
     model = FakeModel([{"bad": True}])
-    with pytest.raises(HarnessBudgetExceeded, match="model-call-budget"):
+    with pytest.raises(HarnessContractExhausted, match="harness-contract-exhausted"):
         PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits(max_model_calls=1)).run(context)
 
 
@@ -96,3 +97,53 @@ def test_sync_run_closes_unexpected_coroutine(context):
     with pytest.raises(TypeError, match="run_async"):
         PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits()).run(context)
     assert model.returned.cr_frame is None
+
+
+@pytest.mark.asyncio
+async def test_async_invalid_proposal_gets_one_repair_then_closed_exhaustion(context):
+    model = FakeModel([{"bad":"secret transcript"}, {"also":"secret response"}])
+    harness = PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits())
+    with pytest.raises(HarnessContractExhausted) as caught:
+        await harness.run_async(context)
+    assert len(model.calls) == 2
+    assert model.calls[1][2] is True
+    assert isinstance(caught.value.last_failure, HarnessProposalInvalid)
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_provider_invalid_response_gets_one_repair(context):
+    class Model(FakeModel):
+        def complete(self, **kwargs):
+            self.calls.append((kwargs["prompt"], kwargs["context"], kwargs["repair"]))
+            value=self.outputs.pop(0)
+            if isinstance(value, Exception): raise value
+            return value
+    model=Model([ProviderInvalidResponse(), {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}])
+    decision=await PedagogicalHarness(model,PedagogicalToolRegistry(FakeService(),HarnessLimits()),HarnessLimits()).run_async(context)
+    assert decision.speech == "Vamos paso a paso."
+    assert [call[2] for call in model.calls] == [False,True]
+
+
+@pytest.mark.asyncio
+async def test_provider_availability_failure_aborts_without_repair(context):
+    class Model(FakeModel):
+        def complete(self, **kwargs):
+            self.calls.append((kwargs["prompt"], kwargs["context"], kwargs["repair"]))
+            raise ProviderUpstreamUnavailable()
+    model=Model([])
+    with pytest.raises(ProviderUpstreamUnavailable):
+        await PedagogicalHarness(model,PedagogicalToolRegistry(FakeService(),HarnessLimits()),HarnessLimits()).run_async(context)
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_post_fence_rejection_aborts_without_repair(context):
+    class Registry:
+        def execute(self, proposal, context):
+            from math_tutor.harness.registry import ToolRejected
+            raise ToolRejected("secret persisted rejection", crossed_fence=True)
+    model=FakeModel([{"type":"tool","name":"give_hint","arguments":{}}, {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}])
+    with pytest.raises(HarnessProposalInvalid):
+        await PedagogicalHarness(model,Registry(),HarnessLimits()).run_async(context)
+    assert len(model.calls) == 1
