@@ -5,9 +5,10 @@ import pytest
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.harness.context import ActivityContext, LearnerState, TurnEvidence, build_harness_context
 from math_tutor.harness.limits import HarnessLimits
-from math_tutor.harness.loop import HarnessContractExhausted, HarnessProposalInvalid, PedagogicalHarness
+from math_tutor.harness.loop import HarnessContractExhausted, HarnessProposalInvalid, PedagogicalHarness, _parse
 from math_tutor.harness.registry import PedagogicalToolRegistry
 from math_tutor.harness.model import ProviderInvalidResponse, ProviderUpstreamUnavailable
+from math_tutor.harness.contracts import ToolName
 
 
 class FakeService:
@@ -147,3 +148,40 @@ async def test_post_fence_rejection_aborts_without_repair(context):
     with pytest.raises(HarnessProposalInvalid):
         await PedagogicalHarness(model,Registry(),HarnessLimits()).run_async(context)
     assert len(model.calls) == 1
+
+
+def test_regulation_tool_accepts_only_the_exact_typed_current_turn_contract():
+    proposal = _parse({
+        "type": "tool",
+        "name": "regulate_conversation",
+        "arguments": {
+            "turn_id": "turn",
+            "signal": "frustrated",
+            "confidence": 0.82,
+            "strategy": "validate-emotion",
+        },
+    })
+    assert proposal.name is ToolName.REGULATE_CONVERSATION
+    assert dict(proposal.arguments) == {
+        "turn_id": "turn",
+        "signal": "frustrated",
+        "confidence": 0.82,
+        "strategy": "validate-emotion",
+    }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"turn_id": "turn", "signal": "engaged", "confidence": 0.9, "strategy": "repeat-instruction"},
+        {"turn_id": "turn", "signal": "confused", "confidence": True, "strategy": "repeat-instruction"},
+        {"turn_id": "turn", "signal": "confused", "confidence": float("nan"), "strategy": "repeat-instruction"},
+        {"turn_id": "turn", "signal": "confused", "confidence": 0.9, "strategy": "invent-example"},
+        {"turn_id": "turn", "signal": "off-task", "confidence": 0.9, "strategy": "give-ordered-hint"},
+        {"turn_id": "turn", "signal": "confused", "confidence": 0.9, "strategy": "repeat-instruction", "rationale": "free form"},
+        {"signal": "confused", "confidence": 0.9, "strategy": "repeat-instruction"},
+    ],
+)
+def test_regulation_tool_rejects_unknown_malformed_or_extra_fields(arguments):
+    with pytest.raises(ValueError, match="invalid-tool-output"):
+        _parse({"type": "tool", "name": "regulate_conversation", "arguments": arguments})

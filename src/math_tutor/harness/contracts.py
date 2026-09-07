@@ -10,6 +10,7 @@ class ToolName(Enum):
     ADAPT_DIFFICULTY = "adapt_difficulty"
     PROPOSE_SKILL_UPDATE = "propose_skill_update"
     END_SESSION = "end_session"
+    REGULATE_CONVERSATION = "regulate_conversation"
 
 class SpeechKind(Enum):
     SOCIAL = "social"

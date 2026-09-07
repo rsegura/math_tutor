@@ -8,6 +8,7 @@ from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.model import ModelAdapter, ProviderInvalidResponse, ProviderTimeout
 from math_tutor.harness.prompts import REPAIR_PROMPT, REVIEWED_SOCIAL_REPLIES, SYSTEM_PROMPT
 from math_tutor.harness.registry import PedagogicalToolRegistry, ToolRejected
+from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, PedagogicalStrategy, compatible_strategies
 
 class HarnessProposalInvalid(RuntimeError):
     code = "harness-proposal-invalid"
@@ -26,7 +27,20 @@ def _parse(output: object) -> ToolProposal | ConversationReply:
     if not isinstance(output, Mapping): raise ValueError("model-output-must-be-object")
     if output.get("type") == "tool":
         if set(output) != {"type", "name", "arguments"}: raise ValueError("invalid-tool-output")
-        try: return ToolProposal(ToolName(output["name"]), output.get("arguments", {}))
+        try:
+            proposal = ToolProposal(ToolName(output["name"]), output.get("arguments", {}))
+            if proposal.name is ToolName.REGULATE_CONVERSATION:
+                arguments = proposal.arguments
+                if set(arguments) != {"turn_id", "signal", "confidence", "strategy"}:
+                    raise ValueError
+                if not isinstance(arguments["turn_id"], str) or not arguments["turn_id"].strip():
+                    raise ValueError
+                signal = ConversationalSignal(arguments["signal"])
+                strategy = PedagogicalStrategy(arguments["strategy"])
+                ConfidenceBand.from_confidence(arguments["confidence"])
+                if strategy not in compatible_strategies(signal):
+                    raise ValueError
+            return proposal
         except (KeyError, TypeError, ValueError): raise ValueError("invalid-tool-output") from None
     if output.get("type") == "reply":
         if set(output) != {"type", "speech", "speech_kind"}: raise ValueError("invalid-reply-output")

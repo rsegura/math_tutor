@@ -52,7 +52,14 @@ def context():
 
 
 def test_tool_surface_is_intentionally_small():
-    assert set(ToolName) == {ToolName.RECORD_ANSWER, ToolName.GIVE_HINT, ToolName.ADAPT_DIFFICULTY, ToolName.PROPOSE_SKILL_UPDATE, ToolName.END_SESSION}
+    assert set(ToolName) == {
+        ToolName.RECORD_ANSWER,
+        ToolName.GIVE_HINT,
+        ToolName.ADAPT_DIFFICULTY,
+        ToolName.PROPOSE_SKILL_UPDATE,
+        ToolName.END_SESSION,
+        ToolName.REGULATE_CONVERSATION,
+    }
 
 
 def test_record_answer_requires_current_turn_evidence_and_structured_answer(context):
