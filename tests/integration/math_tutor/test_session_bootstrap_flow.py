@@ -728,6 +728,21 @@ async def test_newer_deterministic_turn_invalidates_older_llm_completion(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_sanitized_request_rejection_is_nonrecoverable_and_never_logged(tmp_path,caplog):
+    from math_tutor.harness.model import ProviderRequestRejected
+    repo,_,_,_,_,metadata=setup(tmp_path); runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class Rejected:
+        async def complete(self,**kwargs): raise ProviderRequestRejected()
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Rejected())
+    with caplog.at_level("WARNING"), pytest.raises(ProviderRequestRejected) as caught:
+        await engine.decide(VoiceTurn("turn","private transcript",.9,Event()))
+    assert str(caught.value) == "provider-request-rejected"
+    assert engine._consecutive_llm_failures == 0
+    assert not any(record.getMessage()=="llm_turn_failed" for record in caplog.records)
+    assert not repo.load_state(metadata.tutoring_session_id).session.ended
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reason", ["tts-first-audio-timeout", "tts-total-timeout", "tts-provider-error"])
 async def test_tts_fail_safe_stops_durably_then_falls_back_and_closes_once(tmp_path, reason):
     repo,_,_,_,_,metadata=setup(tmp_path)

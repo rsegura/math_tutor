@@ -14,3 +14,9 @@ class ProviderTimeout(ProviderFailure): code = "provider-timeout"
 class ProviderRateLimited(ProviderFailure): code = "provider-rate-limited"
 class ProviderUpstreamUnavailable(ProviderFailure): code = "provider-upstream-unavailable"
 class ProviderInvalidResponse(ProviderFailure): code = "provider-invalid-response"
+
+
+class ProviderRequestRejected(RuntimeError):
+    """Sanitized, non-recoverable provider request/configuration rejection."""
+    code = "provider-request-rejected"
+    def __init__(self) -> None: super().__init__(self.code)

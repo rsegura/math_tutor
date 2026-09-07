@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from math_tutor.agent.providers.model import OpenResponsesAdapter, build_model_adapter
-from math_tutor.harness.model import ProviderInvalidResponse, ProviderRateLimited, ProviderTimeout, ProviderUpstreamUnavailable
+from math_tutor.harness.model import ProviderInvalidResponse, ProviderRateLimited, ProviderRequestRejected, ProviderTimeout, ProviderUpstreamUnavailable
 from math_tutor.agent.providers.settings import ProviderSettings
 from math_tutor.domain.templates import ExpectedAnswerKind
 
@@ -161,7 +161,7 @@ async def test_provider_transport_error_is_sanitized():
     adapter = OpenResponsesAdapter(client=SimpleNamespace(responses=Broken()), model="provider/model")
     with pytest.raises(RuntimeError) as caught:
         await adapter.complete(prompt="system", context=context(), repair=False)
-    assert "secret-key" in str(caught.value)
+    assert caught.value.__class__ is RuntimeError
 
 
 @pytest.mark.asyncio
@@ -186,9 +186,6 @@ async def test_sdk_failures_map_to_closed_neutral_categories(error, expected):
 @pytest.mark.parametrize("error", [
     TypeError("programming error"),
     AttributeError("bad configuration"),
-    type("APIStatusError", (Exception,), {"__module__":"openai","status_code":400})("secret bad request"),
-    type("APIStatusError", (Exception,), {"__module__":"openai","status_code":401})("secret auth response"),
-    type("APIStatusError", (Exception,), {"__module__":"openai","status_code":403})("secret forbidden response"),
 ])
 async def test_nonretryable_or_unknown_provider_exceptions_propagate(error):
     class Broken:
@@ -197,6 +194,21 @@ async def test_nonretryable_or_unknown_provider_exceptions_propagate(error):
     with pytest.raises(type(error)) as caught:
         await adapter.complete(prompt="system",context=context(),repair=False)
     assert caught.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400,401,403])
+async def test_nonretryable_sdk_request_rejection_is_closed_and_sanitized(status):
+    error=type("APIStatusError",(Exception,),{"__module__":"openai","status_code":status})("api-key transcript response body")
+    error.request={"authorization":"secret-key"}; error.response={"body":"child transcript"}
+    class Broken:
+        async def create(self,**kwargs): raise error
+    adapter=OpenResponsesAdapter(client=SimpleNamespace(responses=Broken()),model="provider/model")
+    with pytest.raises(ProviderRequestRejected) as caught:
+        await adapter.complete(prompt="secret prompt",context=context(),repair=False)
+    assert str(caught.value) == "provider-request-rejected"
+    assert "secret" not in repr(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
 
 
 @pytest.mark.asyncio

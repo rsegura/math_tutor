@@ -9,23 +9,25 @@ from collections.abc import Mapping
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
 from math_tutor.harness.model import (
     ProviderFailure, ProviderInvalidResponse, ProviderRateLimited,
-    ProviderTimeout, ProviderUpstreamUnavailable,
+    ProviderRequestRejected, ProviderTimeout, ProviderUpstreamUnavailable,
 )
 
 
-def _request_failure(error: BaseException) -> ProviderFailure | None:
+def _request_failure(error: BaseException) -> ProviderFailure | ProviderRequestRejected | None:
     """Classify only stable SDK type/status metadata, never its text or body."""
     status = getattr(error, "status_code", None)
     name = type(error).__name__
     from_openai_sdk = type(error).__module__.split(".", 1)[0] == "openai"
     if isinstance(error, (TimeoutError, asyncio.TimeoutError)) or (from_openai_sdk and name == "APITimeoutError"):
         return ProviderTimeout()
-    if from_openai_sdk and (name == "RateLimitError" or (name == "APIStatusError" and status == 429)):
+    if from_openai_sdk and (name == "RateLimitError" or status == 429):
         return ProviderRateLimited()
     if from_openai_sdk and name == "APIConnectionError":
         return ProviderUpstreamUnavailable()
-    if from_openai_sdk and name in {"APIStatusError", "InternalServerError"} and isinstance(status, int) and 500 <= status <= 599:
+    if from_openai_sdk and isinstance(status, int) and 500 <= status <= 599:
         return ProviderUpstreamUnavailable()
+    if from_openai_sdk and isinstance(status, int) and 400 <= status <= 499:
+        return ProviderRequestRejected()
     return None
 
 def _field(value: object, name: str, default=None):
