@@ -10,6 +10,9 @@ Authoritative documents:
 - `DESIGN.md` — approved product and architecture design.
 - `IMPLEMENTATION_PLAN.md` — staged implementation plan.
 - `TESTING_REFERENCE.md` — test workflow and taxonomy.
+- `docs/DOCKER.md` — supported container workflows and runtime configuration.
+- `docs/math-tutor-poc-verification.md` — current verification evidence and
+  gates that still block a supervised learner trial.
 
 ## Stack and commands
 
@@ -23,14 +26,22 @@ make down
 make agent
 make test
 make test ARGS="tests/test_environment.py -v"
+make eval-math
+make test-live-llm
 make build
 make lock
+docker compose --profile dev config
 ```
 
 Use `docker compose --profile dev run --rm tooling <command>` for one-off
 container commands. Add dependencies to `pyproject.toml`, then run
 `make lock && make build`. Never edit `uv.lock` by hand and never use floating
 container or dependency versions.
+
+Automated tests and offline evals do not authorize a learner trial. Check the
+verification record before any supervised use: professional tabletop review,
+the supervised voice gate, consent, safeguarding, retention approval, and
+specialist sign-off are separate requirements.
 
 ## Architecture non-negotiables
 
