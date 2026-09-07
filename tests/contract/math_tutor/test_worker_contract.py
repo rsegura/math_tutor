@@ -64,3 +64,8 @@ def test_worker_routes_model_access_through_harness_agent():
     assert "HarnessVoiceAgent" in source
     assert "SilentLLM" in source
     assert "agent=Agent(" not in source
+
+
+def test_worker_shutdown_closes_lazy_model_engine():
+    source = Path("src/math_tutor/agent/worker.py").read_text()
+    assert "await engine.aclose()" in source

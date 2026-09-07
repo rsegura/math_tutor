@@ -94,12 +94,21 @@ async def entrypoint(ctx: JobContext) -> None:
     session_id = metadata.tutoring_session_id
     buffers = None
     consent_gate = None
+    engine = None
     async def close_retention() -> None:
-        if buffers is not None:
-            buffers.close_session(session_id)
-        if consent_gate is not None:
-            await consent_gate.aclose()
-        await process_runtime.aclose()
+        try:
+            if buffers is not None:
+                buffers.close_session(session_id)
+        finally:
+            try:
+                if consent_gate is not None:
+                    await consent_gate.aclose()
+            finally:
+                try:
+                    if engine is not None:
+                        await engine.aclose()
+                finally:
+                    await process_runtime.aclose()
     ctx.add_shutdown_callback(close_retention)
     # Exact durable reconstruction is deliberately before provider creation or room connection.
     runtime = build_tutoring_runtime(metadata=metadata, repository=repository, env=os.environ)

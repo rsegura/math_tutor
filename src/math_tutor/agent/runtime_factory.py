@@ -82,6 +82,8 @@ class BoundedConversationEngine:
         self._initial_activity_id = "activity-1"
         self._registry = PedagogicalToolRegistry(self._service, limits, guard=self._runtime_cap_reason)
         self._model_factory = model_factory or (lambda: build_model_adapter(runtime.providers))
+        self._model = model
+        self._closed_model = None
         self._harness = PedagogicalHarness(model, self._registry, limits) if model is not None else None
         self._harness_lock = asyncio.Lock()
         self._limits = limits
@@ -97,8 +99,23 @@ class BoundedConversationEngine:
             return self._harness
         async with self._harness_lock:
             if self._harness is None:
-                self._harness = PedagogicalHarness(self._model_factory(), self._registry, self._limits)
+                self._model = self._model_factory()
+                self._harness = PedagogicalHarness(self._model, self._registry, self._limits)
         return self._harness
+
+    async def aclose(self) -> None:
+        """Close a created model adapter; preserve lazy no-op semantics."""
+        async with self._harness_lock:
+            model = self._model
+            if model is None or model is self._closed_model:
+                return
+            self._closed_model = model
+            close = getattr(model, "aclose", None)
+            if close is None:
+                return
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
 
     def _runtime_cap_reason(self) -> str | None:
         return self._cap_reason(self._repository.load_session_aggregate(self._bootstrap.session.session_id))

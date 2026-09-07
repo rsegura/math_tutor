@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import Mapping
 
@@ -21,6 +22,21 @@ class OpenResponsesAdapter:
         self._client = client
         self._model = model
         self._first_response_seconds = first_response_seconds
+        self._close_lock = asyncio.Lock()
+        self._closed = False
+
+    async def aclose(self) -> None:
+        """Idempotently release the provider HTTP client."""
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            close = getattr(self._client, "close", None)
+            if close is None:
+                return
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     @staticmethod
     def _tools(context) -> list[dict[str, object]]:
@@ -87,7 +103,7 @@ class OpenResponsesAdapter:
             raise ValueError("model-response-invalid")
         calls = [item for item in output if _field(item, "type") == "function_call"]
         messages = [item for item in output if _field(item, "type") == "message"]
-        unexpected = [item for item in output if _field(item, "type") not in {"function_call", "message"}]
+        unexpected = [item for item in output if _field(item, "type") not in {"function_call", "message", "reasoning"}]
         if calls:
             if len(calls) != 1 or messages or unexpected:
                 raise ValueError("model-output-has-invalid-tool-call")

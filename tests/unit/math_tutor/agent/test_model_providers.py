@@ -68,10 +68,40 @@ async def test_openrouter_fixture_translates_canonical_function_call():
 
 
 @pytest.mark.asyncio
+async def test_reasoning_item_is_ignored_alongside_one_function_call():
+    fixture = {"status":"completed","error":None,"output":[
+        {"type":"reasoning","id":"rs_1","summary":[]},
+        {"type":"function_call","name":"give_hint","arguments":"{}"},
+    ]}
+    adapter=OpenResponsesAdapter(client=SimpleNamespace(responses=Responses(fixture)),model="provider/model")
+    assert (await adapter.complete(prompt="system",context=context(),repair=False)) == {"type":"tool","name":"give_hint","arguments":{}}
+
+
+@pytest.mark.asyncio
 async def test_openrouter_fixture_translates_canonical_json_text():
     fixture = {"status": "completed", "error": None, "output": [{"type":"message","role":"assistant","content":[{"type":"output_text","text":"canonical"}]}], "output_text": '{"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}'}
     adapter = OpenResponsesAdapter(client=SimpleNamespace(responses=Responses(fixture)), model="provider/model")
     assert (await adapter.complete(prompt="system", context=context(), repair=False))["type"] == "reply"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_item_is_ignored_alongside_one_message():
+    fixture={"status":"completed","error":None,"output":[
+        {"type":"reasoning","id":"rs_1","summary":[]},
+        {"type":"message","role":"assistant","content":[{"type":"output_text","text":"Vamos paso a paso."}]},
+    ],"output_text":'{"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}'}
+    adapter=OpenResponsesAdapter(client=SimpleNamespace(responses=Responses(fixture)),model="provider/model")
+    assert (await adapter.complete(prompt="system",context=context(),repair=False))["type"] == "reply"
+
+
+@pytest.mark.asyncio
+async def test_adapter_closes_client_once():
+    class Client:
+        def __init__(self): self.responses=Responses({"status":"completed","output":[],"output_text":"{}"}); self.closes=0
+        async def close(self): self.closes += 1
+    client=Client(); adapter=OpenResponsesAdapter(client=client,model="provider/model")
+    await adapter.aclose(); await adapter.aclose()
+    assert client.closes == 1
 
 
 @pytest.mark.asyncio
