@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from math_tutor.application.results import CommandResult, CommandStatus
+from math_tutor.domain.regulation import ConversationalSignal, PedagogicalStrategy
 from math_tutor.harness.context import ActivityContext, LearnerState, TurnEvidence, build_harness_context
 from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.loop import HarnessContractExhausted, HarnessProposalInvalid, PedagogicalHarness, _parse
@@ -178,6 +179,8 @@ def test_regulation_tool_accepts_only_the_exact_typed_current_turn_contract():
         {"turn_id": "turn", "signal": "confused", "confidence": float("nan"), "strategy": "repeat-instruction"},
         {"turn_id": "turn", "signal": "confused", "confidence": 0.9, "strategy": "invent-example"},
         {"turn_id": "turn", "signal": "off-task", "confidence": 0.9, "strategy": "give-ordered-hint"},
+        {"turn_id": "turn", "signal": ConversationalSignal.CONFUSED, "confidence": 0.9, "strategy": "repeat-instruction"},
+        {"turn_id": "turn", "signal": "confused", "confidence": 0.9, "strategy": PedagogicalStrategy.REPEAT_INSTRUCTION},
         {"turn_id": "turn", "signal": "confused", "confidence": 0.9, "strategy": "repeat-instruction", "rationale": "free form"},
         {"signal": "confused", "confidence": 0.9, "strategy": "repeat-instruction"},
     ],

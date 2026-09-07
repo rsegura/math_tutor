@@ -35,6 +35,8 @@ def _parse(output: object) -> ToolProposal | ConversationReply:
                     raise ValueError
                 if not isinstance(arguments["turn_id"], str) or not arguments["turn_id"].strip():
                     raise ValueError
+                if type(arguments["signal"]) is not str or type(arguments["strategy"]) is not str:
+                    raise ValueError
                 signal = ConversationalSignal(arguments["signal"])
                 strategy = PedagogicalStrategy(arguments["strategy"])
                 ConfidenceBand.from_confidence(arguments["confidence"])
