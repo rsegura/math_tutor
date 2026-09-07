@@ -33,6 +33,14 @@ def test_provider_configuration_is_explicit_and_has_no_fallback():
         })
 
 
+def test_runtime_factory_reexports_provider_neutral_settings_during_migration():
+    from math_tutor.agent.providers.settings import ProviderConfigError as NeutralError
+    from math_tutor.agent.providers.settings import ProviderSettings as NeutralSettings
+
+    assert ProviderSettings is NeutralSettings
+    assert ProviderConfigError is NeutralError
+
+
 def test_llm_deadlines_are_short_configurable_and_strict():
     env={
         "STT_PROVIDER":"deepgram", "STT_MODEL":"m", "STT_API_KEY":"k",

@@ -69,8 +69,8 @@ interpolated value because it validates/renders Compose without importing the
 FastAPI application; it is not a web startup check.
 
 Only variables wired in `docker-compose.yml` affect these services.
-`LLM_TEMPERATURE` and `STORE_TRANSCRIPT` are present in `.env.example` but are
-not currently passed by Compose; do not rely on them as runtime controls.
+`STORE_TRANSCRIPT` is present in `.env.example` but is not currently passed by
+Compose; do not rely on it as a runtime control.
 
 ## Verification boundary
 

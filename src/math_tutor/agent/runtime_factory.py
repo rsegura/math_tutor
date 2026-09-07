@@ -22,63 +22,7 @@ from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.loop import PedagogicalHarness
 from math_tutor.harness.registry import PedagogicalToolRegistry, SessionCapExceeded
 from math_tutor.agent.voice_agent import VoiceDecision, VoiceTurn, is_stop_request
-
-
-class ProviderConfigError(ValueError):
-    pass
-
-
-_SUPPORTED = {
-    "STT_PROVIDER": frozenset({"deepgram", "openai"}),
-    "LLM_PROVIDER": frozenset({"openai"}),
-    "TTS_PROVIDER": frozenset({"elevenlabs", "openai"}),
-}
-
-
-def _required(env: Mapping[str, str], name: str) -> str:
-    value = env.get(name)
-    if not value or not value.strip():
-        raise ProviderConfigError(f"{name} is required")
-    return value.strip()
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderSettings:
-    stt_provider: str
-    stt_model: str
-    stt_api_key: str
-    llm_provider: str
-    llm_model: str
-    llm_api_key: str
-    tts_provider: str
-    tts_model: str
-    tts_voice_id: str
-    tts_api_key: str
-    llm_first_response_seconds: float = 4.0
-    llm_total_seconds: float = 10.0
-
-    @classmethod
-    def from_environment(cls, env: Mapping[str, str]) -> "ProviderSettings":
-        values = {name: _required(env, name) for name in (
-            "STT_PROVIDER", "STT_MODEL", "STT_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY",
-            "TTS_PROVIDER", "TTS_MODEL", "TTS_VOICE_ID", "TTS_API_KEY",
-        )}
-        for field, supported in _SUPPORTED.items():
-            if values[field] not in supported:
-                raise ProviderConfigError(f"unsupported {field}: {values[field]!r}")
-        first, total = (_deadline(env, "LLM_FIRST_RESPONSE_SECONDS", 4.0), _deadline(env, "LLM_TOTAL_SECONDS", 10.0))
-        if first > total: raise ProviderConfigError("LLM first response deadline must not exceed total deadline")
-        return cls(*(values[name] for name in (
-            "STT_PROVIDER", "STT_MODEL", "STT_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY",
-            "TTS_PROVIDER", "TTS_MODEL", "TTS_VOICE_ID", "TTS_API_KEY",
-        )), first, total)
-
-
-def _deadline(env: Mapping[str,str], name: str, default: float) -> float:
-    try: value=float(env.get(name,str(default)))
-    except (TypeError,ValueError): raise ProviderConfigError(f"{name} must be numeric") from None
-    if not 2 <= value <= 15: raise ProviderConfigError(f"{name} must be between 2 and 15 seconds")
-    return value
+from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
 
 
 @dataclass(frozen=True, slots=True)

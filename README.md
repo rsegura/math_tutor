@@ -96,9 +96,9 @@ For a live voice session, also configure:
 - optionally, bounded `LLM_FIRST_RESPONSE_SECONDS` and `LLM_TOTAL_SECONDS`
 
 Supported combinations are Deepgram or OpenAI for STT, OpenAI for the LLM, and
-ElevenLabs or OpenAI for TTS. `LLM_TEMPERATURE` and `STORE_TRANSCRIPT` appear in
-`.env.example` but are not currently passed into the Compose services and must
-not be treated as active runtime controls.
+ElevenLabs or OpenAI for TTS. `STORE_TRANSCRIPT` appears in `.env.example` but
+is not currently passed into the Compose services and must not be treated as
+an active runtime control.
 
 Audio evidence is disabled by default. Enabling
 `AUDIO_EVIDENCE_ENABLED=true` only enables the capability; it does not grant
