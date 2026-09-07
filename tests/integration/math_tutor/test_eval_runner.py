@@ -8,12 +8,25 @@ from evals.math_tutor.runner import (
     FaultAdapter,
     EvalScenarioError,
     ProductionFakeModelAdapter,
+    _providers,
     load_scenarios,
     run_evaluation,
 )
 
 
 SCENARIOS = Path("evals/math_tutor/scenarios")
+
+
+def test_eval_provider_settings_use_named_fields_without_positional_drift():
+    settings = _providers()
+
+    assert settings.stt_provider == "deepgram"
+    assert settings.llm_provider == "openai"
+    assert settings.llm_base_url is None
+    assert settings.tts_provider == "openai"
+    assert settings.tts_voice_id == "offline"
+    assert settings.llm_first_response_seconds == 4
+    assert settings.llm_total_seconds == 10
 
 
 def test_offline_eval_catalog_is_strict_and_covers_required_behaviours(tmp_path):

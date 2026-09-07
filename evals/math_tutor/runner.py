@@ -337,7 +337,21 @@ class ProductionFakeModelAdapter:
         return output
 
 def _providers() -> ProviderSettings:
-    return ProviderSettings("deepgram", "offline", "unused", "openai", "offline", "unused", "openai", "offline", "offline", "unused", 4, 10)
+    return ProviderSettings(
+        stt_provider="deepgram",
+        stt_model="offline",
+        stt_api_key="unused",
+        llm_provider="openai",
+        llm_model="offline",
+        llm_api_key="unused",
+        llm_base_url=None,
+        tts_provider="openai",
+        tts_model="offline",
+        tts_voice_id="offline",
+        tts_api_key="unused",
+        llm_first_response_seconds=4,
+        llm_total_seconds=10,
+    )
 
 
 def _bootstrap(repo: SQLiteTutoringRepository, scenario: EvalScenario, now: datetime):
