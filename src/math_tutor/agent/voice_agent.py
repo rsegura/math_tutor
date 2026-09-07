@@ -203,20 +203,12 @@ class HarnessVoiceAgent(Agent):
         if turn is None or not turn.text or _normalise(newest or "") != _normalise(turn.text):
             yield CONFIRMATION_ES
             return
-        if is_stop_request(turn.text):
-            try:
-                value = self._decide(turn); decision = await value if inspect.isawaitable(value) else value
-            except asyncio.CancelledError:
-                self._cancel()
-                raise
-        elif turn.confidence is None or turn.confidence < self._threshold:
-            decision = VoiceDecision(CONFIRMATION_ES, needs_confirmation=True, reason="low-stt-confidence")
-        else:
-            try:
-                value = self._decide(turn); decision = await value if inspect.isawaitable(value) else value
-            except asyncio.CancelledError:
-                self._cancel()
-                raise
+        try:
+            value = self._decide(turn)
+            decision = await value if inspect.isawaitable(value) else value
+        except asyncio.CancelledError:
+            self._cancel()
+            raise
         try:
             if decision.selected_evidence_id is not None and self._evidence_selected is not None:
                 self._evidence_selected(turn.turn_id, decision.selected_evidence_id)

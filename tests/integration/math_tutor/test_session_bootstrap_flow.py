@@ -168,7 +168,7 @@ async def test_stop_preempts_a_support_receipt_with_the_same_turn_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_elapsed_cap_preempts_a_support_receipt_replay(tmp_path):
+async def test_elapsed_cap_preempts_low_confidence_and_support_receipt_replay(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     current=[datetime.now(timezone.utc)]
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
@@ -176,13 +176,13 @@ async def test_elapsed_cap_preempts_a_support_receipt_replay(tmp_path):
     await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
     current[0] += timedelta(minutes=12)
 
-    decision=await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+    decision=await engine.decide(VoiceTurn("reused","ayuda",.2,Event()))
 
     assert decision.terminal and decision.reason == "duration-cap-reached"
 
 
 @pytest.mark.asyncio
-async def test_activity_cap_preempts_a_support_receipt_replay(tmp_path):
+async def test_activity_cap_preempts_low_confidence_and_support_receipt_replay(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
@@ -193,22 +193,90 @@ async def test_activity_cap_preempts_a_support_receipt_replay(tmp_path):
     with sqlite3.connect(repo.database) as db:
         db.execute("UPDATE activity_progress SET progress_json=?,version=? WHERE session_id=? AND activity_id=?",(_dump(completed),completed.version,metadata.tutoring_session_id,"activity-1"))
 
-    decision=await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+    decision=await engine.decide(VoiceTurn("reused","ayuda",.2,Event()))
 
     assert decision.terminal and decision.reason == "activity-cap-reached"
 
 
 @pytest.mark.asyncio
-async def test_ended_session_preempts_a_support_receipt_replay(tmp_path):
+async def test_ended_session_preempts_low_confidence_and_support_receipt_replay(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
     await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
     engine.force_stop("therapist-ended")
 
-    decision=await engine.decide(VoiceTurn("reused","ayuda",.99,Event()))
+    decision=await engine.decide(VoiceTurn("reused","ayuda",.2,Event()))
 
     assert decision.terminal and decision.reason == "therapist-ended"
+
+
+@pytest.mark.asyncio
+async def test_normal_low_confidence_turn_confirms_without_model_or_observation(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    created=[]
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model_factory=lambda:created.append(True))
+
+    decision=await engine.decide(VoiceTurn("low","ayuda",.2,Event()))
+
+    assert decision.needs_confirmation and decision.reason == "low-stt-confidence"
+    assert created == []
+    assert repo.load_session_aggregate(metadata.tutoring_session_id).observations == ()
+
+
+@pytest.mark.asyncio
+async def test_ended_and_elapsed_caps_preempt_low_confidence(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    current=[datetime.now(timezone.utc)]
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel(),now=lambda:current[0])
+    current[0] += timedelta(minutes=12)
+    elapsed=await engine.decide(VoiceTurn("low-duration","ayuda",.2,Event()))
+    ended=await engine.decide(VoiceTurn("low-ended","ayuda",.2,Event()))
+    assert elapsed.terminal and elapsed.reason == "duration-cap-reached"
+    assert ended.terminal and ended.reason == "duration-cap-reached"
+
+
+@pytest.mark.asyncio
+async def test_duration_cap_preempts_correct_turn_replay_without_new_follow_up(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    current=[datetime.now(timezone.utc)]
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel(),now=lambda:current[0])
+    activity=repo.load_activity(metadata.tutoring_session_id,"activity-1")
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=CorrectAnswerModel(activity),now=lambda:current[0])
+    turn=VoiceTurn("correct-replay-cap","respuesta",.9,Event())
+    await engine.decide(turn)
+    before=len(repo.load_session_aggregate(metadata.tutoring_session_id).activities)
+    current[0] += timedelta(minutes=12)
+
+    replay=await engine.decide(turn)
+
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    assert replay.terminal and replay.reason == "duration-cap-reached"
+    assert len(aggregate.activities) == before
+    assert aggregate.session.ended
+
+
+@pytest.mark.asyncio
+async def test_activity_cap_preempts_correct_turn_replay_without_new_follow_up(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    activity=repo.load_activity(metadata.tutoring_session_id,"activity-1")
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=CorrectAnswerModel(activity))
+    turn=VoiceTurn("correct-replay-activity-cap","respuesta",.9,Event())
+    await engine.decide(turn)
+    before=len(repo.load_session_aggregate(metadata.tutoring_session_id).activities)
+    engine._bootstrap=replace(engine._bootstrap,plan=replace(engine._bootstrap.plan,limits=SessionLimits(11,1)))
+
+    replay=await engine.decide(turn)
+
+    aggregate=repo.load_session_aggregate(metadata.tutoring_session_id)
+    assert replay.terminal and replay.reason == "activity-cap-reached"
+    assert len(aggregate.activities) == before
+    assert aggregate.session.ended
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ from math_tutor.harness.contracts import ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.loop import PedagogicalHarness
 from math_tutor.harness.registry import PedagogicalToolRegistry, SessionCapExceeded
-from math_tutor.agent.voice_agent import VoiceDecision, VoiceTurn, is_help_request, is_stop_request
+from math_tutor.agent.voice_agent import CONFIRMATION_ES, VoiceDecision, VoiceTurn, is_help_request, is_stop_request
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
 from math_tutor.agent.providers.model import build_model_adapter
 from math_tutor.agent.providers.voice import create_voice_providers
@@ -221,25 +221,12 @@ class BoundedConversationEngine:
             if stop_requested:
                 return VoiceDecision("De acuerdo, paramos aquí.", terminal=True, reason="stop-requested")
             return VoiceDecision("La sesión ha terminado por hoy.", terminal=True, reason=aggregate.session.end_reason or "session-ended")
-        prior_observation = self._repository.load_observation(
-            aggregate.session.session_id, f"obs-{turn.turn_id}"
-        )
-        if (
-            not stop_requested
-            and
-            prior_observation is not None
-            and prior_observation.observation.outcome is ObservationOutcome.CORRECT
-        ):
-            source_id = prior_observation.observation.activity_id
-            source = self._repository.load_activity(aggregate.session.session_id, source_id)
-            if source is None:
-                raise RuntimeError("recorded answer activity is missing")
-            next_prompt = self._next_activity_after_correct(
-                turn_id=turn.turn_id,
-                source_activity_id=source_id,
-                source_activity=source,
-            )
-            return VoiceDecision(f"Sí, esa respuesta es correcta. {next_prompt}")
+        cap = self._cap_reason(aggregate)
+        if cap is not None:
+            reason = "stop-requested" if stop_requested else cap
+            self._stop(reason)
+            speech = "De acuerdo, paramos aquí." if stop_requested else "La sesión ha terminado por hoy."
+            return VoiceDecision(speech, terminal=True, reason=reason)
         activity_id = next((event.activity_id for event in reversed(aggregate.events) if event.kind == "activity-selected"), None)
         if activity_id is None:
             raise RuntimeError("active activity is missing")
@@ -265,10 +252,29 @@ class BoundedConversationEngine:
         if stop_requested:
             decision = self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason": "stop-requested"}), context)
             return VoiceDecision("De acuerdo, paramos aquí.", terminal=decision.terminal, reason="stop-requested")
-        cap = self._cap_reason(aggregate)
-        if cap is not None:
-            self._stop(cap)
-            return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=cap)
+        if turn.confidence is None or turn.confidence < 0.65:
+            self.cancel()
+            return VoiceDecision(
+                CONFIRMATION_ES, needs_confirmation=True,
+                reason="low-stt-confidence",
+            )
+        prior_observation = self._repository.load_observation(
+            aggregate.session.session_id, f"obs-{turn.turn_id}"
+        )
+        if (
+            prior_observation is not None
+            and prior_observation.observation.outcome is ObservationOutcome.CORRECT
+        ):
+            source_id = prior_observation.observation.activity_id
+            source = self._repository.load_activity(aggregate.session.session_id, source_id)
+            if source is None:
+                raise RuntimeError("recorded answer activity is missing")
+            next_prompt = self._next_activity_after_correct(
+                turn_id=turn.turn_id,
+                source_activity_id=source_id,
+                source_activity=source,
+            )
+            return VoiceDecision(f"Sí, esa respuesta es correcta. {next_prompt}")
         if is_help_request(turn.text):
             async with self._support_lock:
                 result = self._service.support_learner(SupportLearner(

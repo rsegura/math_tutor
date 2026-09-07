@@ -10,5 +10,5 @@ profile_objective: null
 authorised_objectives: [add-within-20]
 turns:
   - {turn_id: turn-1, response_text: "quizá trece", stt_confidence: 0.42, model_output: {type: tool, name: record_answer, arguments: {turn_id: "$turn_id", answer: {status: evaluable, kind: integer, values: {answer: 10}}}}, repair_output: null, model_delay_ms: 205}
-expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 1, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 1, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [not-evaluable], repair_calls: 0, decisions: 1, intervention: not-evaluable, latency_ms: 205, terminal: false}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 0, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [], repair_calls: 0, decisions: 1, intervention: no-observation, latency_ms: 205, terminal: false}
 review_fixture_duration_seconds: 10

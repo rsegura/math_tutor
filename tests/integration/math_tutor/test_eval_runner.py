@@ -127,13 +127,13 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     assert first.metrics.review_fixture_duration_seconds >= 0
     assert set(first.metrics.intervention_classifications) == {
         "ambiguous", "correct", "hint-cap-enforced", "incorrect",
-        "not-evaluable", "replay-deduplicated", "scope-rejected",
+            "no-observation", "replay-deduplicated", "scope-rejected",
         "self-correction-recorded", "stop-honoured", "supportive-social",
     }
     assert set(first.metrics.intervention_rating_fixtures) == {"adequate", "correctable"}
     assert first.metrics.adequate_or_correctable_proportion == 1.0
     assert first.metrics.intervention_adequacy_target == 0.8
-    assert first.durable_outcomes["low-stt-confidence"].not_evaluable == 1
+    assert first.durable_outcomes["low-stt-confidence"].observations == 0
     assert first.durable_outcomes["low-stt-confidence"].evidence_count == 0
     assert first.durable_outcomes["stop-request"].terminal
     assert first.durable_outcomes["replayed-evidence"].evidence_count == 1

@@ -70,13 +70,22 @@ async def output(node): return [item async for item in node]
 def chat(text): return SimpleNamespace(items=[SimpleNamespace(role="user",text_content=text)])
 
 
-async def test_harness_agent_rejects_uncorrelated_and_low_confidence_turns_without_model():
+async def test_harness_agent_rejects_uncorrelated_but_delegates_low_confidence():
     calls=[]; value=agent(lambda turn:calls.append(turn) or VoiceDecision("modelo"))
     value._pending=VoiceTurn("t","uno",.9,Event())
     assert await output(value.llm_node(chat("dos"),[],None)) == ["No estoy seguro de haberte oído bien. ¿Puedes repetirlo?"]
     value._pending=VoiceTurn("t2","uno",.2,Event())
-    assert await output(value.llm_node(chat("uno"),[],None)) == ["No estoy seguro de haberte oído bien. ¿Puedes repetirlo?"]
-    assert calls == []
+    assert await output(value.llm_node(chat("uno"),[],None)) == ["modelo"]
+    assert [turn.turn_id for turn in calls] == ["t2"]
+
+
+async def test_low_confidence_correlated_turn_delegates_terminal_precedence_to_engine():
+    calls=[]
+    value=agent(lambda turn:calls.append(turn) or VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason="duration-cap-reached"))
+    value._pending=VoiceTurn("t","ayuda",.2,Event())
+
+    assert await output(value.llm_node(chat("ayuda"),[],None)) == ["La sesión ha terminado por hoy."]
+    assert [turn.turn_id for turn in calls] == ["t"]
 
 
 async def test_terminal_closer_triggers_when_terminal_yield_is_interrupted():
