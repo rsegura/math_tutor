@@ -22,6 +22,10 @@ const fields = {
   "#code": {value: "join-code"},
 };
 const joinButton = {disabled: false};
+const enableAudioButton = {
+  hidden: true,
+  addEventListener: (_event, handler) => { enableAudioButton.click = handler; },
+};
 const form = {
   addEventListener: (_event, handler) => { submit = handler; },
   querySelector: (selector) => selector === "button" ? joinButton : null,
@@ -34,6 +38,7 @@ global.document = {
     }
     if (selector === "#status") return statusNode;
     if (selector === "#remote-audio") return audioContainer;
+    if (selector === "#enable-audio") return enableAudioButton;
     return fields[selector];
   },
 };
@@ -46,6 +51,7 @@ class FakeRoom {
       setMicrophoneEnabled: async (enabled) => { this.microphoneEnabled = enabled; events.push("microphone"); },
     };
     this.disconnected = false;
+    this.canPlaybackAudio = true;
     latestRoom = this;
   }
 
@@ -55,6 +61,8 @@ class FakeRoom {
 
   startAudio() {
     events.push("startAudio");
+    this.canPlaybackAudio = !blockAudio;
+    this.handlers.get("audioPlaybackChanged")?.(this.canPlaybackAudio);
     return blockAudio ? Promise.reject(new Error("blocked")) : Promise.resolve();
   }
 
@@ -84,6 +92,7 @@ global.LivekitClient = {
     TrackSubscribed: "trackSubscribed",
     TrackUnsubscribed: "trackUnsubscribed",
     Disconnected: "disconnected",
+    AudioPlaybackStatusChanged: "audioPlaybackChanged",
   },
   Track: {Kind: {Audio: "audio", Video: "video"}},
 };
@@ -169,7 +178,7 @@ async function run() {
   const nextRoom = await join();
   assert.equal(replacement.detachCalls, 1, "joining again must clean up the old room");
   assert.equal(audioContainer.children.length, 0);
-  assert.equal(statusNode.textContent, "Sesión conectada, pero el navegador bloqueó el audio.");
+  assert.equal(statusNode.textContent, "El navegador bloqueó el audio. Pulsa Activar audio.");
 
   const finalTrack = remoteTrack("audio-3");
   nextRoom.emit("trackSubscribed", finalTrack, {}, {identity: "tutor"});
@@ -224,6 +233,31 @@ async function run() {
   assert.equal(finalRoom.disconnected, false);
   assert.equal(finalRoom.microphoneEnabled, true);
   assert.equal(statusNode.textContent, "Sesión conectada");
+
+  const lateBlockedTrack = remoteTrack("audio-late-blocked");
+  finalRoom.emit("trackSubscribed", lateBlockedTrack, {}, {identity: "tutor"});
+  assert.equal(audioContainer.children.length, 1);
+  finalRoom.canPlaybackAudio = false;
+  finalRoom.emit("audioPlaybackChanged", false);
+  assert.equal(enableAudioButton.hidden, false);
+  assert.equal(statusNode.textContent, "El navegador bloqueó el audio. Pulsa Activar audio.");
+
+  await enableAudioButton.click();
+  assert.equal(enableAudioButton.hidden, true);
+  assert.equal(finalRoom.canPlaybackAudio, true);
+  assert.equal(statusNode.textContent, "Sesión conectada");
+  assert.equal(lateBlockedTrack.attachCalls, 1, "audio recovery must not duplicate attached media");
+  assert.equal(audioContainer.children.length, 1);
+
+  const newestJoin = submit({preventDefault() {}});
+  const newestRoom = latestRoom;
+  await newestJoin;
+  assert.equal(audioContainer.children.length, 0);
+  finalRoom.canPlaybackAudio = false;
+  finalRoom.emit("audioPlaybackChanged", false);
+  assert.equal(enableAudioButton.hidden, true, "stale playback events must not alter current UI");
+  assert.equal(statusNode.textContent, "Sesión conectada");
+  assert.equal(newestRoom.disconnected, false);
 }
 
 run().catch((error) => {

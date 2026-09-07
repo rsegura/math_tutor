@@ -2,6 +2,8 @@ const form = document.querySelector("#join");
 const joinButton = form.querySelector("button");
 const statusNode = document.querySelector("#status");
 const audioContainer = document.querySelector("#remote-audio");
+const enableAudioButton = document.querySelector("#enable-audio");
+const audioBlockedMessage = "El navegador bloqueó el audio. Pulsa Activar audio.";
 
 // Keep the connected room reachable for the lifetime of the page.
 let activeRoom = null;
@@ -9,11 +11,36 @@ let pendingRoom = null;
 let pendingTokenRequest = null;
 let joinGeneration = 0;
 
+enableAudioButton.addEventListener("click", () => {
+  const room = activeRoom;
+  const generation = joinGeneration;
+  if (!room) return Promise.resolve();
+
+  statusNode.textContent = "Activando audio…";
+  return room.startAudio()
+    .then(() => {
+      if (activeRoom !== room || generation !== joinGeneration) return;
+      if (room.canPlaybackAudio) {
+        enableAudioButton.hidden = true;
+        statusNode.textContent = "Sesión conectada";
+      } else {
+        enableAudioButton.hidden = false;
+        statusNode.textContent = audioBlockedMessage;
+      }
+    })
+    .catch(() => {
+      if (activeRoom !== room || generation !== joinGeneration) return;
+      enableAudioButton.hidden = false;
+      statusNode.textContent = audioBlockedMessage;
+    });
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const generation = ++joinGeneration;
   const isCurrentJoin = () => generation === joinGeneration;
   joinButton.disabled = true;
+  enableAudioButton.hidden = true;
   statusNode.textContent = "Conectando…";
 
   if (pendingTokenRequest) pendingTokenRequest.abort();
@@ -68,6 +95,16 @@ form.addEventListener("submit", async (event) => {
   room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
     removeAudioTrack(track);
   });
+  room.on(LivekitClient.RoomEvent.AudioPlaybackStatusChanged, () => {
+    if (!isCurrentJoin()) return;
+    if (room.canPlaybackAudio) {
+      enableAudioButton.hidden = true;
+      if (activeRoom === room) statusNode.textContent = "Sesión conectada";
+      return;
+    }
+    enableAudioButton.hidden = false;
+    statusNode.textContent = audioBlockedMessage;
+  });
   room.on(LivekitClient.RoomEvent.Disconnected, () => {
     disconnected = true;
     if (tokenRequest && !tokenRequest.signal.aborted) tokenRequest.abort();
@@ -76,6 +113,7 @@ form.addEventListener("submit", async (event) => {
     if (activeRoom === room) activeRoom = null;
     if (pendingRoom === room) pendingRoom = null;
     if (!intentionalDisconnect && isCurrentJoin()) {
+      enableAudioButton.hidden = true;
       statusNode.textContent = "La sesión se ha desconectado.";
       joinButton.disabled = false;
     }
@@ -103,6 +141,7 @@ form.addEventListener("submit", async (event) => {
     if (!response.ok) {
       intentionalDisconnect = true;
       room.disconnect();
+      enableAudioButton.hidden = true;
       statusNode.textContent = "No se pudo abrir la sesión.";
       return;
     }
@@ -128,13 +167,24 @@ form.addEventListener("submit", async (event) => {
       return;
     }
     const audioError = await audioStartPromise;
-    if (isCurrentJoin()) statusNode.textContent = audioError || "Sesión conectada";
+    if (isCurrentJoin()) {
+      if (audioError || !room.canPlaybackAudio) {
+        enableAudioButton.hidden = false;
+        statusNode.textContent = audioBlockedMessage;
+      } else {
+        enableAudioButton.hidden = true;
+        statusNode.textContent = "Sesión conectada";
+      }
+    }
   } catch (_error) {
     intentionalDisconnect = true;
     room.disconnect();
     if (activeRoom === room) activeRoom = null;
     if (pendingRoom === room) pendingRoom = null;
-    if (isCurrentJoin()) statusNode.textContent = "No se pudo conectar la sesión.";
+    if (isCurrentJoin()) {
+      enableAudioButton.hidden = true;
+      statusNode.textContent = "No se pudo conectar la sesión.";
+    }
   } finally {
     if (isCurrentJoin()) {
       pendingTokenRequest = null;

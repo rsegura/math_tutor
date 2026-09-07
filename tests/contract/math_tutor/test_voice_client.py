@@ -18,6 +18,7 @@ def test_client_registers_remote_audio_lifecycle_before_connecting():
     assert source.index("RoomEvent.TrackSubscribed") < source.index("room.connect(")
     assert source.index("RoomEvent.TrackUnsubscribed") < source.index("room.connect(")
     assert source.index("RoomEvent.Disconnected") < source.index("room.connect(")
+    assert source.index("RoomEvent.AudioPlaybackStatusChanged") < source.index("room.connect(")
     assert "Track.Kind.Audio" in source
     assert "track.attach()" in source
 
@@ -61,3 +62,5 @@ def test_client_has_a_managed_remote_audio_container():
 
     assert 'id="remote-audio"' in page
     assert 'aria-hidden="true"' in page
+    assert 'id="enable-audio"' in page
+    assert '>Activar audio<' in page
