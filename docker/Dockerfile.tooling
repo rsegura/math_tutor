@@ -17,6 +17,10 @@ FROM toolchain AS tooling
 ENV UV_LOCKED=1 \
     PYTHONPATH=/app/src:/app
 
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends nodejs=18.20.4+dfsg-1~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked
 
