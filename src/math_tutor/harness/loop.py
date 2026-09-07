@@ -31,17 +31,24 @@ class PedagogicalHarness:
     def __init__(self, model: ModelAdapter, registry: PedagogicalToolRegistry, limits: HarnessLimits) -> None: self._model, self._registry, self._limits = model, registry, limits
     def run(self, context: HarnessContext, *, stop_requested: bool=False) -> HarnessDecision:
         if stop_requested: return self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason":"stop-requested"}), context)
+        if inspect.iscoroutinefunction(self._model.complete):
+            raise TypeError("async model adapter requires run_async")
         last_error = None
         tool_steps = 0
         for call_index in range(self._limits.max_model_calls):
             repair = call_index > 0
             try:
-                action = _parse(self._model.complete(
+                output = self._model.complete(
                     prompt=REPAIR_PROMPT if repair else SYSTEM_PROMPT,
                     context=context,
                     repair=repair,
                     validation_error=None if last_error is None else str(last_error),
-                ))
+                )
+                if inspect.isawaitable(output):
+                    close = getattr(output, "close", None)
+                    if close is not None: close()
+                    raise TypeError("awaitable model result requires run_async")
+                action = _parse(output)
                 if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
                 if tool_steps >= self._limits.max_tool_steps:
                     raise HarnessBudgetExceeded("tool-step-budget-exhausted")

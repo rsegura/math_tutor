@@ -72,3 +72,27 @@ def test_explicit_model_budget_is_hard(context):
 def test_tool_budget_is_exactly_one_step():
     with pytest.raises(ValueError, match="max_tool_steps"):
         HarnessLimits(max_tool_steps=2)
+
+
+def test_sync_run_rejects_declared_async_adapter_without_invoking_it(context):
+    class AsyncModel:
+        def __init__(self): self.called = False
+        async def complete(self, **kwargs): self.called = True
+    model = AsyncModel()
+    with pytest.raises(TypeError, match="run_async"):
+        PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits()).run(context)
+    assert model.called is False
+
+
+def test_sync_run_closes_unexpected_coroutine(context):
+    async def result():
+        return {"bad": True}
+    class NominallySync:
+        def __init__(self): self.returned = None
+        def complete(self, **kwargs):
+            self.returned = result()
+            return self.returned
+    model = NominallySync()
+    with pytest.raises(TypeError, match="run_async"):
+        PedagogicalHarness(model, PedagogicalToolRegistry(FakeService(), HarnessLimits()), HarnessLimits()).run(context)
+    assert model.returned.cr_frame is None

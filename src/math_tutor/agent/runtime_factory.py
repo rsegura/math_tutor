@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-import json
 from pathlib import Path
 from typing import Mapping
 import asyncio
@@ -17,12 +16,13 @@ from math_tutor.application.session_runtime import SessionRuntime
 from math_tutor.domain.evidence import ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import AssistanceThreshold, CompetencyState, ProgressionPolicy
 from math_tutor.harness.context import ActivityContext, LearnerState, TurnEvidence, build_harness_context
-from math_tutor.harness.contracts import ToolName
+from math_tutor.harness.contracts import ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
 from math_tutor.harness.loop import PedagogicalHarness
 from math_tutor.harness.registry import PedagogicalToolRegistry, SessionCapExceeded
 from math_tutor.agent.voice_agent import VoiceDecision, VoiceTurn, is_stop_request
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
+from math_tutor.agent.providers.model import build_model_adapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,93 +59,8 @@ def create_voice_providers(settings: ProviderSettings):
     return stt, tts
 
 
-class OpenAIHarnessAdapter:
-    """Unstructured provider output; the bounded harness validates and repairs it."""
-    def __init__(self, *, api_key: str, model: str, client=None, first_response_seconds: float = 4.0) -> None:
-        if not 2 <= first_response_seconds <= 15: raise ProviderConfigError("LLM first response deadline must be between 2 and 15 seconds")
-        if client is None:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(api_key=api_key, max_retries=0)
-        self._client = client
-        self._model = model
-        self._first_response_seconds = first_response_seconds
-
-    @staticmethod
-    def _tools(context) -> list[dict[str, object]]:
-        answer_kind = context.activity.expected_answer_kind.value
-        answer_fields = list(context.activity.expected_answer_fields)
-        if context.activity.expected_answer_kind.value == "relation":
-            value_schema = {"type":"string","enum":["greater","less","equal"]}
-        elif context.activity.expected_answer_kind.value == "integer-sequence":
-            value_schema = {"type":"array","items":{"type":"integer"}}
-        else:
-            value_schema = {"type":"integer"}
-        value_properties = {field: dict(value_schema) for field in answer_fields}
-        answer = {"oneOf":[
-            {"type":"object","additionalProperties":False,"properties":{
-                "status":{"const":"evaluable"}, "kind":{"const":answer_kind},
-                "values":{"type":"object","properties":value_properties,"required":answer_fields,"additionalProperties":False},
-            },"required":["status","kind","values"]},
-            {"type":"object","additionalProperties":False,"properties":{
-                "status":{"type":"string","enum":["ambiguous","not-evaluable"]},
-                "kind":{"type":"null"},
-                "values":{"type":"object","properties":{},"required":[],"additionalProperties":False},
-            },"required":["status","kind","values"]},
-        ]}
-        schemas = {
-            "record_answer": ({"turn_id":{"type":"string"},"answer":answer}, ["turn_id","answer"]),
-            "give_hint": ({}, []),
-            "adapt_difficulty": ({"objective_id":{"type":"string","enum":list(context.active_objective_ids)},"difficulty":{"type":"integer"},"seed":{"type":"integer"},"activity_id":{"type":"string"}}, ["objective_id","difficulty","seed","activity_id"]),
-            "propose_skill_update": ({"objective_id":{"type":"string","enum":list(context.authorised_objective_ids)}}, ["objective_id"]),
-            "end_session": ({"reason":{"type":"string"}}, []),
-        }
-        # Realtime/provider tool arguments are not trusted as structured output;
-        # exact schemas guide generation and the harness remains authoritative.
-        return [{"type":"function","name":name,"description":"Acción pedagógica validada por el harness.","parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":False},"strict":False} for name,(properties,required) in schemas.items()]
-
-    async def complete(self, *, prompt: str, context, repair: bool, validation_error: str | None = None) -> object:
-        tools = self._tools(context)
-        compact = {
-            "turn_id": context.current_turn.turn_id,
-            "transcript": context.current_turn.transcript,
-            "activity_id": context.activity.activity_id,
-            "prompt_es": context.activity.prompt_es,
-            "template_id": context.activity.template_id,
-            "objective_id": context.activity.objective_id,
-            "difficulty": context.activity.difficulty,
-            "expected_answer_kind": context.activity.expected_answer_kind.value,
-            "expected_answer_fields": context.activity.expected_answer_fields,
-            "active_objectives": context.active_objective_ids,
-            "authorised_objectives": context.authorised_objective_ids,
-            "adaptations": context.adaptations,
-            "session_limits":{"duration_minutes":context.duration_minutes,"max_activities":context.max_activities},
-            "hints_used": context.activity.hints_used,
-            "attempts_used": context.activity.attempts_used,
-            "activities_used": context.activities_used,
-            "validation_error": None if validation_error is None else {"code":validation_error},
-            "allowed_contract": {tool["name"]: tool["parameters"] for tool in tools},
-        }
-        async with asyncio.timeout(self._first_response_seconds):
-            response = await self._client.responses.create(model=self._model,input=[{"role":"system","content":prompt},{"role":"user","content":json.dumps(compact, ensure_ascii=False)}],tools=tools,tool_choice="auto",parallel_tool_calls=False)
-        calls = [item for item in getattr(response, "output", ()) if getattr(item, "type", None) == "function_call"]
-        if calls:
-            if len(calls) != 1 or calls[0].name not in {tool["name"] for tool in tools}:
-                raise ValueError("model-output-has-invalid-tool-call")
-            try:
-                arguments = json.loads(calls[0].arguments)
-            except (json.JSONDecodeError, TypeError) as error:
-                raise ValueError("model-tool-arguments-must-be-json") from error
-            if not isinstance(arguments, dict):
-                raise ValueError("model-tool-arguments-must-be-object")
-            return {"type":"tool","name":calls[0].name,"arguments":arguments}
-        try:
-            return json.loads(response.output_text)
-        except (json.JSONDecodeError, TypeError, AttributeError) as error:
-            raise ValueError("model-output-must-be-json") from error
-
-
 class BoundedConversationEngine:
-    def __init__(self, *, repository, runtime: TutoringVoiceRuntime, curricula_dir: Path, now=None, model=None) -> None:
+    def __init__(self, *, repository, runtime: TutoringVoiceRuntime, curricula_dir: Path, now=None, model=None, model_factory=None) -> None:
         curriculum, templates = load_curriculum_catalogs(curricula_dir / "primary-math-v1.yaml", curricula_dir / "activity-templates-v1.yaml")
         self._repository = repository
         self._runtime = SessionRuntime()
@@ -165,15 +80,25 @@ class BoundedConversationEngine:
         self._curriculum = curriculum
         self._templates = templates
         self._initial_activity_id = "activity-1"
+        self._registry = PedagogicalToolRegistry(self._service, limits, guard=self._runtime_cap_reason)
+        self._model_factory = model_factory or (lambda: build_model_adapter(runtime.providers))
+        self._harness = PedagogicalHarness(model, self._registry, limits) if model is not None else None
+        self._harness_lock = asyncio.Lock()
+        self._limits = limits
+        self._llm_total_seconds = runtime.providers.llm_total_seconds
         self.startup_terminal_reason = self._cap_reason(self._repository.load_session_aggregate(self._bootstrap.session.session_id))
         if self.startup_terminal_reason is not None:
             self._stop(self.startup_terminal_reason)
-            self._harness = None
             return
         self._ensure_initial_activity()
-        model = model or OpenAIHarnessAdapter(api_key=runtime.providers.llm_api_key, model=runtime.providers.llm_model, first_response_seconds=runtime.providers.llm_first_response_seconds)
-        self._harness = PedagogicalHarness(model, PedagogicalToolRegistry(self._service, limits, guard=self._runtime_cap_reason), limits)
-        self._llm_total_seconds = runtime.providers.llm_total_seconds
+
+    async def _get_harness(self) -> PedagogicalHarness:
+        if self._harness is not None:
+            return self._harness
+        async with self._harness_lock:
+            if self._harness is None:
+                self._harness = PedagogicalHarness(self._model_factory(), self._registry, self._limits)
+        return self._harness
 
     def _runtime_cap_reason(self) -> str | None:
         return self._cap_reason(self._repository.load_session_aggregate(self._bootstrap.session.session_id))
@@ -280,10 +205,17 @@ class BoundedConversationEngine:
         aggregate = self._repository.load_session_aggregate(self._bootstrap.session.session_id)
         if aggregate is None or aggregate.session.ended:
             raise RuntimeError("session is no longer active")
+        cap = self._cap_reason(aggregate)
+        if cap is not None:
+            self._stop(cap)
+            return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=cap)
+        stop_requested = is_stop_request(turn.text)
         prior_observation = self._repository.load_observation(
             aggregate.session.session_id, f"obs-{turn.turn_id}"
         )
         if (
+            not stop_requested
+            and
             prior_observation is not None
             and prior_observation.observation.outcome is ObservationOutcome.CORRECT
         ):
@@ -297,10 +229,6 @@ class BoundedConversationEngine:
                 source_activity=source,
             )
             return VoiceDecision(f"Sí, esa respuesta es correcta. {next_prompt}")
-        cap = self._cap_reason(aggregate)
-        if cap is not None:
-            self._stop(cap)
-            return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=cap)
         activity_id = next((event.activity_id for event in reversed(aggregate.events) if event.kind == "activity-selected"), None)
         if activity_id is None:
             raise RuntimeError("active activity is missing")
@@ -323,8 +251,12 @@ class BoundedConversationEngine:
             adaptations=self._bootstrap.plan.adaptations, duration_minutes=self._bootstrap.plan.limits.duration_minutes,
             max_activities=self._bootstrap.plan.limits.max_activities, activities_used=len(aggregate.activities),
         )
+        if stop_requested:
+            decision = self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason": "stop-requested"}), context)
+            return VoiceDecision("De acuerdo, paramos aquí.", terminal=decision.terminal, reason="stop-requested")
         try:
-            decision = await self._harness.run_async(context, stop_requested=is_stop_request(turn.text), total_seconds=self._llm_total_seconds)
+            harness = await self._get_harness()
+            decision = await harness.run_async(context, total_seconds=self._llm_total_seconds)
         except SessionCapExceeded as error:
             self._stop(str(error))
             return VoiceDecision("La sesión ha terminado por hoy.",terminal=True,reason=str(error))

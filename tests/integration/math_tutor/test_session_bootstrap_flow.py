@@ -2,7 +2,9 @@ from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import sqlite3
+import asyncio
 from threading import Event
+from unittest.mock import Mock
 
 import pytest
 
@@ -74,6 +76,53 @@ def test_composition_selects_reviewed_initial_activity_before_voice(tmp_path):
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"))
     assert engine.initial_prompt
     assert repo.load_activity(metadata.tutoring_session_id,"activity-1").objective_id == "units-tens"
+
+
+@pytest.mark.asyncio
+async def test_immediate_stop_uses_eager_registry_without_creating_provider(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    created=[]
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model_factory=lambda: created.append(True))
+    engine._registry.execute=Mock(wraps=engine._registry.execute)
+    decision=await engine.decide(VoiceTurn("turn-stop","Quiero parar",.99,Event()))
+    assert created == []
+    engine._registry.execute.assert_called_once()
+    assert decision.terminal and decision.reason == "stop-requested"
+    state=repo.load_state(metadata.tutoring_session_id)
+    assert state.session.ended and state.session.end_reason == "stop-requested"
+
+
+@pytest.mark.asyncio
+async def test_lazy_model_factory_is_cached_for_normal_turns(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    created=[]
+    class SocialModel:
+        async def complete(self, **kwargs):
+            return {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}
+    def factory():
+        created.append(True)
+        return SocialModel()
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model_factory=factory)
+    assert created == []
+    await engine.decide(VoiceTurn("turn-1","No lo sé",.99,Event()))
+    await engine.decide(VoiceTurn("turn-2","Todavía no",.99,Event()))
+    assert created == [True]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_lazy_initialization_creates_at_most_one_adapter(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    created=[]
+    def factory():
+        created.append(True)
+        return SimpleModel()
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model_factory=factory)
+    first,second=await asyncio.gather(engine._get_harness(),engine._get_harness())
+    assert first is second
+    assert created == [True]
 
 
 def test_worker_rejects_empty_active_objectives_before_provider_configuration(tmp_path):
