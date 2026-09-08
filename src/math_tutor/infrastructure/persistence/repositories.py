@@ -647,6 +647,20 @@ class SQLiteTutoringRepository:
                 snapshot_id = snapshot[0]
                 active = db.execute("SELECT revoked_at FROM audio_consents WHERE consent_id=?", (snapshot[1],)).fetchone()
                 clip_enabled = bool(active is not None and active[0] is None)
+            bootstrap = VoiceBootstrap(
+                learner,
+                ProvisionedPlan(
+                    plan,
+                    tuple(json.loads(row[11])),
+                    SessionLimits(row[12], row[13]),
+                    _load_regulation_policy(row[16]),
+                ),
+                session,
+                row[2],
+                snapshot_id,
+                clip_enabled,
+                datetime.fromisoformat(row[15]),
+            )
             cursor = db.execute(
                 "UPDATE learner_join_codes SET consumed_at=? WHERE session_id=? AND consumed_at IS NULL",
                 (at.isoformat(), session_id),
@@ -654,7 +668,7 @@ class SQLiteTutoringRepository:
             if cursor.rowcount != 1:
                 raise VoiceBootstrapError("invalid-join-code")
             db.commit()
-            return VoiceBootstrap(learner, ProvisionedPlan(plan, tuple(json.loads(row[11])), SessionLimits(row[12], row[13]), _load_regulation_policy(row[16])), session, row[2], snapshot_id, clip_enabled, datetime.fromisoformat(row[15]))
+            return bootstrap
         except Exception:
             db.rollback()
             raise

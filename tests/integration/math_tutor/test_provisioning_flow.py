@@ -75,6 +75,30 @@ def test_malformed_stored_regulation_policy_fails_closed(tmp_path):
         repo.load_current_provisioned_plan('learner')
 
 
+def test_malformed_session_policy_does_not_consume_join_code(tmp_path):
+    database=tmp_path/'malformed-bootstrap.db'; migrate(database)
+    root=Path('src/math_tutor/curricula')
+    catalog,_=load_curriculum_catalogs(root/'primary-math-v1.yaml',root/'activity-templates-v1.yaml')
+    repo=SQLiteTutoringRepository(database); service=ProvisioningService(repo,catalog,Purger())
+    service.create_learner(CreateLearner('learner','Sol',9))
+    service.create_learning_plan(CreateLearningPlan('plan','learner',('units-tens',),(),SessionLimits(10,3)))
+    started=service.start_learning_session(StartLearningSession('learner'))
+    with sqlite3.connect(database) as db:
+        db.execute("update provisioned_plans set regulation_policy_json='{}'")
+    with pytest.raises(ValueError, match='invalid-regulation-policy'):
+        repo.authorise_learner_join(
+            started.tutoring_session_id,
+            started.join_code,
+            now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc),
+        )
+    with sqlite3.connect(database) as db:
+        consumed=db.execute(
+            'select consumed_at from learner_join_codes where session_id=?',
+            (started.tutoring_session_id,),
+        ).fetchone()[0]
+    assert consumed is None
+
+
 def test_migration_assigns_versioned_default_policy_to_legacy_plan_rows(tmp_path):
     legacy_migrations=tmp_path/'migrations'; legacy_migrations.mkdir()
     source=Path('src/math_tutor/infrastructure/persistence/migrations')
