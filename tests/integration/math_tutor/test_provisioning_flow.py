@@ -1,9 +1,16 @@
 import hashlib
 import sqlite3
 import threading
+import pytest
+from pathlib import Path
+import shutil
 from fastapi.testclient import TestClient
 
 from math_tutor.application.provisioning import CreateLearner, CreateLearningPlan, ProvisioningService, RevokeAudioConsent, SessionLimits, StartLearningSession
+from math_tutor.application.provisioning import DEFAULT_REGULATION_POLICY
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
+from math_tutor.domain.learning import LearningPlan, PresentationProfile
+from math_tutor.infrastructure.persistence.repositories import _dump
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
@@ -38,6 +45,53 @@ def test_empty_database_provisions_consent_and_no_consent_sessions(tmp_path):
     service.revoke_audio_consent(RevokeAudioConsent('opaque-learner',consent.consent_id))
     assert repo.load_state(with_audio.tutoring_session_id).session.can_continue
     assert purger.scopes == [(consent.consent_id,(with_audio.tutoring_session_id,))]*2
+
+
+def test_running_session_bootstraps_its_policy_snapshot_after_plan_update(tmp_path):
+    database=tmp_path/'snapshot.db'; migrate(database)
+    root=__import__('pathlib').Path('src/math_tutor/curricula')
+    catalog,_=load_curriculum_catalogs(root/'primary-math-v1.yaml',root/'activity-templates-v1.yaml')
+    repo=SQLiteTutoringRepository(database); service=ProvisioningService(repo,catalog,Purger())
+    service.create_learner(CreateLearner('learner','Sol',9))
+    old_policy=RegulationPolicy((PedagogicalStrategy.REPEAT_INSTRUCTION,PedagogicalStrategy.REDIRECT_GENTLY,PedagogicalStrategy.VALIDATE_EMOTION,PedagogicalStrategy.TAKE_SHORT_PAUSE),3)
+    plan=service.create_learning_plan(CreateLearningPlan('plan','learner',('units-tens',),(),SessionLimits(10,3),regulation_policy=old_policy))
+    started=service.start_learning_session(StartLearningSession('learner'))
+    service.update_learning_plan(plan.with_changes(expected_version=1,regulation_policy=DEFAULT_REGULATION_POLICY))
+    bootstrap=repo.authorise_learner_join(started.tutoring_session_id,started.join_code,now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc))
+    assert bootstrap.plan.version == 1
+    assert bootstrap.plan.regulation_policy == old_policy
+
+
+def test_malformed_stored_regulation_policy_fails_closed(tmp_path):
+    database=tmp_path/'malformed.db'; migrate(database)
+    root=__import__('pathlib').Path('src/math_tutor/curricula')
+    catalog,_=load_curriculum_catalogs(root/'primary-math-v1.yaml',root/'activity-templates-v1.yaml')
+    repo=SQLiteTutoringRepository(database); service=ProvisioningService(repo,catalog,Purger())
+    service.create_learner(CreateLearner('learner','Sol',9))
+    service.create_learning_plan(CreateLearningPlan('plan','learner',('units-tens',),(),SessionLimits(10,3)))
+    with sqlite3.connect(database) as db:
+        db.execute("update provisioned_plans set regulation_policy_json='{}'")
+    with pytest.raises(ValueError, match='invalid-regulation-policy'):
+        repo.load_current_provisioned_plan('learner')
+
+
+def test_migration_assigns_versioned_default_policy_to_legacy_plan_rows(tmp_path):
+    legacy_migrations=tmp_path/'migrations'; legacy_migrations.mkdir()
+    source=Path('src/math_tutor/infrastructure/persistence/migrations')
+    for migration in source.glob('*.sql'):
+        if int(migration.name.split('_',1)[0]) <= 19:
+            shutil.copyfile(migration, legacy_migrations/migration.name)
+    database=tmp_path/'legacy-plan.db'; migrate(database,migration_dir=legacy_migrations)
+    plan=LearningPlan('learner',('units-tens',),('units-tens',),PresentationProfile.for_age(8),'plan',1)
+    with sqlite3.connect(database) as db:
+        db.execute("insert into learners(learner_id,curriculum_snapshot,curriculum_version,pseudonym,age_years) values(?,?,?,?,?)",('learner','primary-math-v1','primary-math/v1','Sol',8))
+        db.execute("insert into curriculum_snapshots(learner_id,curriculum_version,curriculum_snapshot) values(?,?,?)",('learner','primary-math/v1','primary-math-v1'))
+        db.execute("insert into learning_plans(plan_id,version,learner_id,plan_json,policy_version,curriculum_version) values(?,?,?,?,?,?)",('plan',1,'learner',_dump(plan),'provisioning/v1','primary-math/v1'))
+        db.execute("insert into provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) values(?,?,?,?,?,?)",('plan',1,'learner','[]',10,3))
+    migrate(database)
+    loaded=SQLiteTutoringRepository(database).load_current_provisioned_plan('learner')
+    assert loaded is not None
+    assert loaded.regulation_policy == DEFAULT_REGULATION_POLICY
 
 
 def test_revoked_stale_consent_object_cannot_create_session_or_partial_join_rows(tmp_path):

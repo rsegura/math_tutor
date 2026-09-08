@@ -12,6 +12,7 @@ from math_tutor.application.provisioning import (
     CreateLearner, CreateLearningPlan, ProvisioningError, ProvisioningService,
     RevokeAudioConsent, SessionLimits, StartLearningSession, UpdateLearningPlan,
 )
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
 
 
 class StrictModel(BaseModel):
@@ -35,12 +36,24 @@ class LimitsBody(StrictModel):
     max_activities: int = Field(ge=1, le=20)
 
 
+class RegulationBody(StrictModel):
+    allowed_strategies: list[str]
+    max_consecutive_regulation_turns: int = Field(ge=1, le=12)
+
+    def to_domain(self) -> RegulationPolicy:
+        return RegulationPolicy(
+            tuple(PedagogicalStrategy(item) for item in self.allowed_strategies),
+            self.max_consecutive_regulation_turns,
+        )
+
+
 class PlanBody(StrictModel):
     plan_id: str = Field(min_length=1, max_length=128)
     objective_ids: list[str]
     adaptations: list[str]
     limits: LimitsBody
     expected_version: int = Field(default=0, ge=0)
+    regulation: RegulationBody | None = None
 
     @field_validator("plan_id")
     @classmethod
@@ -60,6 +73,7 @@ class PlanUpdateBody(StrictModel):
     objective_ids: list[str]
     adaptations: list[str]
     limits: LimitsBody
+    regulation: RegulationBody | None = None
 
     @field_validator("objective_ids", "adaptations")
     @classmethod
@@ -109,16 +123,18 @@ def create_therapist_router(service: ProvisioningService, token: str) -> APIRout
     @router.post("/learners/{learner_id}/plans", status_code=status.HTTP_201_CREATED, dependencies=[Depends(authorised)])
     def create_plan(learner_id: str, body: PlanBody):
         try:
-            value = service.create_learning_plan(CreateLearningPlan(body.plan_id, learner_id, tuple(body.objective_ids), tuple(body.adaptations), SessionLimits(body.limits.duration_minutes, body.limits.max_activities), body.expected_version))
-            return {"plan_id": value.plan_id, "learner_id": learner_id, "version": value.version, "objective_ids": value.plan.authorised_objective_ids, "adaptations": value.adaptations, "limits": asdict(value.limits)}
-        except ProvisioningError as error: raise _error(error) from error
+            policy = body.regulation.to_domain() if body.regulation is not None else None
+            value = service.create_learning_plan(CreateLearningPlan(body.plan_id, learner_id, tuple(body.objective_ids), tuple(body.adaptations), SessionLimits(body.limits.duration_minutes, body.limits.max_activities), body.expected_version, policy))
+            return {"plan_id": value.plan_id, "learner_id": learner_id, "version": value.version, "objective_ids": value.plan.authorised_objective_ids, "adaptations": value.adaptations, "limits": asdict(value.limits), "regulation": {"allowed_strategies": [item.value for item in value.regulation_policy.allowed_strategies], "max_consecutive_regulation_turns": value.regulation_policy.max_consecutive_regulation_turns}}
+        except (ProvisioningError, ValueError) as error: raise _error(ProvisioningError(str(error))) from error
 
     @router.put("/learners/{learner_id}/plans/{plan_id}", dependencies=[Depends(authorised)])
     def update_plan(learner_id: str, plan_id: str, body: PlanUpdateBody):
         try:
-            value = service.update_learning_plan(UpdateLearningPlan(plan_id, learner_id, tuple(body.objective_ids), tuple(body.adaptations), SessionLimits(body.limits.duration_minutes, body.limits.max_activities), body.expected_version))
-            return {"plan_id": value.plan_id, "learner_id": learner_id, "version": value.version}
-        except ProvisioningError as error: raise _error(error) from error
+            policy = body.regulation.to_domain() if body.regulation is not None else None
+            value = service.update_learning_plan(UpdateLearningPlan(plan_id, learner_id, tuple(body.objective_ids), tuple(body.adaptations), SessionLimits(body.limits.duration_minutes, body.limits.max_activities), body.expected_version, policy))
+            return {"plan_id": value.plan_id, "learner_id": learner_id, "version": value.version, "regulation": {"allowed_strategies": [item.value for item in value.regulation_policy.allowed_strategies], "max_consecutive_regulation_turns": value.regulation_policy.max_consecutive_regulation_turns}}
+        except (ProvisioningError, ValueError) as error: raise _error(ProvisioningError(str(error))) from error
 
     @router.post("/learners/{learner_id}/audio-consents", status_code=status.HTTP_201_CREATED, dependencies=[Depends(authorised)])
     def grant_consent(learner_id: str, body: ConsentBody):

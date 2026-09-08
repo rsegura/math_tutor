@@ -53,6 +53,32 @@ def test_full_authorised_api_flow_and_stale_update(tmp_path):
     assert revoked.status_code == 200 and revoked.json()["active"] is False
 
 
+def test_plan_api_accepts_optional_regulation_policy_and_returns_snapshot(tmp_path):
+    api = client(tmp_path); h={"Authorization":f"Bearer {TOKEN}"}
+    api.post("/api/therapist/learners", headers=h, json={"learner_id":"l1","pseudonym":"Luna","age_years":8})
+    policy={
+        "allowed_strategies":["repeat-instruction", "redirect-gently", "validate-emotion", "take-short-pause"],
+        "max_consecutive_regulation_turns":3,
+    }
+    created=api.post("/api/therapist/learners/l1/plans",headers=h,json={"plan_id":"p1","objective_ids":["units-tens"],"adaptations":[],"limits":{"duration_minutes":10,"max_activities":3},"regulation":policy})
+    assert created.status_code == 201
+    assert created.json()["regulation"] == policy
+
+
+@pytest.mark.parametrize("regulation", [
+    {"allowed_strategies":[],"max_consecutive_regulation_turns":4},
+    {"allowed_strategies":["repeat-instruction"],"max_consecutive_regulation_turns":4},
+    {"allowed_strategies":["repeat-instruction","repeat-instruction","redirect-gently","validate-emotion","take-short-pause"],"max_consecutive_regulation_turns":4},
+    {"allowed_strategies":["unknown","redirect-gently","validate-emotion","take-short-pause"],"max_consecutive_regulation_turns":4},
+    {"allowed_strategies":["repeat-instruction","redirect-gently","validate-emotion","take-short-pause"],"max_consecutive_regulation_turns":13},
+])
+def test_plan_api_rejects_invalid_regulation_policy(regulation, tmp_path):
+    api=client(tmp_path); h={"Authorization":f"Bearer {TOKEN}"}
+    api.post("/api/therapist/learners",headers=h,json={"learner_id":"l1","pseudonym":"Luna","age_years":8})
+    response=api.post("/api/therapist/learners/l1/plans",headers=h,json={"plan_id":"p1","objective_ids":["units-tens"],"adaptations":[],"limits":{"duration_minutes":10,"max_activities":3},"regulation":regulation})
+    assert response.status_code == 422
+
+
 def test_server_secret_never_leaks_to_responses_logs_static_or_child_services(tmp_path, caplog):
     api = client(tmp_path); headers={"Authorization":f"Bearer {TOKEN}"}
     response = api.post("/api/therapist/learners", headers=headers, json={"learner_id":"opaque","pseudonym":"Sol","age_years":9})

@@ -10,7 +10,10 @@ from math_tutor.application.provisioning import (
     RevokeAudioConsent,
     SessionLimits,
     StartLearningSession,
+    UpdateLearningPlan,
+    DEFAULT_REGULATION_POLICY,
 )
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
@@ -94,6 +97,63 @@ def test_plan_updates_use_compare_and_swap(tmp_path):
     assert svc.update_learning_plan(plan.with_changes(expected_version=1, objective_ids=("units-tens", "compose-two-digit"))).version == 2
     with pytest.raises(ProvisioningError, match="stale-plan-version"):
         svc.update_learning_plan(plan.with_changes(expected_version=1))
+
+
+def test_omitted_regulation_policy_uses_explicit_safe_default(tmp_path):
+    svc = service(tmp_path)
+    svc.create_learner(CreateLearner("learner-1", "Luna", 8))
+    plan = svc.create_learning_plan(CreateLearningPlan(
+        "plan-1", "learner-1", ("units-tens",), (), SessionLimits(10, 3)
+    ))
+    assert plan.regulation_policy == DEFAULT_REGULATION_POLICY
+    assert plan.regulation_policy.max_consecutive_regulation_turns == 4
+
+
+def test_direct_commands_accept_and_version_an_explicit_regulation_policy(tmp_path):
+    svc = service(tmp_path)
+    svc.create_learner(CreateLearner("learner-1", "Luna", 8))
+    policy = RegulationPolicy((
+        PedagogicalStrategy.REPEAT_INSTRUCTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 3)
+    created = svc.create_learning_plan(CreateLearningPlan(
+        "plan-1", "learner-1", ("units-tens",), (), SessionLimits(10, 3),
+        regulation_policy=policy,
+    ))
+    updated = svc.update_learning_plan(created.with_changes(
+        expected_version=1,
+        regulation_policy=DEFAULT_REGULATION_POLICY,
+    ))
+    assert created.regulation_policy == policy
+    assert updated.version == 2
+    assert updated.regulation_policy == DEFAULT_REGULATION_POLICY
+
+
+def test_omitted_policy_on_update_preserves_the_current_policy(tmp_path):
+    svc = service(tmp_path)
+    svc.create_learner(CreateLearner("learner-1", "Luna", 8))
+    policy = RegulationPolicy((
+        PedagogicalStrategy.REPEAT_INSTRUCTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 3)
+    created = svc.create_learning_plan(CreateLearningPlan(
+        "plan-1", "learner-1", ("units-tens",), (), SessionLimits(10, 3),
+        regulation_policy=policy,
+    ))
+    updated = svc.update_learning_plan(UpdateLearningPlan(
+        "plan-1", "learner-1", ("units-tens",), (), SessionLimits(10, 3), 1
+    ))
+    assert created.regulation_policy == updated.regulation_policy == policy
+
+
+@pytest.mark.parametrize("cap", [True, 0, 13])
+def test_regulation_policy_cap_is_strictly_bounded(cap):
+    with pytest.raises(ValueError, match="invalid-regulation-turn-cap"):
+        RegulationPolicy(DEFAULT_REGULATION_POLICY.allowed_strategies, cap)
 
 
 def test_plan_creation_requires_absent_version_expectation(tmp_path):

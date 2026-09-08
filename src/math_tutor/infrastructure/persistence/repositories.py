@@ -22,7 +22,8 @@ from math_tutor.domain.learning import CompetencyState, LearningPlan, LearningSe
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.domain.audio_consent import AudioConsent
-from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits
+from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits, REGULATION_POLICY_VERSION, DEFAULT_REGULATION_POLICY
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
 from math_tutor.application.next_objectives import NextObjectiveDecision, NextObjectiveDecisionRevision, NextObjectiveError, NextObjectiveGenerationSource, NextObjectiveProposal, ProposalDecisionStatus
 from math_tutor.infrastructure.dispatch import VoiceBootstrap, VoiceBootstrapError, verify_join_code
 
@@ -32,6 +33,48 @@ class LearnerRecord:
     learner_id: str
     curriculum_snapshot: str
     curriculum_version: str
+
+
+def _dump_regulation_policy(policy: RegulationPolicy) -> str:
+    return json.dumps({
+        "version": REGULATION_POLICY_VERSION,
+        "allowed_strategies": [item.value for item in policy.allowed_strategies],
+        "max_consecutive_regulation_turns": policy.max_consecutive_regulation_turns,
+    }, separators=(",", ":"))
+
+
+def _load_regulation_policy(raw: object) -> RegulationPolicy:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else None
+        if not isinstance(value, dict) or set(value) != {
+            "version", "allowed_strategies", "max_consecutive_regulation_turns"
+        } or value["version"] != REGULATION_POLICY_VERSION or not isinstance(value["allowed_strategies"], list):
+            raise ValueError
+        return RegulationPolicy(
+            tuple(PedagogicalStrategy(item) for item in value["allowed_strategies"]),
+            value["max_consecutive_regulation_turns"],
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise ValueError("invalid-regulation-policy") from error
+
+
+def _insert_provisioned_plan(db: sqlite3.Connection, value: ProvisionedPlan) -> None:
+    plan = value.plan
+    columns = {row[1] for row in db.execute("PRAGMA table_info(provisioned_plans)")}
+    base = (
+        plan.plan_id, plan.version, plan.learner_id, json.dumps(value.adaptations),
+        value.limits.duration_minutes, value.limits.max_activities,
+    )
+    if "regulation_policy_json" in columns:
+        db.execute(
+            "INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities,regulation_policy_json) VALUES(?,?,?,?,?,?,?)",
+            base + (_dump_regulation_policy(value.regulation_policy),),
+        )
+    else:
+        db.execute(
+            "INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) VALUES(?,?,?,?,?,?)",
+            base,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,11 +393,11 @@ class SQLiteTutoringRepository:
             db.execute("BEGIN")
             session=db.execute("SELECT learner_id,plan_id,plan_version FROM learning_sessions WHERE session_id=?",(session_id,)).fetchone()
             if session is None or session[0]!=learner_id: db.rollback(); return None
-            plan_row=db.execute("SELECT p.plan_id,p.version,p.adaptations_json,p.duration_minutes,p.max_activities,l.plan_json FROM provisioned_plans p JOIN learning_plans l ON l.plan_id=p.plan_id AND l.version=p.version WHERE p.learner_id=? ORDER BY p.version DESC LIMIT 1",(learner_id,)).fetchone()
+            plan_row=db.execute("SELECT p.plan_id,p.version,p.adaptations_json,p.duration_minutes,p.max_activities,l.plan_json,p.regulation_policy_json FROM provisioned_plans p JOIN learning_plans l ON l.plan_id=p.plan_id AND l.version=p.version WHERE p.learner_id=? ORDER BY p.version DESC LIMIT 1",(learner_id,)).fetchone()
             profile=db.execute("SELECT version FROM learner_profile_versions WHERE learner_id=?",(learner_id,)).fetchone()
             learning=db.execute("SELECT version FROM learner_learning_state_versions WHERE learner_id=?",(learner_id,)).fetchone()
             if plan_row is None or profile is None or learning is None or (session[1],session[2])!=(plan_row[0],plan_row[1]): db.rollback(); return None
-            plan=ProvisionedPlan(_load(plan_row[5]),tuple(json.loads(plan_row[2])),SessionLimits(plan_row[3],plan_row[4]))
+            plan=ProvisionedPlan(_load(plan_row[5]),tuple(json.loads(plan_row[2])),SessionLimits(plan_row[3],plan_row[4]),_load_regulation_policy(plan_row[6]))
             estimates=tuple(_load(row[0]) for row in db.execute("SELECT estimate_json FROM skill_estimates WHERE learner_id=? ORDER BY objective_id",(learner_id,)))
             evidence_ids={row[0] for row in db.execute("SELECT evidence_id FROM evidence_records WHERE learner_id=?",(learner_id,))}
             discarded=set()
@@ -426,7 +469,7 @@ class SQLiteTutoringRepository:
                 if new_plan is None or new_plan.version!=decision.expected_plan_version+1: raise NextObjectiveError("invalid-approved-plan")
                 curriculum=db.execute("SELECT curriculum_version FROM learners WHERE learner_id=?",(decision.learner_id,)).fetchone()[0]
                 db.execute("INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version,curriculum_version) VALUES(?,?,?,?,?,?)",(new_plan.plan.plan_id,new_plan.version,decision.learner_id,_dump(new_plan.plan),"therapist-next-objective/v1",curriculum))
-                db.execute("INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) VALUES(?,?,?,?,?,?)",(new_plan.plan.plan_id,new_plan.version,decision.learner_id,json.dumps(new_plan.adaptations),new_plan.limits.duration_minutes,new_plan.limits.max_activities))
+                _insert_provisioned_plan(db, new_plan)
                 resulting=new_plan.version
             elif new_plan is not None: raise NextObjectiveError("rejection-cannot-change-plan")
             db.execute("INSERT INTO next_objective_decisions(proposal_id,revision,command_id,learner_id,status,reason,expected_revision,expected_plan_version,expected_profile_version,expected_learning_state_version,resulting_plan_version,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(decision.proposal_id,current_revision+1,decision.command_id,decision.learner_id,decision.status.value,decision.reason,decision.expected_revision,decision.expected_plan_version,decision.expected_profile_version,decision.expected_learning_state_version,resulting,decision.decided_at.isoformat()))
@@ -447,7 +490,7 @@ class SQLiteTutoringRepository:
             if db.execute("SELECT 1 FROM provisioned_plans WHERE learner_id=?", (plan.learner_id,)).fetchone():
                 raise ValueError("learner already has a learning plan")
             db.execute("INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version,curriculum_version) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, _dump(plan), "provisioning/v1", learner[0]))
-            db.execute("INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, json.dumps(value.adaptations), value.limits.duration_minutes, value.limits.max_activities))
+            _insert_provisioned_plan(db, value)
             db.commit()
         except Exception:
             db.rollback(); raise
@@ -464,7 +507,7 @@ class SQLiteTutoringRepository:
                 db.rollback(); return False
             curriculum = db.execute("SELECT curriculum_version FROM learners WHERE learner_id=?", (plan.learner_id,)).fetchone()[0]
             db.execute("INSERT INTO learning_plans(plan_id,version,learner_id,plan_json,policy_version,curriculum_version) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, _dump(plan), "provisioning/v1", curriculum))
-            db.execute("INSERT INTO provisioned_plans(plan_id,version,learner_id,adaptations_json,duration_minutes,max_activities) VALUES(?,?,?,?,?,?)", (plan.plan_id, plan.version, plan.learner_id, json.dumps(value.adaptations), value.limits.duration_minutes, value.limits.max_activities))
+            _insert_provisioned_plan(db, value)
             db.commit(); return True
         except sqlite3.IntegrityError:
             db.rollback(); return False
@@ -473,9 +516,19 @@ class SQLiteTutoringRepository:
 
     def load_current_provisioned_plan(self, learner_id: str) -> ProvisionedPlan | None:
         with self._connect() as db:
-            row = db.execute("SELECT p.plan_id,p.version,p.adaptations_json,p.duration_minutes,p.max_activities,l.plan_json FROM provisioned_plans p JOIN learning_plans l ON l.plan_id=p.plan_id AND l.version=p.version WHERE p.learner_id=? ORDER BY p.version DESC LIMIT 1", (learner_id,)).fetchone()
+            has_policy = "regulation_policy_json" in {
+                item[1] for item in db.execute("PRAGMA table_info(provisioned_plans)")
+            }
+            policy_select = ",p.regulation_policy_json" if has_policy else ""
+            row = db.execute(
+                f"SELECT p.plan_id,p.version,p.adaptations_json,p.duration_minutes,p.max_activities,l.plan_json{policy_select} "
+                "FROM provisioned_plans p JOIN learning_plans l ON l.plan_id=p.plan_id AND l.version=p.version "
+                "WHERE p.learner_id=? ORDER BY p.version DESC LIMIT 1",
+                (learner_id,),
+            ).fetchone()
         if row is None: return None
-        return ProvisionedPlan(_load(row[5]), tuple(json.loads(row[2])), SessionLimits(row[3], row[4]))
+        policy = _load_regulation_policy(row[6]) if has_policy else DEFAULT_REGULATION_POLICY
+        return ProvisionedPlan(_load(row[5]), tuple(json.loads(row[2])), SessionLimits(row[3], row[4]), policy)
 
     def load_profile_version(self, learner_id: str) -> int | None:
         with self._connect() as db:
@@ -556,7 +609,7 @@ class SQLiteTutoringRepository:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT s.session_json,s.version,s.profile_version,s.learner_id,s.plan_id,s.plan_version,"
-                "j.code_hash,j.expires_at,j.consumed_at,l.pseudonym,l.age_years,p.adaptations_json,p.duration_minutes,p.max_activities,lp.plan_json,s.created_at "
+                "j.code_hash,j.expires_at,j.consumed_at,l.pseudonym,l.age_years,p.adaptations_json,p.duration_minutes,p.max_activities,lp.plan_json,s.created_at,p.regulation_policy_json "
                 "FROM learning_sessions s JOIN learner_join_codes j ON j.session_id=s.session_id "
                 "JOIN learners l ON l.learner_id=s.learner_id "
                 "JOIN provisioned_plans p ON p.plan_id=s.plan_id AND p.version=s.plan_version "
@@ -568,12 +621,6 @@ class SQLiteTutoringRepository:
             session = _load(row[0])
             if session.ended or not session.can_continue:
                 raise VoiceBootstrapError("session-inactive")
-            current = db.execute(
-                "SELECT plan_id,version FROM provisioned_plans WHERE learner_id=? ORDER BY version DESC LIMIT 1",
-                (row[3],),
-            ).fetchone()
-            if current is None or tuple(current) != (row[4], row[5]):
-                raise VoiceBootstrapError("stale-plan-version")
             if not session.authorised_objective_ids or set(session.active_objective_ids) - set(session.authorised_objective_ids):
                 raise VoiceBootstrapError("invalid-objective-scope")
             expires = datetime.fromisoformat(row[7])
@@ -607,7 +654,7 @@ class SQLiteTutoringRepository:
             if cursor.rowcount != 1:
                 raise VoiceBootstrapError("invalid-join-code")
             db.commit()
-            return VoiceBootstrap(learner, ProvisionedPlan(plan, tuple(json.loads(row[11])), SessionLimits(row[12], row[13])), session, row[2], snapshot_id, clip_enabled, datetime.fromisoformat(row[15]))
+            return VoiceBootstrap(learner, ProvisionedPlan(plan, tuple(json.loads(row[11])), SessionLimits(row[12], row[13]), _load_regulation_policy(row[16])), session, row[2], snapshot_id, clip_enabled, datetime.fromisoformat(row[15]))
         except Exception:
             db.rollback()
             raise
@@ -625,12 +672,17 @@ class SQLiteTutoringRepository:
         if (session.plan_id, session.plan_version) != (metadata.plan_id, metadata.expected_plan_version):
             raise VoiceBootstrapError("dispatch-plan-mismatch")
         learner = self.load_learner_profile(session.learner_id)
-        plan = self.load_current_provisioned_plan(session.learner_id)
         profile_version = self.load_profile_version(session.learner_id)
-        if learner is None or plan is None or profile_version is None:
+        with self._connect() as db:
+            plan_row = db.execute(
+                "SELECT p.adaptations_json,p.duration_minutes,p.max_activities,l.plan_json,p.regulation_policy_json "
+                "FROM provisioned_plans p JOIN learning_plans l ON l.plan_id=p.plan_id AND l.version=p.version "
+                "WHERE p.learner_id=? AND p.plan_id=? AND p.version=?",
+                (session.learner_id, session.plan_id, session.plan_version),
+            ).fetchone()
+        if learner is None or plan_row is None or profile_version is None:
             raise VoiceBootstrapError("incomplete-runtime-state")
-        if (plan.plan_id, plan.version) != (session.plan_id, session.plan_version):
-            raise VoiceBootstrapError("stale-plan-version")
+        plan = ProvisionedPlan(_load(plan_row[3]), tuple(json.loads(plan_row[0])), SessionLimits(plan_row[1], plan_row[2]), _load_regulation_policy(plan_row[4]))
         if state.profile_version != profile_version:
             raise VoiceBootstrapError("stale-profile-version")
         if (

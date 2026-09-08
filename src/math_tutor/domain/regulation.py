@@ -93,7 +93,7 @@ class RegulationPolicy:
             raise ValueError("duplicate-regulation-strategy")
         if isinstance(self.max_consecutive_regulation_turns, bool) or not isinstance(
             self.max_consecutive_regulation_turns, int
-        ) or self.max_consecutive_regulation_turns < 1:
+        ) or not 1 <= self.max_consecutive_regulation_turns <= 12:
             raise ValueError("invalid-regulation-turn-cap")
         if any(not set(strategies).intersection(compatible_strategies(signal)) for signal in ConversationalSignal):
             raise ValueError("incomplete-regulation-policy")

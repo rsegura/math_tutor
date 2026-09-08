@@ -10,6 +10,11 @@ from math_tutor.application.ports import ClipPurgePort, ProvisioningConflict, Pr
 from math_tutor.domain.audio_consent import AudioConsent
 from math_tutor.domain.curriculum import CurriculumCatalog
 from math_tutor.domain.learning import LearningPlan, LearningSession, PresentationProfile
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
+
+
+REGULATION_POLICY_VERSION = "conversation-regulation/v1"
+DEFAULT_REGULATION_POLICY = RegulationPolicy(tuple(PedagogicalStrategy), 4)
 
 
 class ProvisioningError(ValueError):
@@ -84,6 +89,7 @@ class CreateLearningPlan:
     adaptations: tuple[str, ...]
     limits: SessionLimits
     expected_version: int = 0
+    regulation_policy: RegulationPolicy | None = None
 
     def __post_init__(self) -> None:
         _strict_text(self.plan_id, "invalid-plan")
@@ -93,6 +99,8 @@ class CreateLearningPlan:
         if not isinstance(self.limits, SessionLimits):
             raise ProvisioningError("invalid-session-limits")
         _nonnegative_version(self.expected_version)
+        if self.regulation_policy is not None and not isinstance(self.regulation_policy, RegulationPolicy):
+            raise ProvisioningError("invalid-regulation-policy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +111,7 @@ class UpdateLearningPlan:
     adaptations: tuple[str, ...]
     limits: SessionLimits
     expected_version: int
+    regulation_policy: RegulationPolicy | None = None
 
     def __post_init__(self) -> None:
         _strict_text(self.plan_id, "invalid-plan")
@@ -112,6 +121,8 @@ class UpdateLearningPlan:
         if not isinstance(self.limits, SessionLimits):
             raise ProvisioningError("invalid-session-limits")
         _nonnegative_version(self.expected_version)
+        if self.regulation_policy is not None and not isinstance(self.regulation_policy, RegulationPolicy):
+            raise ProvisioningError("invalid-regulation-policy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,14 +130,19 @@ class ProvisionedPlan:
     plan: LearningPlan
     adaptations: tuple[str, ...]
     limits: SessionLimits
+    regulation_policy: RegulationPolicy = DEFAULT_REGULATION_POLICY
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.regulation_policy, RegulationPolicy):
+            raise ProvisioningError("invalid-regulation-policy")
 
     @property
     def version(self) -> int: return self.plan.version
     @property
     def plan_id(self) -> str: return self.plan.plan_id
 
-    def with_changes(self, *, expected_version: int, objective_ids: tuple[str, ...] | None = None, adaptations: tuple[str, ...] | None = None, limits: SessionLimits | None = None) -> UpdateLearningPlan:
-        return UpdateLearningPlan(self.plan.plan_id, self.plan.learner_id, objective_ids or self.plan.authorised_objective_ids, self.adaptations if adaptations is None else adaptations, self.limits if limits is None else limits, expected_version)
+    def with_changes(self, *, expected_version: int, objective_ids: tuple[str, ...] | None = None, adaptations: tuple[str, ...] | None = None, limits: SessionLimits | None = None, regulation_policy: RegulationPolicy | None = None) -> UpdateLearningPlan:
+        return UpdateLearningPlan(self.plan.plan_id, self.plan.learner_id, objective_ids or self.plan.authorised_objective_ids, self.adaptations if adaptations is None else adaptations, self.limits if limits is None else limits, expected_version, self.regulation_policy if regulation_policy is None else regulation_policy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +212,7 @@ class ProvisioningService:
         if learner is None: raise ProvisioningError("learner-not-found")
         self._validate_scope(command.objective_ids, command.adaptations)
         plan = LearningPlan(command.learner_id, command.objective_ids, command.objective_ids, PresentationProfile.for_age(learner.age_years), command.plan_id, 1)
-        result = ProvisionedPlan(plan, tuple(command.adaptations), command.limits)
+        result = ProvisionedPlan(plan, tuple(command.adaptations), command.limits, command.regulation_policy or DEFAULT_REGULATION_POLICY)
         try:
             self.repository.create_provisioned_plan(result)
         except ValueError as error:
@@ -206,9 +222,13 @@ class ProvisioningService:
     def update_learning_plan(self, command: UpdateLearningPlan) -> ProvisionedPlan:
         learner = self.repository.load_learner_profile(command.learner_id)
         if learner is None: raise ProvisioningError("learner-not-found")
+        current = self.repository.load_current_provisioned_plan(command.learner_id)
         self._validate_scope(command.objective_ids, command.adaptations)
         plan = LearningPlan(command.learner_id, command.objective_ids, command.objective_ids, PresentationProfile.for_age(learner.age_years), command.plan_id, command.expected_version + 1)
-        result = ProvisionedPlan(plan, tuple(command.adaptations), command.limits)
+        policy = command.regulation_policy or (
+            current.regulation_policy if current is not None else DEFAULT_REGULATION_POLICY
+        )
+        result = ProvisionedPlan(plan, tuple(command.adaptations), command.limits, policy)
         if not self.repository.update_provisioned_plan(result, expected_version=command.expected_version):
             raise ProvisioningError("stale-plan-version")
         return result
