@@ -167,6 +167,7 @@ class LearnerSupportReceipt:
     speech: str
     regulation_revision: int | None = None
     decision_reason: str | None = None
+    semantic_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("session_id", "turn_id", "activity_id", "speech"):
@@ -188,6 +189,12 @@ class LearnerSupportReceipt:
             not isinstance(self.decision_reason, str) or not self.decision_reason.strip()
         ):
             raise ValueError("support decision reason must be nonempty")
+        if self.semantic_fingerprint is not None and (
+            not isinstance(self.semantic_fingerprint, str)
+            or len(self.semantic_fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in self.semantic_fingerprint)
+        ):
+            raise ValueError("support semantic fingerprint must be sha256")
 
 
 @dataclass(frozen=True, slots=True)

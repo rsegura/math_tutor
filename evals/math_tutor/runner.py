@@ -603,7 +603,7 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
         receipt = repo.load_support_receipt(runtime.bootstrap.session.session_id, turn_id)
         receipt_result = None if receipt is None else (
             receipt.action, receipt.speech, receipt.regulation_revision,
-            receipt.decision_reason,
+            receipt.decision_reason, receipt.semantic_fingerprint,
         )
         durable = (
             aggregate.session.version,

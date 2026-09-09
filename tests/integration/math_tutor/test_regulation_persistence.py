@@ -16,6 +16,10 @@ from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
 from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository, _dump
+from math_tutor.harness.context import ActivityContext, LearnerState, TurnEvidence, build_harness_context
+from math_tutor.harness.contracts import ToolName, ToolProposal
+from math_tutor.harness.limits import HarnessLimits
+from math_tutor.harness.registry import PedagogicalToolRegistry
 
 ROOT = Path(__file__).parents[3]
 
@@ -112,8 +116,8 @@ def test_llm_regulation_replays_by_turn_after_repository_and_engine_reopen(tmp_p
         expected_session_version=1, expected_profile_version=1,
         generation_id="generation-that-does-not-exist", turn_id="turn-1",
         activity_id="activity", expected_regulation_revision=0,
-        signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.MEDIUM,
-        strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        signal=ConversationalSignal.FRUSTRATED, confidence_band=ConfidenceBand.HIGH,
+        strategy=PedagogicalStrategy.VALIDATE_EMOTION,
         regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
         presentation=("short",), adaptations=(),
     ))
@@ -160,28 +164,38 @@ def test_two_workers_same_regulation_turn_return_exact_durable_winner(tmp_path):
         worker_service = _setup(tmp_path / f"worker-{number}")[3]
         worker_service._repository = worker_repo
         worker_service._runtime = worker_runtime
+        if number == 2:
+            worker_runtime.start_generation("session")
         generation = worker_runtime.start_generation("session")
-        command = CommitRegulation(
-            command_id=f"racing-regulation-{number}", session_id="session",
+        context = build_harness_context(
+            session_id="session", learner_id="learner",
             expected_session_version=1, expected_profile_version=1,
-            generation_id=generation.generation_id, turn_id="shared-turn",
-            activity_id="activity", expected_regulation_revision=0,
-            signal=ConversationalSignal.REQUESTING_HELP,
-            confidence_band=ConfidenceBand.HIGH,
-            strategy=PedagogicalStrategy.GIVE_ORDERED_HINT,
+            generation_id=generation.generation_id,
+            authorised_objective_ids=("units-tens",),
+            active_objective_ids=("units-tens",),
+            activity=ActivityContext(
+                "activity", "template", "units-tens", 1,
+                "¿Cuántas unidades?", ("hint-1",), ("Mira las unidades.",), 0,
+            ),
+            learner_state=LearnerState((("units-tens", "not-observed"),), ("short",)),
+            recent_history=(),
+            current_turn=TurnEvidence("shared-turn", "Necesito una pista", .99),
+            max_history_turns=4,
             regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
-            presentation=("short",), adaptations=(),
+            regulation_revision=0,
         )
-        workers.append((worker_service, command))
+        workers.append((PedagogicalToolRegistry(worker_service, HarnessLimits()), context))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = tuple(pool.map(lambda pair: pair[0].commit_regulation(pair[1]), workers))
+        results = tuple(pool.map(lambda pair: pair[0].execute(ToolProposal(
+            ToolName.REGULATE_CONVERSATION, {
+                "turn_id":"shared-turn", "signal":"requesting-help",
+                "confidence":.99, "strategy":"give-ordered-hint",
+            }), pair[1]), workers))
 
-    assert all(result.status is CommandStatus.APPLIED for result in results)
-    assert {result.reason for result in results} == {"applied", "replayed"}
-    assert results[0].payload == results[1].payload
-    assert results[0].payload.executed_action is ExecutedRegulationAction.GIVE_ORDERED_HINT
-    assert results[0].payload.regulation_revision == 1
+    assert results[0] == results[1]
+    assert results[0].reason == "regulated"
+    assert results[0].speech == "Mira las unidades. ¿Cuántas unidades?"
     state = repo.load_state("session")
     assert (state.regulation_revision, state.activity_sequence) == (1, 1)
     assert state.progress_for("activity").hints_used == 1
@@ -190,6 +204,30 @@ def test_two_workers_same_regulation_turn_return_exact_durable_winner(tmp_path):
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM learner_support_receipts").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM tutoring_events WHERE kind='hint-committed'").fetchone()[0] == 1
+
+
+def test_same_registry_command_id_with_different_regulation_semantics_is_collision(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path)
+    first = runtime.start_generation("session")
+    first_command = CommitRegulation(
+        command_id="shared-command", session_id="session", expected_session_version=1,
+        expected_profile_version=1, generation_id=first.generation_id, turn_id="same-turn",
+        activity_id="activity", expected_regulation_revision=0,
+        signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.HIGH,
+        strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
+        presentation=("short",), adaptations=(),
+    )
+    assert service.commit_regulation(first_command).status is CommandStatus.APPLIED
+    second = runtime.start_generation("session")
+    collision = service.commit_regulation(replace(
+        first_command, generation_id=second.generation_id,
+        signal=ConversationalSignal.FRUSTRATED,
+        strategy=PedagogicalStrategy.VALIDATE_EMOTION,
+    ))
+    assert (collision.status, collision.reason) == (
+        CommandStatus.REJECTED, "command-id-collision",
+    )
 
 
 def test_evaluable_answer_closes_open_event_and_resets_count_not_ordinal(tmp_path):

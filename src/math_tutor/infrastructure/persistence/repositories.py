@@ -281,7 +281,7 @@ class SQLiteTutoringRepository:
     def load_support_receipt(self, session_id: str, turn_id: str) -> LearnerSupportReceipt | None:
         with self._connect_read_only() as db:
             row = db.execute(
-                "SELECT session_id,turn_id,activity_id,action,speech,regulation_revision,decision_reason "
+                "SELECT session_id,turn_id,activity_id,action,speech,regulation_revision,decision_reason,semantic_fingerprint "
                 "FROM learner_support_receipts WHERE session_id=? AND turn_id=?",
                 (session_id, turn_id),
             ).fetchone()
@@ -1045,10 +1045,10 @@ class SQLiteTutoringRepository:
                 if receipt.session_id != batch.session_id:
                     raise sqlite3.IntegrityError("support receipt session mismatch")
                 db.execute(
-                    "INSERT INTO learner_support_receipts(session_id,turn_id,activity_id,action,speech,regulation_revision,decision_reason) VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO learner_support_receipts(session_id,turn_id,activity_id,action,speech,regulation_revision,decision_reason,semantic_fingerprint) VALUES(?,?,?,?,?,?,?,?)",
                     (receipt.session_id, receipt.turn_id, receipt.activity_id,
                      receipt.action, receipt.speech, receipt.regulation_revision,
-                     receipt.decision_reason),
+                     receipt.decision_reason, receipt.semantic_fingerprint),
                 )
             if batch.regulation_mutation is not None:
                 mutation = batch.regulation_mutation

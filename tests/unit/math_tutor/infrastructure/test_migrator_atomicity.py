@@ -125,7 +125,7 @@ def test_v1_database_is_upgraded_without_rewriting_history_or_losing_data(tmp_pa
     assert decision.outcome.value == "applied"
     assert repo.load_command_result("post-upgrade").result.reason == "stored"
     with sqlite3.connect(database) as upgraded:
-        assert [row[0] for row in upgraded.execute("SELECT version FROM schema_migrations ORDER BY version")] == list(range(1, 24))
+        assert [row[0] for row in upgraded.execute("SELECT version FROM schema_migrations ORDER BY version")] == list(range(1, 25))
         assert upgraded.execute(
             "SELECT revision,consecutive_turns,activity_sequence FROM regulation_state WHERE session_id='session-1'"
         ).fetchone() == (0, 0, 0)

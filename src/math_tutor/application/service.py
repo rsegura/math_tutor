@@ -276,6 +276,49 @@ class TutoringService:
             return aliases[receipt.action]
         return ExecutedRegulationAction(receipt.action)
 
+    @staticmethod
+    def _regulation_semantic_fingerprint(command: CommitRegulation) -> str:
+        semantic = {
+            "serialization_version": 1,
+            "session_id": command.session_id,
+            "turn_id": command.turn_id,
+            "activity_id": command.activity_id,
+            "expected_session_version": command.expected_session_version,
+            "expected_profile_version": command.expected_profile_version,
+            "expected_regulation_revision": command.expected_regulation_revision,
+            "signal": command.signal,
+            "confidence_band": command.confidence_band,
+            "requested_strategy": command.strategy,
+            "regulation_policy": command.regulation_policy,
+            "presentation": command.presentation,
+            "adaptations": command.adaptations,
+        }
+        encoded = json.dumps(
+            TutoringService._canonical(semantic), ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        return sha256(encoded).hexdigest()
+
+    def _regulation_receipt_result(
+        self, command: CommitRegulation, receipt: LearnerSupportReceipt
+    ) -> CommandResult | None:
+        if (
+            receipt.activity_id != command.activity_id
+            or receipt.regulation_revision != command.expected_regulation_revision + 1
+            or receipt.decision_reason != "regulated"
+            or receipt.semantic_fingerprint
+            != self._regulation_semantic_fingerprint(command)
+        ):
+            return None
+        return CommandResult(
+            command.command_id, CommandStatus.APPLIED, "replayed",
+            RegulationResult(
+                receipt.speech, self._receipt_action(receipt),
+                receipt.regulation_revision,
+            ),
+            replayed=True,
+        )
+
     def _load_turn_receipt(
         self, command: Command
     ) -> tuple[LearnerSupportReceipt | None, CommandResult | None]:
@@ -292,7 +335,7 @@ class TutoringService:
     def _regulation_result_or_race_winner(
         self, command: CommitRegulation, result: CommandResult
     ) -> CommandResult:
-        if result.status is CommandStatus.APPLIED or result.reason == "command-id-collision":
+        if result.status is CommandStatus.APPLIED:
             return result
         for _ in range(8):
             try:
@@ -303,20 +346,8 @@ class TutoringService:
                 return result
             if receipt is None:
                 continue
-            if (
-                receipt.activity_id != command.activity_id
-                or receipt.regulation_revision != command.expected_regulation_revision + 1
-                or receipt.decision_reason != "regulated"
-            ):
-                return result
-            return CommandResult(
-                command.command_id, CommandStatus.APPLIED, "replayed",
-                RegulationResult(
-                    receipt.speech, self._receipt_action(receipt),
-                    receipt.regulation_revision,
-                ),
-                replayed=True,
-            )
+            winner = self._regulation_receipt_result(command, receipt)
+            return winner if winner is not None else result
         return result
 
     @staticmethod
@@ -484,16 +515,19 @@ class TutoringService:
 
         receipt, replay = self._load_turn_receipt(command)
         if replay is not None:
-            return replay
+            if replay.reason != "command-id-collision":
+                return replay
+            try:
+                receipt = self._repository.load_support_receipt(
+                    command.session_id, command.turn_id
+                )
+            except Exception:
+                return replay
         if receipt is not None:
-            return CommandResult(
-                command.command_id, CommandStatus.APPLIED, "replayed",
-                RegulationResult(
-                    receipt.speech, self._receipt_action(receipt),
-                    receipt.regulation_revision or 0,
-                ),
-                replayed=True,
-            )
+            winner = self._regulation_receipt_result(command, receipt)
+            if winner is not None:
+                return winner
+            return replay or self._rejected(command, "command-id-collision")
 
         state, error = self._state(command)
         if error:
@@ -567,6 +601,7 @@ class TutoringService:
         receipt = LearnerSupportReceipt(
             command.session_id, command.turn_id, command.activity_id,
             executed_action.value, speech, revision, "regulated",
+            self._regulation_semantic_fingerprint(command),
         )
         result = self._commit(
             command,
