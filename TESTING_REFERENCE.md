@@ -104,6 +104,53 @@ These tests establish deterministic control-flow contracts. They do not
 measure conversational quality, provider reliability, speech latency, or
 behavior during a supervised live voice session.
 
+## Conversational-regulation contract
+
+The model may classify only the current turn into the closed signal vocabulary
+and propose one compatible strategy. The harness requires the exact current
+turn id, a finite confidence in `[0, 1]`, a compatible signal/strategy pair,
+and authorization by the plan snapshot. It repairs a disallowed proposal once
+within the normal model-call budget and otherwise fails closed. The model cannot
+propose `engaged`, reset counters, persist narrative, decide mathematical
+correctness, or end a session because of confusion, frustration, refusal,
+off-task speech, help, or a pause request. Explicit stop, terminal/session caps,
+and low-confidence STT retain their deterministic precedence.
+
+Therapist plan requests use this shape (the field is optional and omission uses
+the complete default policy):
+
+```json
+{
+  "regulation": {
+    "allowed_strategies": [
+      "repeat-instruction", "simplify-language", "give-ordered-hint",
+      "redirect-gently", "validate-emotion", "take-short-pause"
+    ],
+    "max_consecutive_regulation_turns": 4
+  }
+}
+```
+
+The cap is 1–12. A policy is rejected if it has duplicate/unknown strategies,
+leaves any signal without a compatible response, or removes both repeat and
+simplify fallbacks. Strategy execution returns only canonical reviewed speech.
+The cap action asks the learner to choose continuation or a short pause; it is
+not a stop and does not consume a mathematical attempt.
+
+Durable review evidence uses closed fields only: signal, confidence band,
+executed strategy, activity-local ordinal, and outcome (`unknown`,
+`repeated_difficulty`, `answered`, or `stopped`). It never stores the child turn,
+LLM rationale, or arbitrary text. A single lower-priority signal is retained as
+bounded pending state; high-priority frustration, task rejection, and pause
+requests are materialized immediately, while repeated difficulty materializes
+the prior event. Replay is idempotent, and stale generation/revision proposals
+cannot mutate or release stale speech. Application logs expose closed reason
+codes such as `low-regulation-confidence`, `strategy-not-authorised`,
+`strategy-incompatible`, `stale-regulation-revision`, and
+`canonical-regulation-result-missing`; logs must not include transcripts,
+provider bodies, child identifiers beyond the existing opaque operational ids,
+or exception chains.
+
 ## Offline tutoring acceptance gate
 
 `make eval-math` runs the versioned YAML scenarios in
@@ -116,9 +163,14 @@ durable aggregate and released voice decisions. Expected fixture values are
 used only after execution as assertions; they never populate observed state.
 
 The catalog covers correct answers, conceptual errors, self-correction, low STT
-confidence, ambiguous language, hint exhaustion, explicit stop, frustration,
-out-of-scope objective proposals, and replayed evidence. Its schema rejects
-unknown and missing fields so fixtures cannot silently drift.
+confidence, ambiguous language, hint exhaustion, explicit stop, out-of-scope
+objective proposals, and replayed evidence. Regulation scenarios add
+paraphrased confusion and repetition, frustration, refusal, off-task speech,
+pause, an emotional-but-evaluable answer false positive, a disallowed strategy
+repair, the consecutive-turn cap, and privacy-safe replay. Stale concurrent
+generation and revision behavior is exercised in the integration suite because
+the YAML runner is intentionally sequential. Its schema rejects unknown and
+missing fields so fixtures cannot silently drift.
 
 Schema version 4 separates explicit model output and tool arguments from the
 expected outcome. The fake adapter only replays that output (substituting the
@@ -126,7 +178,8 @@ turn id); it never reads expected answers, outcome labels, or repository answer
 state. The schema declares the complete expected durable outcome per scenario:
 observation outcomes and order, evidence and proposal counts, attempts, hints,
 streaks, bounded repair calls, released decisions, intervention classification,
-and terminal state. Every mismatch is a named hard failure of the form
+terminal state, and materialized regulation event signals/strategies. Every
+mismatch is a named hard failure of the form
 `scenario-id.field`, so `make eval-math` is independently useful as a CI gate
 without relying on pytest assertions.
 

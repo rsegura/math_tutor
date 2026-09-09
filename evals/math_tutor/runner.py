@@ -21,6 +21,7 @@ import yaml
 
 from math_tutor.domain.evidence import EvidenceRecord, Observation, ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import CompetencyState, LearningSession, ProposedProfileChange
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
 from math_tutor.agent.runtime_factory import (
     BoundedConversationEngine,
     ProviderSettings,
@@ -79,6 +80,9 @@ class ScenarioExpected:
     intervention: str
     max_latency_ms: int
     terminal: bool
+    regulation_events: int
+    regulation_signals: tuple[str, ...]
+    regulation_strategies: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,12 +115,14 @@ class EvalScenario:
     expected: ScenarioExpected
     intervention_rating_fixture: str
     review_fixture_duration_seconds: int
+    regulation_policy: RegulationPolicy | None
 
 
 _ROOT_FIELDS = {
     "schema_version", "scenario_id", "description", "learner_id", "session_id",
     "objective_id", "stop_requested", "profile_objective", "authorised_objectives",
     "turns", "expected", "intervention_rating_fixture", "review_fixture_duration_seconds",
+    "regulation_policy",
 }
 _TURN_FIELDS = {
     "turn_id", "response_text", "stt_confidence", "model_output", "repair_output", "model_delay_ms",
@@ -127,16 +133,26 @@ _EXPECTED_FIELDS = {
     "correct", "incorrect", "ambiguous", "not_evaluable", "profile_proposals",
     "attempts_used", "hints_used", "consecutive_correct", "consecutive_incorrect",
     "observation_sequence", "repair_calls", "decisions", "intervention", "latency_ms", "terminal",
+    "regulation_events", "regulation_signals", "regulation_strategies",
 }
 
+_OPTIONAL_ROOT_FIELDS = frozenset({"regulation_policy"})
+_OPTIONAL_EXPECTED_FIELDS = frozenset({"regulation_events", "regulation_signals", "regulation_strategies"})
 
-def _exact_mapping(value: object, fields: set[str], where: str) -> dict[str, object]:
+
+def _exact_mapping(
+    value: object,
+    fields: set[str],
+    where: str,
+    *,
+    optional: frozenset[str] = frozenset(),
+) -> dict[str, object]:
     if not isinstance(value, dict):
         raise EvalScenarioError(f"{where}: expected object")
     if not all(isinstance(key, str) for key in value):
         raise EvalScenarioError(f"{where}: field names must be strings")
     unknown = sorted(set(value) - fields)
-    missing = sorted(fields - set(value))
+    missing = sorted(fields - optional - set(value))
     if unknown:
         raise EvalScenarioError(f"{where}: unknown field '{unknown[0]}'")
     if missing:
@@ -187,8 +203,14 @@ def _outcome_sequence(value: object, where: str) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _text_sequence(value: object, where: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise EvalScenarioError(f"{where}: expected list")
+    return tuple(_text(item, where) for item in value)
+
+
 def _parse_scenario(raw: object, source: Path) -> EvalScenario:
-    data = _exact_mapping(raw, _ROOT_FIELDS, str(source))
+    data = _exact_mapping(raw, _ROOT_FIELDS, str(source), optional=_OPTIONAL_ROOT_FIELDS)
     if data["schema_version"] != 4:
         raise EvalScenarioError(f"{source}: unsupported schema version")
     objective_values = data["authorised_objectives"]
@@ -238,7 +260,7 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
             repair_output=repair_output,
             model_delay_ms=_integer(turn["model_delay_ms"], f"{source}: turn {index}: model_delay_ms"),
         ))
-    expected_raw = _exact_mapping(data["expected"], _EXPECTED_FIELDS, f"{source}: expected")
+    expected_raw = _exact_mapping(data["expected"], _EXPECTED_FIELDS, f"{source}: expected", optional=_OPTIONAL_EXPECTED_FIELDS)
     expected = ScenarioExpected(
         mathematical_speech_verified=_boolean(expected_raw["mathematical_speech_verified"], f"{source}: mathematical_speech_verified"),
         profile_update_supported=_boolean(expected_raw["profile_update_supported"], f"{source}: profile_update_supported"),
@@ -261,7 +283,24 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
         intervention=_text(expected_raw["intervention"], f"{source}: intervention"),
         max_latency_ms=_integer(expected_raw["latency_ms"], f"{source}: latency_ms"),
         terminal=_boolean(expected_raw["terminal"], f"{source}: terminal"),
+        regulation_events=_integer(expected_raw.get("regulation_events", 0), f"{source}: regulation_events"),
+        regulation_signals=_text_sequence(expected_raw.get("regulation_signals", []), f"{source}: regulation_signals"),
+        regulation_strategies=_text_sequence(expected_raw.get("regulation_strategies", []), f"{source}: regulation_strategies"),
     )
+    raw_policy = data.get("regulation_policy")
+    policy = None
+    if raw_policy is not None:
+        policy_data = _exact_mapping(raw_policy, {"allowed_strategies", "max_consecutive_regulation_turns"}, f"{source}: regulation_policy")
+        allowed = policy_data["allowed_strategies"]
+        if not isinstance(allowed, list):
+            raise EvalScenarioError(f"{source}: regulation_policy.allowed_strategies: expected list")
+        try:
+            policy = RegulationPolicy(
+                tuple(PedagogicalStrategy(_text(value, f"{source}: regulation strategy")) for value in allowed),
+                _integer(policy_data["max_consecutive_regulation_turns"], f"{source}: regulation cap", minimum=1),
+            )
+        except ValueError as error:
+            raise EvalScenarioError(f"{source}: invalid regulation policy: {error}") from None
     scenario = EvalScenario(
         schema_version=4,
         scenario_id=_text(data["scenario_id"], f"{source}: scenario_id"),
@@ -276,6 +315,7 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
             data["intervention_rating_fixture"], f"{source}: intervention_rating_fixture"
         ),
         review_fixture_duration_seconds=_integer(data["review_fixture_duration_seconds"], f"{source}: review_fixture_duration_seconds"),
+        regulation_policy=policy,
     )
     return scenario
 
@@ -331,8 +371,8 @@ class ProductionFakeModelAdapter:
             output = json.loads(json.dumps(dict(turn.repair_output)))
         else:
             output = json.loads(json.dumps(dict(turn.model_output)))
-            if output["type"] == "tool" and output["arguments"].get("turn_id") == "$turn_id":
-                output["arguments"]["turn_id"] = context.current_turn.turn_id
+        if output["type"] == "tool" and output["arguments"].get("turn_id") == "$turn_id":
+            output["arguments"]["turn_id"] = context.current_turn.turn_id
         self.outputs.append(output)
         return output
 
@@ -365,6 +405,7 @@ def _bootstrap(repo: SQLiteTutoringRepository, scenario: EvalScenario, now: date
     plan = service.create_learning_plan(CreateLearningPlan(
         f"plan-{scenario.scenario_id}", learner_id,
         scenario.authorised_objectives, ("short-instructions",), SessionLimits(10, 12),
+        regulation_policy=scenario.regulation_policy,
     ))
     session = LearningSession.start(session_id=scenario.session_id, plan=plan.plan)
     profile_version = repo.load_profile_version(learner_id)
@@ -387,6 +428,7 @@ class _Executed:
     model: ProductionFakeModelAdapter
     aggregate: object
     latencies_ms: tuple[int, ...]
+    regulation_events: tuple[object, ...]
 
 
 def _intervention(scenario: EvalScenario, aggregate, model: ProductionFakeModelAdapter) -> str:
@@ -401,7 +443,11 @@ def _intervention(scenario: EvalScenario, aggregate, model: ProductionFakeModelA
     if "propose_skill_update" in proposed_tools:
         return "scope-rejected" if model.repair_calls and not aggregate.proposals else "scope-accepted"
     if len({turn.turn_id for turn in scenario.turns}) < len(scenario.turns):
+        if "regulate_conversation" in proposed_tools:
+            return "regulation-replay-deduplicated"
         return "replay-deduplicated" if len(aggregate.observations) == 1 else "replay-duplicated"
+    if "regulate_conversation" in proposed_tools:
+        return "conversation-regulated"
     if outcomes == ("incorrect", "correct"):
         return "self-correction-recorded"
     if not outcomes and any(output.get("type") == "reply" for output in model.outputs):
@@ -430,6 +476,9 @@ def _durable_outcome(executed: _Executed) -> DurableOutcome:
         tuple(item.speech for item in executed.decisions),
         tuple(str(item) for item in executed.model.outputs),
         aggregate.session.ended,
+        len(executed.regulation_events),
+        tuple(event.signal.value for event in executed.regulation_events),
+        tuple(event.strategy.value for event in executed.regulation_events),
     )
 
 
@@ -450,7 +499,7 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
         decisions.append(await engine.decide(VoiceTurn(turn_id, turn.response_text, turn.stt_confidence, Event())))
         latencies.append(round((clock.monotonic() - started) * 1000))
     aggregate = repo.load_session_aggregate(runtime.bootstrap.session.session_id)
-    executed = _Executed(scenario, None, tuple(decisions), model, aggregate, tuple(latencies))
+    executed = _Executed(scenario, None, tuple(decisions), model, aggregate, tuple(latencies), repo.load_regulation_events(runtime.bootstrap.session.session_id))
     return replace(executed, outcome=_durable_outcome(executed))
 
 
@@ -501,8 +550,10 @@ def _mathematical_speech_error(executed: _Executed) -> bool:
                  "No puedo continuar ahora. Terminamos por hoy."}
     prompts = {activity.prompt_es for activity in executed.aggregate.activities}
     for decision in executed.decisions:
+        if decision.reason == "regulated" or decision.reason.startswith("learner-support-"):
+            continue
         speech = decision.speech
-        if speech in canonical or speech in prompts or speech.startswith(("Sí, esa respuesta es correcta.", "Esa respuesta todavía no es correcta.", "No estoy seguro", "No he podido comprobar")):
+        if speech in canonical or speech in prompts or speech.startswith(("Sí, esa respuesta es correcta.", "Esa respuesta todavía no es correcta.", "No estoy seguro", "No he podido comprobar", "Ahora mismo me cuesta responder.")):
             continue
         reviewed_hints = {
             text for context in executed.model.seen_contexts
@@ -516,7 +567,11 @@ def _mathematical_speech_error(executed: _Executed) -> bool:
 
 def _refresh(repo: SQLiteTutoringRepository, executed: _Executed) -> _Executed:
     aggregate = repo.load_session_aggregate(executed.aggregate.session.session_id)
-    refreshed = replace(executed, aggregate=aggregate)
+    refreshed = replace(
+        executed,
+        aggregate=aggregate,
+        regulation_events=repo.load_regulation_events(aggregate.session.session_id),
+    )
     return replace(refreshed, outcome=_durable_outcome(refreshed))
 
 
@@ -675,6 +730,7 @@ def run_evaluation(
         "evidence_count", "profile_proposals", "attempts_used", "hints_used",
         "consecutive_correct", "consecutive_incorrect", "observation_sequence",
         "repair_calls", "decisions", "intervention", "terminal",
+        "regulation_events", "regulation_signals", "regulation_strategies",
     )
     behaviour_failures = tuple(
         f"{item.scenario.scenario_id}.{field}"

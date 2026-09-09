@@ -62,3 +62,6 @@ class DurableOutcome:
     released_speech: tuple[str, ...]
     model_artifacts: tuple[str, ...]
     terminal: bool
+    regulation_events: int = 0
+    regulation_signals: tuple[str, ...] = ()
+    regulation_strategies: tuple[str, ...] = ()

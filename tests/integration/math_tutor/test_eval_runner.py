@@ -43,6 +43,16 @@ def test_offline_eval_catalog_is_strict_and_covers_required_behaviours(tmp_path)
         "replayed-evidence",
         "self-correction",
         "stop-request",
+        "regulation-confusion-paraphrase",
+        "regulation-repetition",
+        "regulation-frustration",
+        "regulation-refusal",
+        "regulation-off-task",
+        "regulation-pause",
+        "regulation-false-positive-answer",
+        "regulation-disallowed-strategy",
+        "regulation-cap",
+        "regulation-replay-privacy",
     }
 
     source = (SCENARIOS / "correct-answer.yaml").read_text()
@@ -116,7 +126,7 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
 
     assert first == second
     assert first.exit_code == 0
-    assert first.scenarios_run == 10
+    assert first.scenarios_run == 20
     assert first.hard_failures == ()
     assert first.metrics.mathematical_speech_errors == 0
     assert first.metrics.unsupported_profile_updates == 0
@@ -129,6 +139,7 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
         "ambiguous", "correct", "hint-cap-enforced", "incorrect",
             "no-observation", "replay-deduplicated", "scope-rejected",
         "self-correction-recorded", "stop-honoured", "supportive-social",
+        "conversation-regulated", "regulation-replay-deduplicated",
     }
     assert set(first.metrics.intervention_rating_fixtures) == {"adequate", "correctable"}
     assert first.metrics.adequate_or_correctable_proportion == 1.0
@@ -145,6 +156,16 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     assert first.durable_outcomes["self-correction"].incorrect == 1
     assert first.durable_outcomes["ambiguous-language"].ambiguous == 1
     assert first.durable_outcomes["frustration"].observations == 0
+    assert first.durable_outcomes["regulation-frustration"].regulation_signals == ("frustrated",)
+    assert first.durable_outcomes["regulation-replay-privacy"].regulation_events == 1
+    replay = first.durable_outcomes["regulation-replay-privacy"]
+    assert "privado@example.com" not in " ".join(
+        replay.released_speech + replay.model_artifacts
+    )
+    assert first.durable_outcomes["regulation-false-positive-answer"].observations == 1
+    assert first.durable_outcomes["regulation-false-positive-answer"].regulation_events == 0
+    assert first.durable_outcomes["regulation-disallowed-strategy"].repair_calls == 1
+    assert first.durable_outcomes["regulation-cap"].regulation_strategies[-1] == "cap-choice"
     assert first.durable_outcomes["out-of-scope-objective"].profile_proposals == 0
     assert first.durable_outcomes["self-correction"].observation_sequence == (
         "incorrect", "correct"

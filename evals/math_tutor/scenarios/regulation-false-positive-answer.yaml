@@ -1,0 +1,14 @@
+schema_version: 4
+scenario_id: regulation-false-positive-answer
+description: Una respuesta matemática con lenguaje emocional sigue siendo evaluada como respuesta.
+learner_id: learner-eval
+session_id: session-regulation-false-positive
+objective_id: units-tens
+stop_requested: false
+intervention_rating_fixture: adequate
+profile_objective: null
+authorised_objectives: [units-tens]
+turns:
+  - {turn_id: turn-1, response_text: "me cuesta, pero son dos decenas y seis unidades", stt_confidence: 0.98, model_output: {type: tool, name: record_answer, arguments: {turn_id: "$turn_id", answer: {status: evaluable, kind: integer-pair, values: {tens_digit: 2, units_digit: 6}}}}, repair_output: null, model_delay_ms: 205}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 1, correct: 0, incorrect: 1, ambiguous: 0, not_evaluable: 0, evidence_count: 1, profile_proposals: 0, attempts_used: 1, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 1, observation_sequence: [incorrect], repair_calls: 0, decisions: 1, intervention: incorrect, latency_ms: 205, terminal: false, regulation_events: 0, regulation_signals: [], regulation_strategies: []}
+review_fixture_duration_seconds: 12

@@ -146,6 +146,50 @@ ownership, preventing the teardown type error that motivated this change.
 These controls are covered by automated tests; they have not yet passed the
 supervised voice gate described below.
 
+### Conversational regulation
+
+For turns that are not an exact help phrase, the LLM may propose a provisional
+current-turn signal (`confused`, `frustrated`, `task-rejecting`, `off-task`,
+`requesting-help`, or `requesting-pause`) and one bounded strategy. The signal
+is not a diagnosis or a learner-profile fact. The harness checks current-turn
+provenance, confidence, signal/strategy compatibility, and the therapist's
+snapshotted plan policy. Application code then selects reviewed Spanish speech
+and performs any hint mutation atomically. An explicit stop remains a separate,
+deterministic priority path and the model cannot end a session because a child
+is frustrated or refuses one task.
+
+Supported therapist strategies are `repeat-instruction`, `simplify-language`,
+`give-ordered-hint`, `redirect-gently`, `validate-emotion`, and
+`take-short-pause`. After the configured consecutive-turn cap, the runtime asks
+whether to continue or pause; it does not mark an answer wrong or terminate the
+call. An evaluable mathematical answer closes the pending regulation outcome
+and resets the consecutive count. Low-confidence regulation proposals do not
+mutate durable state.
+
+The policy is plan data, not an environment variable. Omit `regulation` to use
+the complete default policy with a cap of four, or include it when creating or
+updating a plan:
+
+```json
+{
+  "regulation": {
+    "allowed_strategies": [
+      "repeat-instruction",
+      "simplify-language",
+      "give-ordered-hint",
+      "redirect-gently",
+      "validate-emotion",
+      "take-short-pause"
+    ],
+    "max_consecutive_regulation_turns": 4
+  }
+}
+```
+
+The policy must retain at least one compatible strategy for every supported
+signal and at least one durable help fallback (`repeat-instruction` or
+`simplify-language`); invalid or incomplete policies fail closed.
+
 For ElevenLabs, `TTS_VOICE_ID` may be empty; the runtime then omits `voice_id`
 and lets the pinned LiveKit plugin select its default. Successful construction
 does not prove that this default is available under a particular ElevenLabs
@@ -198,7 +242,7 @@ curl --fail-with-body \
 curl --fail-with-body \
   -H "Authorization: Bearer ${TUTOR_TOKEN}" \
   -H 'Content-Type: application/json' \
-  -d '{"plan_id":"plan-local-1","objective_ids":["count-to-20","number-sequence-within-20"],"adaptations":["short-instructions"],"limits":{"duration_minutes":10,"max_activities":4}}' \
+  -d '{"plan_id":"plan-local-1","objective_ids":["count-to-20","number-sequence-within-20"],"adaptations":["short-instructions"],"limits":{"duration_minutes":10,"max_activities":4},"regulation":{"allowed_strategies":["repeat-instruction","simplify-language","give-ordered-hint","redirect-gently","validate-emotion","take-short-pause"],"max_consecutive_regulation_turns":4}}' \
   http://localhost:8080/api/therapist/learners/learner-local-1/plans
 
 curl --fail-with-body \
@@ -250,7 +294,12 @@ The dated automated results and their exact scope are recorded in
 ## Privacy and therapist review
 
 The product stores structured observations and evidence-linked interpretations,
-not an unrestricted full-session recording. Selective evidence clips are
+not an unrestricted full-session recording. Important regulation evidence is
+also closed and structured: signal, confidence band, executed strategy,
+ordinal, and outcome. It contains no transcript, free-text rationale, diagnosis,
+or model narrative. Lower-priority single events may remain only as bounded
+pending state; repeated difficulty and high-priority frustration, rejection,
+or pause evidence are materialized for review. Selective evidence clips are
 default-off and require active consent scoped to the learner and session. Clips
 must have a reason and evidence identifier, are duration-bounded, expire under
 the retention policy, support explicit deletion, and become ineligible for new

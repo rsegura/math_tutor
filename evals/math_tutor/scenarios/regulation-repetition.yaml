@@ -1,0 +1,14 @@
+schema_version: 4
+scenario_id: regulation-repetition
+description: Una petición directa de repetición usa la misma mutación durable de apoyo.
+learner_id: learner-eval
+session_id: session-regulation-repetition
+objective_id: units-tens
+stop_requested: false
+intervention_rating_fixture: adequate
+profile_objective: null
+authorised_objectives: [units-tens]
+turns:
+  - {turn_id: turn-1, response_text: "¿me lo puedes repetir?", stt_confidence: 0.98, model_output: {type: tool, name: regulate_conversation, arguments: {turn_id: "$turn_id", signal: requesting-help, confidence: 0.95, strategy: repeat-instruction}}, repair_output: null, model_delay_ms: 20}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 0, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [], repair_calls: 0, decisions: 1, intervention: conversation-regulated, latency_ms: 20, terminal: false, regulation_events: 0, regulation_signals: [], regulation_strategies: []}
+review_fixture_duration_seconds: 8
