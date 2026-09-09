@@ -51,14 +51,16 @@ def setup_authorized(tmp_path):
 
 def test_clip_requires_feature_flag_commit_and_active_scoped_consent(tmp_path):
     repo, _, consent, session = setup_authorized(tmp_path)
-    now = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     off = ClipRetentionService(repo, OpaqueClipStore(tmp_path / "off"), RetentionSettings(), now=lambda: now)
     selected = selected_audio()
     assert off.persist_selected(evidence_id="evidence-clip", learner_id="learner-clip", session_id=session.tutoring_session_id, consent_snapshot_id=session.audio_consent_snapshot_id, selected=selected, evidence_selection_committed=True) is None
     enabled = ClipRetentionService(repo, OpaqueClipStore(tmp_path / "clips"), RetentionSettings(enabled=True, retention_days=2, evidence_directory=tmp_path / "clips"), now=lambda: now)
     assert enabled.persist_selected(evidence_id="evidence-clip", learner_id="learner-clip", session_id=session.tutoring_session_id, consent_snapshot_id=session.audio_consent_snapshot_id, selected=selected, evidence_selection_committed=False) is None
     clip_id = enabled.persist_selected(evidence_id="evidence-clip", learner_id="learner-clip", session_id=session.tutoring_session_id, consent_snapshot_id=session.audio_consent_snapshot_id, selected=selected, evidence_selection_committed=True)
-    assert clip_id and repo.load_evidence_clip(clip_id).expires_at.startswith("2026-09-08")
+    assert clip_id and repo.load_evidence_clip(clip_id).expires_at.startswith(
+        (now + timedelta(days=2)).date().isoformat()
+    )
 
 
 def test_revocation_purges_file_and_live_metadata_idempotently(tmp_path):
@@ -165,11 +167,13 @@ def test_incremental_migration_quarantines_preconsent_clip_rows(tmp_path):
 
 def test_active_consent_does_not_expire_when_its_clip_retention_window_passes(tmp_path):
     repo, _, _, session = setup_authorized(tmp_path)
-    now = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     retention = ClipRetentionService(repo, OpaqueClipStore(tmp_path / "clips"), RetentionSettings(enabled=True, retention_days=1), now=lambda: now)
     clip_id = retention.persist_selected(evidence_id="evidence-clip", learner_id="learner-clip", session_id=session.tutoring_session_id, consent_snapshot_id=session.audio_consent_snapshot_id, selected=selected_audio(), evidence_selection_committed=True)
     assert clip_id is not None
-    assert repo.load_evidence_clip(clip_id).expires_at.startswith("2026-09-21")
+    assert repo.load_evidence_clip(clip_id).expires_at.startswith(
+        (now + timedelta(days=1)).date().isoformat()
+    )
 
 
 def test_restart_recovers_stale_revocation_delete_before_clip_expiry(tmp_path):
