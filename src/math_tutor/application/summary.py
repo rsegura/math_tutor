@@ -230,8 +230,8 @@ class SummaryService:
         if len(set(source.discarded_evidence_ids)) != len(source.discarded_evidence_ids):
             raise malformed
         event_ids: set[str] = set()
-        ordinals: set[int] = set()
-        last_ordinal: int | None = None
+        activity_ordinals: set[tuple[str, int]] = set()
+        last_ordinal_by_activity: dict[str, int] = {}
         last_created_at: datetime | None = None
         for event in source.regulation_events:
             if not isinstance(event, RegulationEvent):
@@ -240,6 +240,8 @@ class SummaryService:
                 created_at = datetime.fromisoformat(event.created_at)
             except (TypeError, ValueError):
                 raise malformed from None
+            activity_ordinal = (event.activity_id, event.ordinal)
+            prior_ordinal = last_ordinal_by_activity.get(event.activity_id)
             if (
                 event.session_id != source.session_id
                 or not isinstance(event.event_id, str)
@@ -250,7 +252,7 @@ class SummaryService:
                 or not event.turn_id.strip()
                 or event.event_id != f"regulation-{source.session_id}-{event.turn_id}"
                 or event.event_id in event_ids
-                or event.ordinal in ordinals
+                or activity_ordinal in activity_ordinals
                 or not isinstance(event.signal, ConversationalSignal)
                 or not isinstance(event.confidence_band, ConfidenceBand)
                 or not isinstance(event.strategy, ExecutedRegulationAction)
@@ -260,13 +262,13 @@ class SummaryService:
                 or event.ordinal < 1
                 or created_at.tzinfo is None
                 or created_at.utcoffset() is None
-                or (last_ordinal is not None and event.ordinal <= last_ordinal)
+                or (prior_ordinal is not None and event.ordinal <= prior_ordinal)
                 or (last_created_at is not None and created_at < last_created_at)
             ):
                 raise malformed
             event_ids.add(event.event_id)
-            ordinals.add(event.ordinal)
-            last_ordinal = event.ordinal
+            activity_ordinals.add(activity_ordinal)
+            last_ordinal_by_activity[event.activity_id] = event.ordinal
             last_created_at = created_at
 
     def validate_narrative(

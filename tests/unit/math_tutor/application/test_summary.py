@@ -193,7 +193,6 @@ def test_summary_rejects_untyped_regulation_event_fields(field, value):
 
 @pytest.mark.parametrize("events", (
     (regulation_event(), regulation_event(turn_id="turn-2", event_id="regulation-session-1-turn-2", ordinal=1, created_at="2026-09-08T10:00:01+00:00")),
-    (regulation_event(), regulation_event(turn_id="turn-2", event_id="regulation-session-1-turn-2", activity_id="activity-other", ordinal=1, created_at="2026-09-08T10:00:01+00:00")),
     (regulation_event(ordinal=2), regulation_event(turn_id="turn-2", event_id="regulation-session-1-turn-2", ordinal=1, created_at="2026-09-08T10:00:01+00:00")),
     (regulation_event(), regulation_event(turn_id="turn-2", event_id="regulation-session-1-turn-2", ordinal=2, created_at="2026-09-08T09:59:59+00:00")),
 ))
@@ -206,6 +205,21 @@ def test_summary_source_remains_backward_compatible_without_regulation_events():
     summary = SummaryService(Source(source())).build("session-1")
 
     assert summary.regulation_support == ()
+
+
+def test_regulation_ordinal_can_restart_for_a_new_activity():
+    events = (
+        regulation_event(ordinal=2),
+        regulation_event(
+            turn_id="turn-2", event_id="regulation-session-1-turn-2",
+            activity_id="activity-other", ordinal=1,
+            created_at="2026-09-08T10:00:01+00:00",
+        ),
+    )
+
+    summary = SummaryService(Source(replace(source(), regulation_events=events))).build("session-1")
+
+    assert [item.ordinal for item in summary.regulation_support] == [2, 1]
 
 
 def test_cross_session_support_is_linked_without_reporting_old_turn_as_current():
