@@ -64,7 +64,7 @@ async def test_adapter_sends_exact_bounded_tool_contract_and_canonical_answer_sh
     values=record["parameters"]["properties"]["answer"]["oneOf"][0]["properties"]["values"]
     assert values["required"] == ["tens","units"]
     assert values["additionalProperties"] is False
-    assert {tool["name"] for tool in call["tools"]} == {"record_answer","give_hint","adapt_difficulty","propose_skill_update","end_session","regulate_conversation"}
+    assert {tool["name"] for tool in call["tools"]} == {"record_answer","give_hint","adapt_difficulty","propose_skill_update","regulate_conversation"}
     sent=json.loads(call["input"][1]["content"])
     assert sent["adaptations"] == ["slow-pace"]
     assert sent["session_limits"] == {"duration_minutes":10,"max_activities":4}

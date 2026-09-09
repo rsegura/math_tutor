@@ -52,6 +52,18 @@ def test_invalid_output_gets_exactly_one_bounded_repair(context):
     assert len(model.calls) == 2 and model.calls[1][2] is True
 
 
+def test_sync_model_end_session_proposal_is_repaired_without_executing_stop(context):
+    service=FakeService()
+    model=FakeModel([
+        {"type":"tool","name":"end_session","arguments":{"reason":"model-refusal"}},
+        {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"},
+    ])
+    decision=PedagogicalHarness(model,PedagogicalToolRegistry(service,HarnessLimits()),HarnessLimits()).run(context)
+    assert decision.speech == "Vamos paso a paso."
+    assert service.commands == []
+    assert len(model.calls) == 2 and model.calls[1][2] is True
+
+
 def test_unverified_mathematical_speech_is_never_released(context):
     model = FakeModel([{"type": "reply", "speech": "Cuatro más cuatro son ocho.", "speech_kind": "mathematical"}] * 2)
     with pytest.raises(HarnessContractExhausted) as caught:
@@ -111,6 +123,19 @@ async def test_async_invalid_proposal_gets_one_repair_then_closed_exhaustion(con
     assert model.calls[1][2] is True
     assert isinstance(caught.value.last_failure, HarnessProposalInvalid)
     assert "secret" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_async_model_end_session_proposal_is_repaired_without_executing_stop(context):
+    service=FakeService()
+    model=FakeModel([
+        {"type":"tool","name":"end_session","arguments":{}},
+        {"type":"reply","speech":"Gracias por decírmelo.","speech_kind":"social"},
+    ])
+    decision=await PedagogicalHarness(model,PedagogicalToolRegistry(service,HarnessLimits()),HarnessLimits()).run_async(context)
+    assert decision.speech == "Gracias por decírmelo."
+    assert service.commands == []
+    assert len(model.calls) == 2 and model.calls[1][2] is True
 
 
 @pytest.mark.asyncio

@@ -80,6 +80,7 @@ class BoundedConversationEngine:
         self._limits = limits
         self._llm_total_seconds = runtime.providers.llm_total_seconds
         self._terminal = False
+        self._transport_closed = False
         self.startup_terminal_reason = self._cap_reason(self._repository.load_session_aggregate(self._bootstrap.session.session_id))
         if self.startup_terminal_reason is not None:
             self._stop(self.startup_terminal_reason)
@@ -97,6 +98,12 @@ class BoundedConversationEngine:
 
     async def aclose(self) -> None:
         """Close a created model adapter; preserve lazy no-op semantics."""
+        async with self._turn_state_lock:
+            if not self._transport_closed:
+                self._transport_closed = True
+                self._terminal = True
+                self._turn_epoch += 1
+                self._runtime.cancel_generation(self._bootstrap.session.session_id)
         async with self._harness_lock:
             model = self._model
             if model is None or model is self._closed_model:
@@ -260,6 +267,8 @@ class BoundedConversationEngine:
         if aggregate is None:
             raise RuntimeError("session is missing")
         epoch = await self._begin_llm_turn()
+        if self._transport_closed:
+            raise asyncio.CancelledError
         stop_requested = is_stop_request(turn.text)
         if aggregate.session.ended:
             if stop_requested:

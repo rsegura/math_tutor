@@ -89,7 +89,6 @@ class OpenResponsesAdapter:
             "give_hint": ({}, []),
             "adapt_difficulty": ({"objective_id": {"type": "string", "enum": list(context.active_objective_ids)}, "difficulty": {"type": "integer"}, "seed": {"type": "integer"}, "activity_id": {"type": "string"}}, ["objective_id", "difficulty", "seed", "activity_id"]),
             "propose_skill_update": ({"objective_id": {"type": "string", "enum": list(context.authorised_objective_ids)}}, ["objective_id"]),
-            "end_session": ({"reason": {"type": "string"}}, []),
         }
         tools = [{"type": "function", "name": name, "description": "Acción pedagógica validada por el harness.", "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False}, "strict": False} for name, (properties, required) in schemas.items()]
         policy = getattr(context, "regulation_policy", None)

@@ -140,6 +140,26 @@ async def test_model_regulation_uses_durable_snapshot_and_canonical_speech(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_model_cannot_end_on_refusal_and_repair_can_regulate(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class EndThenRegulate:
+        def __init__(self): self.calls=0
+        def complete(self,**kwargs):
+            self.calls += 1; context=kwargs["context"]
+            if self.calls == 1:
+                return {"type":"tool","name":"end_session","arguments":{"reason":"learner-refused"}}
+            return {"type":"tool","name":"regulate_conversation","arguments":{"turn_id":context.current_turn.turn_id,"signal":"task-rejecting","confidence":.9,"strategy":"validate-emotion"}}
+    model=EndThenRegulate()
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=model)
+    decision=await engine.decide(VoiceTurn("refusal","No quiero hacer esto",.99,Event()))
+    state=repo.load_state(metadata.tutoring_session_id)
+    assert model.calls == 2
+    assert decision.reason == "regulated" and not decision.terminal
+    assert not state.session.ended and state.consecutive_regulation_turns == 1
+
+
+@pytest.mark.asyncio
 async def test_low_confidence_regulation_repeats_prompt_without_durable_mutation(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
@@ -218,6 +238,30 @@ async def test_terminal_close_suppresses_in_flight_regulation_result(tmp_path):
     state=repo.load_state(metadata.tutoring_session_id)
     assert state.session.ended and state.session.end_reason == "transport-closed"
     assert state.consecutive_regulation_turns == 0
+
+
+@pytest.mark.asyncio
+async def test_aclose_invalidates_in_flight_regulation_before_closing_adapter(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    entered=asyncio.Event(); release=asyncio.Event()
+    class DelayedRegulation:
+        def __init__(self): self.closes=0
+        async def complete(self,**kwargs):
+            context=kwargs["context"]; entered.set(); await release.wait()
+            return {"type":"tool","name":"regulate_conversation","arguments":{"turn_id":context.current_turn.turn_id,"signal":"frustrated","confidence":.9,"strategy":"validate-emotion"}}
+        async def aclose(self): self.closes += 1
+    model=DelayedRegulation()
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=model)
+    before=repo.load_state(metadata.tutoring_session_id)
+    pending=asyncio.create_task(engine.decide(VoiceTurn("closing-adapter","esto cuesta",.99,Event())))
+    await entered.wait()
+    await engine.aclose(); await engine.aclose()
+    release.set()
+    with pytest.raises(asyncio.CancelledError): await pending
+    after=repo.load_state(metadata.tutoring_session_id)
+    assert model.closes == 1
+    assert (after.regulation_revision,after.consecutive_regulation_turns,after.activity_sequence) == (before.regulation_revision,before.consecutive_regulation_turns,before.activity_sequence)
 
 
 @pytest.mark.asyncio
