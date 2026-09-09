@@ -14,6 +14,7 @@ from typing import Any
 from math_tutor.application.ports import (ActivityProgress, CommitDecision, LearnerSupportReceipt, MutationBatch, PersistedTutoringState, ProvisioningConflict, StoredCommandResult, StoredObservation)
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.service import CanonicalHintResult, RecordAnswerResult
+from math_tutor.application.regulation import RegulationResult
 from math_tutor.application.review import CorrectSkillEstimateReview, DiscardEvidenceReview, ProfileRecalculation, ReviewCommandIdentity, ReviewMutation, ReviewResult, ReviewStatus
 from math_tutor.application.summary import SessionSummarySource, SummaryActivityRef
 from math_tutor.domain.activities import Activity, AnswerInputStatus, StructuredAnswer
@@ -23,7 +24,7 @@ from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.domain.audio_consent import AudioConsent
 from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits, REGULATION_POLICY_VERSION, DEFAULT_REGULATION_POLICY
-from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
+from math_tutor.domain.regulation import ExecutedRegulationAction, PedagogicalStrategy, RegulationPolicy
 from math_tutor.application.next_objectives import NextObjectiveDecision, NextObjectiveDecisionRevision, NextObjectiveError, NextObjectiveGenerationSource, NextObjectiveProposal, ProposalDecisionStatus
 from math_tutor.infrastructure.dispatch import VoiceBootstrap, VoiceBootstrapError, verify_join_code
 
@@ -145,6 +146,7 @@ _WIRE_TYPES = {
     "command-result/v1": CommandResult,
     "record-answer-result/v1": RecordAnswerResult,
     "canonical-hint-result/v1": CanonicalHintResult,
+    "regulation-result/v1": RegulationResult,
     "answer-check/v1": AnswerCheck,
     "activity/v1": Activity,
     "structured-answer/v1": StructuredAnswer,
@@ -170,6 +172,7 @@ _WIRE_ENUMS = {
     "observation-outcome/v1": ObservationOutcome,
     "competency-state/v1": CompetencyState,
     "review-status/v1": ReviewStatus,
+    "executed-regulation-action/v1": ExecutedRegulationAction,
 }
 _WIRE_TAGS = {value: key for key, value in _WIRE_TYPES.items()}
 _WIRE_ENUM_TAGS = {value: key for key, value in _WIRE_ENUMS.items()}
@@ -288,6 +291,12 @@ class SQLiteTutoringRepository:
     def _has_profile_versions(db: sqlite3.Connection) -> bool:
         return db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='learner_profile_versions'"
+        ).fetchone() is not None
+
+    @staticmethod
+    def _has_regulation_state(db: sqlite3.Connection) -> bool:
+        return db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='regulation_state'"
         ).fetchone() is not None
 
     def save_learner(self, learner_id: str, *, curriculum_snapshot: str, curriculum_version: str) -> None:
@@ -582,6 +591,8 @@ class SQLiteTutoringRepository:
                 if consent is None or consent[6] is not None or consent[1] != session.learner_id or (consent[2], consent[3]) != (expected_plan_id, expected_plan_version):
                     raise ProvisioningConflict("invalid-audio-consent")
             db.execute("INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) VALUES(?,?,?,?,?,?,?)", (session.session_id, session.learner_id, session.plan_id, session.plan_version, _dump(session), session.version, expected_profile_version))
+            if self._has_regulation_state(db):
+                db.execute("INSERT INTO regulation_state(session_id) VALUES(?)", (session.session_id,))
             db.execute("INSERT INTO learner_join_codes(session_id,code_hash,expires_at) VALUES(?,?,?)", (session.session_id, join_code_hash, join_expires_at.isoformat()))
             snapshot_id = None
             if consent is not None:
@@ -758,6 +769,8 @@ class SQLiteTutoringRepository:
                     )
                 canonical_profile_version = current[0]
             db.execute("INSERT INTO learning_sessions(session_id,learner_id,plan_id,plan_version,session_json,version,profile_version) VALUES(?,?,?,?,?,?,?)", (session.session_id, session.learner_id, session.plan_id, session.plan_version, _dump(session), session.version, canonical_profile_version))
+            if self._has_regulation_state(db):
+                db.execute("INSERT INTO regulation_state(session_id) VALUES(?)", (session.session_id,))
 
     def save_estimate(self, estimate: SkillEstimate, *, expected_version: int | None = None) -> None:
         with self._connect() as db:
@@ -795,10 +808,21 @@ class SQLiteTutoringRepository:
 
     def load_state(self, session_id: str) -> PersistedTutoringState | None:
         with self._connect() as db:
-            row = db.execute("SELECT session_json,profile_version FROM learning_sessions WHERE session_id=?", (session_id,)).fetchone()
+            if self._has_regulation_state(db):
+                row = db.execute(
+                    "SELECT s.session_json,s.profile_version,r.revision,r.consecutive_turns,r.activity_sequence "
+                    "FROM learning_sessions s JOIN regulation_state r ON r.session_id=s.session_id "
+                    "WHERE s.session_id=?", (session_id,),
+                ).fetchone()
+            else:
+                legacy = db.execute(
+                    "SELECT session_json,profile_version FROM learning_sessions WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                row = (*legacy, 0, 0, 0) if legacy is not None else None
             if row is None: return None
             progress = tuple(_load(item[0]) for item in db.execute("SELECT progress_json FROM activity_progress WHERE session_id=? ORDER BY activity_id", (session_id,)))
-        return PersistedTutoringState(_load(row[0]), row[1], progress)
+        return PersistedTutoringState(_load(row[0]), row[1], progress, row[2], row[3], row[4])
 
     def load_activity(self, session_id: str, activity_id: str) -> Activity | None:
         with self._connect() as db:
@@ -829,6 +853,13 @@ class SQLiteTutoringRepository:
         if session is None: return "session-not-found"
         if session[0] != batch.expected_session_version: return "stale-session-version"
         if session[1] != batch.expected_profile_version: return "stale-profile-version"
+        if batch.expected_regulation_revision is not None:
+            regulation = db.execute(
+                "SELECT revision FROM regulation_state WHERE session_id=?",
+                (batch.session_id,),
+            ).fetchone()
+            if regulation is None or regulation[0] != batch.expected_regulation_revision:
+                return "stale-regulation-revision"
         learner_id = session[2]
         current_session = _load(session[5])
         if batch.session is not None and batch.session.session_id != batch.session_id:
@@ -985,6 +1016,20 @@ class SQLiteTutoringRepository:
                     (receipt.session_id, receipt.turn_id, receipt.activity_id,
                      receipt.action, receipt.speech),
                 )
+            if batch.regulation_mutation is not None:
+                cursor = db.execute(
+                    "UPDATE regulation_state SET revision=?,consecutive_turns=?,activity_sequence=? "
+                    "WHERE session_id=? AND revision=?",
+                    (
+                        batch.regulation_mutation.next_revision,
+                        batch.regulation_mutation.consecutive_turns,
+                        batch.regulation_mutation.activity_sequence,
+                        batch.session_id,
+                        batch.expected_regulation_revision,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise sqlite3.IntegrityError("lost regulation state update")
             canonical = _dump(batch.result)
             db.execute("INSERT INTO processed_commands(command_id,command_fingerprint,result_json) VALUES(?,?,?)", (batch.command_id,batch.command_fingerprint,canonical))
             db.commit()

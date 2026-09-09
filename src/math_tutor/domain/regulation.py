@@ -25,6 +25,18 @@ class PedagogicalStrategy(Enum):
     TAKE_SHORT_PAUSE = "take-short-pause"
 
 
+class ExecutedRegulationAction(Enum):
+    """What deterministic application code actually executed."""
+
+    REPEAT_INSTRUCTION = "repeat-instruction"
+    SIMPLIFY_LANGUAGE = "simplify-language"
+    GIVE_ORDERED_HINT = "give-ordered-hint"
+    REDIRECT_GENTLY = "redirect-gently"
+    VALIDATE_EMOTION = "validate-emotion"
+    TAKE_SHORT_PAUSE = "take-short-pause"
+    CAP_CHOICE = "cap-choice"
+
+
 class ConfidenceBand(Enum):
     LOW = "low"
     MEDIUM = "medium"

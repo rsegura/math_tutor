@@ -41,6 +41,7 @@ from math_tutor.domain.templates import ActivityTemplateCatalog, InvalidActivity
 from math_tutor.domain.regulation import (
     ConfidenceBand,
     ConversationalSignal,
+    ExecutedRegulationAction,
     PedagogicalStrategy,
     compatible_strategies,
 )
@@ -434,6 +435,7 @@ class TutoringService:
         if state.consecutive_regulation_turns >= command.max_consecutive_regulation_turns:
             speech = "¿Quieres continuar o hacer una pausa?"
             next_count = command.max_consecutive_regulation_turns
+            executed_action = ExecutedRegulationAction.CAP_CHOICE
         else:
             next_count = state.consecutive_regulation_turns + 1
             if strategy is PedagogicalStrategy.GIVE_ORDERED_HINT:
@@ -474,16 +476,19 @@ class TutoringService:
                     )
                 except ValueError:
                     return self._rejected(command, "invalid-regulation-presentation")
+            executed_action = ExecutedRegulationAction(strategy.value)
 
         revision = state.regulation_revision + 1
-        payload = RegulationResult(speech, strategy, revision)
+        payload = RegulationResult(speech, executed_action, revision)
         return self._commit(
             command,
             activity_progress=progress_changes,
             expected_activity_progress=expected_progress,
             events=events,
             expected_regulation_revision=state.regulation_revision,
-            regulation_mutation=RegulationMutation(revision, next_count),
+            regulation_mutation=RegulationMutation(
+                revision, next_count, state.activity_sequence + 1, executed_action
+            ),
             payload=payload,
         )
 

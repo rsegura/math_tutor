@@ -6,7 +6,7 @@ from math_tutor.application.ports import (
     PersistedTutoringState,
     StoredCommandResult,
 )
-from math_tutor.application.regulation import RegulationResult
+from math_tutor.application.regulation import ExecutedRegulationAction, RegulationResult
 from math_tutor.application.results import CommandStatus
 from math_tutor.application.service import CommitRegulation, TutoringService
 from math_tutor.application.session_runtime import SessionRuntime
@@ -102,7 +102,7 @@ def test_regulation_commits_canonical_speech_and_revision_without_competence_mut
     assert result.status is CommandStatus.APPLIED
     assert result.payload == RegulationResult(
         speech="Vamos paso a paso. ¿Cuántas unidades hay?",
-        strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        executed_action=ExecutedRegulationAction.SIMPLIFY_LANGUAGE,
         regulation_revision=3,
     )
     batch = repository.batches[0]
@@ -136,7 +136,7 @@ def test_exhausted_ordered_hint_falls_back_to_canonical_simplification():
         command(PedagogicalStrategy.GIVE_ORDERED_HINT)
     )
 
-    assert result.payload.strategy is PedagogicalStrategy.SIMPLIFY_LANGUAGE
+    assert result.payload.executed_action is ExecutedRegulationAction.SIMPLIFY_LANGUAGE
     assert result.payload.speech == "Vamos paso a paso. ¿Cuántas unidades hay?"
     assert repository.batches[0].activity_progress == ()
 
@@ -182,7 +182,10 @@ def test_cap_uses_neutral_choice_without_advancing_counter():
     result = make_service(repository, runtime).commit_regulation(command())
 
     assert result.payload.speech == "¿Quieres continuar o hacer una pausa?"
+    assert result.payload.executed_action is ExecutedRegulationAction.CAP_CHOICE
     assert repository.batches[0].regulation_mutation.consecutive_turns == 4
+    assert repository.batches[0].regulation_mutation.activity_sequence == 1
+    assert repository.batches[0].regulation_mutation.executed_action is ExecutedRegulationAction.CAP_CHOICE
 
 
 def test_stale_persisted_regulation_revision_rejects_before_speech_result():

@@ -86,7 +86,7 @@ Provisioning enforces policy totality: the allowed set must have a non-empty com
 
 `give-ordered-hint` does not call `CommitHint`. A shared pure hint-selection/progress helper is used by both commands, while `CommitRegulation` submits hint progress, regulation receipt/state/event, and prior-outcome closure as one `MutationBatch` behind one version/generation fence.
 
-The regulation-turn cap is not an automatic end condition. At the cap, the harness uses the reviewed neutral prompt “¿Quieres continuar o hacer una pausa?”. Further difficulty repeats that bounded prompt without advancing the counter; only explicit stop, session time, or existing lifecycle caps end the session.
+The regulation-turn cap is not an automatic end condition. At the cap, the harness uses the reviewed neutral prompt “¿Quieres continuar o hacer una pausa?”. The result records the closed executed action `cap-choice`, never the model-proposed strategy, because that strategy was not executed. Further difficulty repeats that bounded prompt without advancing the counter; only explicit stop, session time, or existing lifecycle caps end the session.
 
 ## Precedence and state machine
 
@@ -99,7 +99,7 @@ For every accepted turn:
 5. The LLM may propose a mathematical tool or `regulate_conversation`.
 6. The harness validates and executes exactly one action before releasing speech.
 
-Durable session-scoped `regulation_state` contains `revision`, `consecutive_turns`, a per-activity monotonic `activity_sequence`, and an optional fully structured `pending_event`; it is initialized at zero when a provisioned session is created and reconstructed on resume. Selecting a new activity resets `activity_sequence` to zero. `revision` is a persisted CAS value advanced by every accepted state-changing turn. It is distinct from the existing in-memory, one-shot LLM generation ID: the latter suppresses late model results, while session/profile versions plus `regulation_revision` reject stale persistence attempts. An evaluated mathematical answer atomically resets only `consecutive_turns` and closes a pending event as `answered`; it does not reset `activity_sequence`.
+Durable session-scoped `regulation_state`, introduced by migration `0021_regulation_state.sql`, contains `revision`, `consecutive_turns`, a per-activity monotonic `activity_sequence`, and (from the following event migration) an optional fully structured `pending_event`; it is initialized at zero when a provisioned session is created and reconstructed on resume. Selecting a new activity resets `activity_sequence` to zero. `revision` is a persisted CAS value advanced by every accepted state-changing turn. It is distinct from the existing in-memory, one-shot LLM generation ID: the latter suppresses late model results, while session/profile versions plus `regulation_revision` reject stale persistence attempts. An evaluated mathematical answer atomically resets only `consecutive_turns` and closes a pending event as `answered`; it does not reset `activity_sequence`.
 
 ## Canonical responses
 

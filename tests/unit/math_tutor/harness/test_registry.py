@@ -4,7 +4,7 @@ import pytest
 
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.service import CanonicalHintResult, RecordAnswerResult
-from math_tutor.application.regulation import RegulationResult
+from math_tutor.application.regulation import ExecutedRegulationAction, RegulationResult
 from math_tutor.application.provisioning import DEFAULT_REGULATION_POLICY
 from math_tutor.application.service import CommitRegulation
 from math_tutor.domain.regulation import PedagogicalStrategy
@@ -43,7 +43,9 @@ class CapturingService:
     def stop_now(self, command): return self._apply(command)
     def commit_regulation(self, command):
         return self._apply(command, RegulationResult(
-            "Vamos paso a paso. ¿Cuántas?", command.strategy, command.expected_regulation_revision + 1
+            "Vamos paso a paso. ¿Cuántas?",
+            ExecutedRegulationAction(command.strategy.value),
+            command.expected_regulation_revision + 1,
         ))
 
 

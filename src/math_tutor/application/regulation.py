@@ -7,7 +7,7 @@ from typing import Mapping
 
 from math_tutor.application.ports import ActivityProgress
 from math_tutor.domain.activities import Activity
-from math_tutor.domain.regulation import PedagogicalStrategy
+from math_tutor.domain.regulation import ExecutedRegulationAction, PedagogicalStrategy
 
 _PRESENTATION_VALUES = frozenset({
     "concrete-and-playful", "clear-and-encouraging", "age-respectful",
@@ -28,7 +28,7 @@ class HintSelection:
 @dataclass(frozen=True, slots=True)
 class RegulationResult:
     speech: str
-    strategy: PedagogicalStrategy
+    executed_action: "ExecutedRegulationAction"
     regulation_revision: int
 
 

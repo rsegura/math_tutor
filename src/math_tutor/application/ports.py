@@ -19,6 +19,7 @@ from math_tutor.domain.learning import (
     ProposedProfileChange,
     SkillEstimate,
 )
+from math_tutor.domain.regulation import ExecutedRegulationAction
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,7 @@ class PersistedTutoringState:
     activity_progress: tuple[ActivityProgress, ...] = ()
     regulation_revision: int = 0
     consecutive_regulation_turns: int = 0
+    activity_sequence: int = 0
 
     def __post_init__(self) -> None:
         progress = tuple(self.activity_progress)
@@ -36,7 +38,7 @@ class PersistedTutoringState:
         if len({item.activity_id for item in progress}) != len(progress):
             raise ValueError("activity progress ids must be unique")
         object.__setattr__(self, "activity_progress", progress)
-        for name in ("regulation_revision", "consecutive_regulation_turns"):
+        for name in ("regulation_revision", "consecutive_regulation_turns", "activity_sequence"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
@@ -89,12 +91,18 @@ class TutoringEvent:
 class RegulationMutation:
     next_revision: int
     consecutive_turns: int
+    activity_sequence: int
+    executed_action: ExecutedRegulationAction
 
     def __post_init__(self) -> None:
         if isinstance(self.next_revision, bool) or not isinstance(self.next_revision, int) or self.next_revision < 1:
             raise ValueError("next regulation revision must be positive")
         if isinstance(self.consecutive_turns, bool) or not isinstance(self.consecutive_turns, int) or self.consecutive_turns < 0:
             raise ValueError("consecutive regulation turns must be nonnegative")
+        if isinstance(self.activity_sequence, bool) or not isinstance(self.activity_sequence, int) or self.activity_sequence < 1:
+            raise ValueError("activity sequence must be positive")
+        if not isinstance(self.executed_action, ExecutedRegulationAction):
+            raise ValueError("executed regulation action must be typed")
 
 
 @dataclass(frozen=True, slots=True)

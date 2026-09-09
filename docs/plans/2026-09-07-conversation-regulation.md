@@ -70,14 +70,14 @@
 - Modify: `src/math_tutor/application/regulation.py`
 - Modify: `src/math_tutor/application/ports.py`
 - Modify: `src/math_tutor/infrastructure/persistence/repositories.py`
-- Create: `src/math_tutor/infrastructure/persistence/migrations/0021_regulation_events.sql`
+- Create: `src/math_tutor/infrastructure/persistence/migrations/0022_regulation_events.sql`
 - Create: `tests/integration/math_tutor/test_regulation_persistence.py`
 - Modify: `tests/unit/math_tutor/infrastructure/test_migrator_atomicity.py`
 
 **Steps:**
 1. Write failing tests for atomic receipt/counter/event/hint mutation, replay idempotency, concurrent stale in-memory generation and persisted revision, initialization/resume, exact turn-1/turn-2/turn-3 pending promotion (deterministic IDs, monotonic per-activity ordinals, outcomes, pointer), ordinal continuity after answer reset and at the consecutive cap, new-activity sequence reset, high-priority immediate materialization, every closure path (`RecordAnswer`, regulation, support, stop, cap), crash recovery leaving `unknown`, and upgrade/replay of an existing migration-0019 support receipt.
 2. Run the focused integration tests and confirm failure.
-3. Add regulation state/events tables with closed-value constraints and indexes, backfilling zeroed state for existing sessions. In one transaction, validate session/profile versions and regulation revision, insert the command receipt, advance/reset the counter, retain/promote pending structured state, mutate hint progress where required, and close the previous open outcome when applicable. Refactor existing answer/support/stop mutation batches to close/reset the same state atomically. Preserve migration-0019 receipts as authoritative exact replay without retroactive counter changes.
+3. Extend the regulation state created by migration `0021_regulation_state.sql` and add event tables in migration `0022_regulation_events.sql`, with closed-value constraints and indexes. In one transaction, validate session/profile versions and regulation revision, insert the command receipt, advance/reset the counter, retain/promote pending structured state, mutate hint progress where required, and close the previous open outcome when applicable. Refactor existing answer/support/stop mutation batches to close/reset the same state atomically. Preserve migration-0019 receipts as authoritative exact replay without retroactive counter changes.
 4. Prove no transcript, rationale, model-generated speech, diagnosis, or child profile is stored or logged. Explicitly inspect `processed_commands`, support receipts, regulation tables, and structured logs; reviewed canonical receipt speech is allowed.
 5. Re-run focused tests and commit `feat: persist selective regulation evidence`.
 
