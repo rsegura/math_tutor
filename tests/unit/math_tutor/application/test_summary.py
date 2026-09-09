@@ -154,6 +154,60 @@ def test_regulation_event_cannot_be_laundered_into_a_narrative_claim():
         ))
 
 
+def regulation_event(
+    *, event_id="regulation-session-1-turn-1", session_id="session-1",
+    turn_id="turn-1", ordinal=1, created_at="2026-09-08T10:00:00+00:00",
+    signal=ConversationalSignal.CONFUSED, activity_id="activity-evidence-1",
+):
+    return RegulationEvent(
+        event_id, session_id, activity_id, turn_id, signal,
+        ConfidenceBand.HIGH, ExecutedRegulationAction.SIMPLIFY_LANGUAGE,
+        ordinal, RegulationOutcome.UNKNOWN, created_at,
+    )
+
+
+@pytest.mark.parametrize("event", (
+    regulation_event(event_id="regulation-other"),
+    regulation_event(session_id="session-other"),
+    regulation_event(signal="confused"),
+    regulation_event(created_at="2026-09-08T10:00:00"),
+    regulation_event(created_at="not-a-timestamp"),
+))
+def test_summary_rejects_regulation_event_with_invalid_provenance(event):
+    with pytest.raises(ValueError, match="malformed-summary-source"):
+        SummaryService(Source(replace(source(), regulation_events=(event,)))).build("session-1")
+
+
+@pytest.mark.parametrize(("field", "value"), (
+    ("confidence_band", "high"),
+    ("strategy", "simplify-language"),
+    ("outcome", "unknown"),
+    ("ordinal", True),
+))
+def test_summary_rejects_untyped_regulation_event_fields(field, value):
+    event = replace(regulation_event(), **{field: value})
+
+    with pytest.raises(ValueError, match="malformed-summary-source"):
+        SummaryService(Source(replace(source(), regulation_events=(event,)))).build("session-1")
+
+
+@pytest.mark.parametrize("events", (
+    (regulation_event(), regulation_event(turn_id="turn-2", event_id="regulation-session-1-turn-2", ordinal=1, created_at="2026-09-08T10:00:01+00:00")),
+    (regulation_event(), regulation_event(turn_id="turn-2", event_id="regulation-session-1-turn-2", activity_id="activity-other", ordinal=1, created_at="2026-09-08T10:00:01+00:00")),
+    (regulation_event(ordinal=2), regulation_event(turn_id="turn-2", event_id="regulation-session-1-turn-2", ordinal=1, created_at="2026-09-08T10:00:01+00:00")),
+    (regulation_event(), regulation_event(turn_id="turn-2", event_id="regulation-session-1-turn-2", ordinal=2, created_at="2026-09-08T09:59:59+00:00")),
+))
+def test_summary_rejects_duplicate_nonmonotonic_or_nonchronological_regulation_events(events):
+    with pytest.raises(ValueError, match="malformed-summary-source"):
+        SummaryService(Source(replace(source(), regulation_events=events))).build("session-1")
+
+
+def test_summary_source_remains_backward_compatible_without_regulation_events():
+    summary = SummaryService(Source(source())).build("session-1")
+
+    assert summary.regulation_support == ()
+
+
 def test_cross_session_support_is_linked_without_reporting_old_turn_as_current():
     current = evidence("current")
     old = replace(

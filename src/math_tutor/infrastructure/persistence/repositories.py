@@ -862,13 +862,23 @@ class SQLiteTutoringRepository:
             rows = db.execute(
                 "SELECT event_id,session_id,activity_id,turn_id,signal,confidence_band,"
                 "strategy,ordinal,outcome,created_at FROM regulation_events "
-                "WHERE session_id=? ORDER BY created_at,event_id",
+                "WHERE session_id=? ORDER BY created_at,rowid",
                 (session_id,),
             ).fetchall()
+        def timestamp(raw: object) -> object:
+            # SQLite CURRENT_TIMESTAMP is UTC but legacy rows omit the offset.
+            if isinstance(raw, str) and len(raw) == 19:
+                try:
+                    parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    return raw
+                return parsed.replace(tzinfo=timezone.utc).isoformat()
+            return raw
+
         return tuple(RegulationEvent(
             row[0], row[1], row[2], row[3], ConversationalSignal(row[4]),
             ConfidenceBand(row[5]), ExecutedRegulationAction(row[6]), row[7],
-            RegulationOutcome(row[8]), row[9],
+            RegulationOutcome(row[8]), timestamp(row[9]),
         ) for row in rows)
 
     def _conflict(self, db: sqlite3.Connection, batch: MutationBatch) -> str | None:

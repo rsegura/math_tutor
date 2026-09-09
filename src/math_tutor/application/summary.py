@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from math_tutor.application.ports import RegulationEvent, RegulationOutcome
@@ -229,11 +230,16 @@ class SummaryService:
         if len(set(source.discarded_evidence_ids)) != len(source.discarded_evidence_ids):
             raise malformed
         event_ids: set[str] = set()
-        activity_ordinals: set[tuple[str, int]] = set()
+        ordinals: set[int] = set()
+        last_ordinal: int | None = None
+        last_created_at: datetime | None = None
         for event in source.regulation_events:
             if not isinstance(event, RegulationEvent):
                 raise malformed
-            activity_ordinal = (event.activity_id, event.ordinal)
+            try:
+                created_at = datetime.fromisoformat(event.created_at)
+            except (TypeError, ValueError):
+                raise malformed from None
             if (
                 event.session_id != source.session_id
                 or not isinstance(event.event_id, str)
@@ -242,8 +248,9 @@ class SummaryService:
                 or not event.activity_id.strip()
                 or not isinstance(event.turn_id, str)
                 or not event.turn_id.strip()
+                or event.event_id != f"regulation-{source.session_id}-{event.turn_id}"
                 or event.event_id in event_ids
-                or activity_ordinal in activity_ordinals
+                or event.ordinal in ordinals
                 or not isinstance(event.signal, ConversationalSignal)
                 or not isinstance(event.confidence_band, ConfidenceBand)
                 or not isinstance(event.strategy, ExecutedRegulationAction)
@@ -251,10 +258,16 @@ class SummaryService:
                 or isinstance(event.ordinal, bool)
                 or not isinstance(event.ordinal, int)
                 or event.ordinal < 1
+                or created_at.tzinfo is None
+                or created_at.utcoffset() is None
+                or (last_ordinal is not None and event.ordinal <= last_ordinal)
+                or (last_created_at is not None and created_at < last_created_at)
             ):
                 raise malformed
             event_ids.add(event.event_id)
-            activity_ordinals.add(activity_ordinal)
+            ordinals.add(event.ordinal)
+            last_ordinal = event.ordinal
+            last_created_at = created_at
 
     def validate_narrative(
         self, summary: SessionSummary, claims: tuple[NarrativeClaim, ...]

@@ -166,6 +166,22 @@ def test_summary_reports_conversation_support_without_mathematical_evidence_link
     }
 
 
+def test_summary_preserves_durable_regulation_order_when_timestamps_tie(tmp_path):
+    repo = repository(tmp_path)
+    with repo._connect() as db:
+        for turn_id, ordinal in (("turn-z", 1), ("turn-a", 2)):
+            db.execute(
+                "INSERT INTO regulation_events(event_id,session_id,activity_id,turn_id,signal,confidence_band,strategy,ordinal,outcome,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (f"regulation-session-1-{turn_id}", "session-1", "activity-1",
+                 turn_id, "confused", "high", "simplify-language", ordinal,
+                 "unknown", "2026-09-08 10:00:00"),
+            )
+
+    summary = SummaryService(repo).build("session-1")
+
+    assert [item.ordinal for item in summary.regulation_support] == [1, 2]
+
+
 def test_review_command_collision_and_stale_versions_fail_closed(tmp_path):
     repo = repository(tmp_path)
     service = TherapistReviewService(repo, policy())
