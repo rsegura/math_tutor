@@ -11,7 +11,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from math_tutor.application.ports import (ActivityProgress, CommitDecision, LearnerSupportReceipt, MutationBatch, PersistedTutoringState, ProvisioningConflict, StoredCommandResult, StoredObservation)
+from math_tutor.application.ports import (ActivityProgress, CommitDecision, LearnerSupportReceipt, MutationBatch, PendingRegulationEvent, PersistedTutoringState, ProvisioningConflict, RegulationEvent, RegulationOutcome, StoredCommandResult, StoredObservation)
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.service import CanonicalHintResult, RecordAnswerResult
 from math_tutor.application.regulation import RegulationResult
@@ -24,7 +24,7 @@ from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
 from math_tutor.domain.audio_consent import AudioConsent
 from math_tutor.application.provisioning import LearnerProfile, ProvisionedPlan, SessionLimits, REGULATION_POLICY_VERSION, DEFAULT_REGULATION_POLICY
-from math_tutor.domain.regulation import ExecutedRegulationAction, PedagogicalStrategy, RegulationPolicy
+from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, ExecutedRegulationAction, PedagogicalStrategy, RegulationPolicy
 from math_tutor.application.next_objectives import NextObjectiveDecision, NextObjectiveDecisionRevision, NextObjectiveError, NextObjectiveGenerationSource, NextObjectiveProposal, ProposalDecisionStatus
 from math_tutor.infrastructure.dispatch import VoiceBootstrap, VoiceBootstrapError, verify_join_code
 
@@ -810,7 +810,9 @@ class SQLiteTutoringRepository:
         with self._connect() as db:
             if self._has_regulation_state(db):
                 row = db.execute(
-                    "SELECT s.session_json,s.profile_version,r.revision,r.consecutive_turns,r.activity_sequence "
+                    "SELECT s.session_json,s.profile_version,r.revision,r.consecutive_turns,r.activity_sequence,"
+                    "r.pending_event_id,r.pending_turn_id,r.pending_activity_id,r.pending_signal,"
+                    "r.pending_confidence_band,r.pending_strategy,r.pending_ordinal,r.pending_materialized "
                     "FROM learning_sessions s JOIN regulation_state r ON r.session_id=s.session_id "
                     "WHERE s.session_id=?", (session_id,),
                 ).fetchone()
@@ -819,10 +821,17 @@ class SQLiteTutoringRepository:
                     "SELECT session_json,profile_version FROM learning_sessions WHERE session_id=?",
                     (session_id,),
                 ).fetchone()
-                row = (*legacy, 0, 0, 0) if legacy is not None else None
+                row = (*legacy, 0, 0, 0, None, None, None, None, None, None, None, 0) if legacy is not None else None
             if row is None: return None
             progress = tuple(_load(item[0]) for item in db.execute("SELECT progress_json FROM activity_progress WHERE session_id=? ORDER BY activity_id", (session_id,)))
-        return PersistedTutoringState(_load(row[0]), row[1], progress, row[2], row[3], row[4])
+        pending = None
+        if row[5] is not None:
+            pending = PendingRegulationEvent(
+                row[5], row[6], row[7], ConversationalSignal(row[8]),
+                ConfidenceBand(row[9]), ExecutedRegulationAction(row[10]),
+                row[11], bool(row[12]),
+            )
+        return PersistedTutoringState(_load(row[0]), row[1], progress, row[2], row[3], row[4], pending)
 
     def load_activity(self, session_id: str, activity_id: str) -> Activity | None:
         with self._connect() as db:
@@ -847,6 +856,20 @@ class SQLiteTutoringRepository:
         with self._connect() as db:
             row = db.execute("SELECT estimate_json FROM skill_estimates WHERE learner_id=? AND objective_id=?", (learner_id, objective_id)).fetchone()
         return _load(row[0]) if row else None
+
+    def load_regulation_events(self, session_id: str) -> tuple[RegulationEvent, ...]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT event_id,session_id,activity_id,turn_id,signal,confidence_band,"
+                "strategy,ordinal,outcome,created_at FROM regulation_events "
+                "WHERE session_id=? ORDER BY created_at,event_id",
+                (session_id,),
+            ).fetchall()
+        return tuple(RegulationEvent(
+            row[0], row[1], row[2], row[3], ConversationalSignal(row[4]),
+            ConfidenceBand(row[5]), ExecutedRegulationAction(row[6]), row[7],
+            RegulationOutcome(row[8]), row[9],
+        ) for row in rows)
 
     def _conflict(self, db: sqlite3.Connection, batch: MutationBatch) -> str | None:
         session = db.execute("SELECT version,profile_version,learner_id,plan_id,plan_version,session_json FROM learning_sessions WHERE session_id=?", (batch.session_id,)).fetchone()
@@ -1017,13 +1040,73 @@ class SQLiteTutoringRepository:
                      receipt.action, receipt.speech),
                 )
             if batch.regulation_mutation is not None:
+                mutation = batch.regulation_mutation
+                current = db.execute(
+                    "SELECT pending_event_id,pending_turn_id,pending_activity_id,pending_signal,"
+                    "pending_confidence_band,pending_strategy,pending_ordinal,pending_materialized "
+                    "FROM regulation_state WHERE session_id=?",
+                    (batch.session_id,),
+                ).fetchone()
+                if current is None:
+                    raise sqlite3.IntegrityError("missing regulation state")
+                if current[0] is not None and mutation.close_outcome is not None:
+                    if current[7]:
+                        db.execute(
+                            "UPDATE regulation_events SET outcome=? WHERE event_id=? AND outcome='unknown'",
+                            (mutation.close_outcome.value, current[0]),
+                        )
+                    elif mutation.close_outcome in {
+                        RegulationOutcome.STOPPED, RegulationOutcome.UNKNOWN,
+                    }:
+                        db.execute(
+                            "INSERT INTO regulation_events(event_id,session_id,activity_id,turn_id,signal,confidence_band,strategy,ordinal,outcome) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)",
+                            (current[0], batch.session_id, current[2], current[1], current[3],
+                             current[4], current[5], current[6], mutation.close_outcome.value),
+                        )
+
+                candidate = mutation.pending_event
+                materialized = False
+                if candidate is not None:
+                    prior_exists = current[0] is not None
+                    if prior_exists and mutation.close_outcome is RegulationOutcome.REPEATED_DIFFICULTY and not current[7]:
+                        db.execute(
+                            "INSERT INTO regulation_events(event_id,session_id,activity_id,turn_id,signal,confidence_band,strategy,ordinal,outcome) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)",
+                            (current[0], batch.session_id, current[2], current[1], current[3],
+                             current[4], current[5], current[6], RegulationOutcome.REPEATED_DIFFICULTY.value),
+                        )
+                    high_priority = candidate.signal in {
+                        ConversationalSignal.FRUSTRATED,
+                        ConversationalSignal.TASK_REJECTING,
+                        ConversationalSignal.REQUESTING_PAUSE,
+                    }
+                    materialized = high_priority or prior_exists
+                    if materialized:
+                        db.execute(
+                            "INSERT INTO regulation_events(event_id,session_id,activity_id,turn_id,signal,confidence_band,strategy,ordinal,outcome) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)",
+                            (candidate.event_id, batch.session_id, candidate.activity_id,
+                             candidate.turn_id, candidate.signal.value,
+                             candidate.confidence_band.value, candidate.strategy.value,
+                             candidate.ordinal, RegulationOutcome.UNKNOWN.value),
+                        )
                 cursor = db.execute(
-                    "UPDATE regulation_state SET revision=?,consecutive_turns=?,activity_sequence=? "
+                    "UPDATE regulation_state SET revision=?,consecutive_turns=?,activity_sequence=?,"
+                    "pending_event_id=?,pending_turn_id=?,pending_activity_id=?,pending_signal=?,"
+                    "pending_confidence_band=?,pending_strategy=?,pending_ordinal=?,pending_materialized=? "
                     "WHERE session_id=? AND revision=?",
                     (
-                        batch.regulation_mutation.next_revision,
-                        batch.regulation_mutation.consecutive_turns,
-                        batch.regulation_mutation.activity_sequence,
+                        mutation.next_revision, mutation.consecutive_turns,
+                        mutation.activity_sequence,
+                        candidate.event_id if candidate else None,
+                        candidate.turn_id if candidate else None,
+                        candidate.activity_id if candidate else None,
+                        candidate.signal.value if candidate else None,
+                        candidate.confidence_band.value if candidate else None,
+                        candidate.strategy.value if candidate else None,
+                        candidate.ordinal if candidate else None,
+                        int(materialized),
                         batch.session_id,
                         batch.expected_regulation_revision,
                     ),

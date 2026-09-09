@@ -19,7 +19,51 @@ from math_tutor.domain.learning import (
     ProposedProfileChange,
     SkillEstimate,
 )
-from math_tutor.domain.regulation import ExecutedRegulationAction
+from math_tutor.domain.regulation import (
+    ConfidenceBand, ConversationalSignal, ExecutedRegulationAction,
+)
+
+
+class RegulationOutcome(Enum):
+    ANSWERED = "answered"
+    REPEATED_DIFFICULTY = "repeated_difficulty"
+    STOPPED = "stopped"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class PendingRegulationEvent:
+    event_id: str
+    turn_id: str
+    activity_id: str
+    signal: ConversationalSignal
+    confidence_band: ConfidenceBand
+    strategy: ExecutedRegulationAction
+    ordinal: int
+    materialized: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("event_id", "turn_id", "activity_id"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise ValueError(f"{name} must be nonempty")
+        if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int) or self.ordinal < 1:
+            raise ValueError("regulation ordinal must be positive")
+        if not isinstance(self.signal, ConversationalSignal) or not isinstance(self.confidence_band, ConfidenceBand) or not isinstance(self.strategy, ExecutedRegulationAction):
+            raise ValueError("regulation event fields must be closed values")
+
+
+@dataclass(frozen=True, slots=True)
+class RegulationEvent:
+    event_id: str
+    session_id: str
+    activity_id: str
+    turn_id: str
+    signal: ConversationalSignal
+    confidence_band: ConfidenceBand
+    strategy: ExecutedRegulationAction
+    ordinal: int
+    outcome: RegulationOutcome
+    created_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +74,7 @@ class PersistedTutoringState:
     regulation_revision: int = 0
     consecutive_regulation_turns: int = 0
     activity_sequence: int = 0
+    pending_regulation_event: PendingRegulationEvent | None = None
 
     def __post_init__(self) -> None:
         progress = tuple(self.activity_progress)
@@ -93,16 +138,22 @@ class RegulationMutation:
     consecutive_turns: int
     activity_sequence: int
     executed_action: ExecutedRegulationAction
+    pending_event: PendingRegulationEvent | None = None
+    close_outcome: RegulationOutcome | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.next_revision, bool) or not isinstance(self.next_revision, int) or self.next_revision < 1:
             raise ValueError("next regulation revision must be positive")
         if isinstance(self.consecutive_turns, bool) or not isinstance(self.consecutive_turns, int) or self.consecutive_turns < 0:
             raise ValueError("consecutive regulation turns must be nonnegative")
-        if isinstance(self.activity_sequence, bool) or not isinstance(self.activity_sequence, int) or self.activity_sequence < 1:
-            raise ValueError("activity sequence must be positive")
+        if isinstance(self.activity_sequence, bool) or not isinstance(self.activity_sequence, int) or self.activity_sequence < 0:
+            raise ValueError("activity sequence must be nonnegative")
         if not isinstance(self.executed_action, ExecutedRegulationAction):
             raise ValueError("executed regulation action must be typed")
+        if self.pending_event is not None and self.pending_event.ordinal != self.activity_sequence:
+            raise ValueError("pending event ordinal must match activity sequence")
+        if self.close_outcome is not None and not isinstance(self.close_outcome, RegulationOutcome):
+            raise ValueError("regulation outcome must be typed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +320,8 @@ class TutoringRepository(Protocol):
     def load_estimate(
         self, learner_id: str, objective_id: str
     ) -> SkillEstimate | None: ...
+
+    def load_regulation_events(self, session_id: str) -> tuple[RegulationEvent, ...]: ...
 
     def commit_once(self, batch: MutationBatch) -> CommitDecision: ...
 

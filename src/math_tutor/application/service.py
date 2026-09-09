@@ -13,7 +13,9 @@ from math_tutor.application.ports import (
     ActivityProgress,
     ActivityProgressExpectation,
     MutationBatch,
+    PendingRegulationEvent,
     RegulationMutation,
+    RegulationOutcome,
     LearnerSupportReceipt,
     ObservationExpectation,
     StoredActivity,
@@ -80,6 +82,7 @@ class CommitHint(Command):
 class SupportLearner(Command):
     turn_id: str
     activity_id: str
+    max_consecutive_regulation_turns: int = 4
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -360,10 +363,20 @@ class TutoringService:
             ),
         )
         session = replace(state.session, version=state.session.version + 1)
+        regulation_changes = {}
+        if evaluable:
+            regulation_changes = dict(
+                expected_regulation_revision=state.regulation_revision,
+                regulation_mutation=RegulationMutation(
+                    state.regulation_revision + 1, 0, state.activity_sequence,
+                    state.pending_regulation_event.strategy if state.pending_regulation_event else ExecutedRegulationAction.CAP_CHOICE,
+                    close_outcome=RegulationOutcome.ANSWERED,
+                ),
+            )
         return self._commit(command, session=session, observations=(observation,), evidence=evidence,
             events=(TutoringEvent("answer-recorded", command.session_id, activity.objective_id, command.activity_id, check.reason),),
             activity_progress=(progress,), expected_activity_progress=expected_progress,
-            payload=RecordAnswerResult(check, observation.outcome))
+            payload=RecordAnswerResult(check, observation.outcome), **regulation_changes)
 
     def commit_hint(self, command: CommitHint) -> CommandResult:
         state, error = self._state(command)
@@ -479,6 +492,15 @@ class TutoringService:
             executed_action = ExecutedRegulationAction(strategy.value)
 
         revision = state.regulation_revision + 1
+        pending = PendingRegulationEvent(
+            event_id=f"regulation-{command.session_id}-{command.turn_id}",
+            turn_id=command.turn_id,
+            activity_id=command.activity_id,
+            signal=command.signal,
+            confidence_band=command.confidence_band,
+            strategy=executed_action,
+            ordinal=state.activity_sequence + 1,
+        )
         payload = RegulationResult(speech, executed_action, revision)
         return self._commit(
             command,
@@ -487,7 +509,10 @@ class TutoringService:
             events=events,
             expected_regulation_revision=state.regulation_revision,
             regulation_mutation=RegulationMutation(
-                revision, next_count, state.activity_sequence + 1, executed_action
+                revision, next_count, state.activity_sequence + 1, executed_action,
+                pending_event=pending,
+                close_outcome=(RegulationOutcome.REPEATED_DIFFICULTY
+                               if state.pending_regulation_event else None),
             ),
             payload=payload,
         )
@@ -514,8 +539,18 @@ class TutoringService:
             return self._rejected(command, "activity-not-found")
         if activity.objective_id not in state.session.authorised_objective_ids:
             return self._rejected(command, "objective-not-authorised")
+        if (
+            isinstance(command.max_consecutive_regulation_turns, bool)
+            or not isinstance(command.max_consecutive_regulation_turns, int)
+            or command.max_consecutive_regulation_turns < 1
+        ):
+            return self._rejected(command, "invalid-regulation-command")
         progress, existed = self._progress(state, command.activity_id, activity.difficulty)
+        cap = command.max_consecutive_regulation_turns
+        at_cap = state.consecutive_regulation_turns >= cap
         can_hint = (
+            not at_cap
+            and
             progress.hints_used < self._pedagogical_policy.max_hints_per_activity
             and progress.hints_used < len(activity.hint_ids)
         )
@@ -524,28 +559,54 @@ class TutoringService:
             hint_id = activity.hint_ids[progress.hints_used]
             speech = self._reviewed_hint_texts.get(hint_id)
             can_hint = isinstance(speech, str) and bool(speech.strip())
-        if can_hint:
+        if at_cap:
+            speech = "¿Quieres continuar o hacer una pausa?"
+            action = ExecutedRegulationAction.CAP_CHOICE
+            receipt_action = "repeat"
+            expected_progress = ()
+            progress_changes = ()
+            events = ()
+            session = None
+        elif can_hint:
             progress, expected_progress = self._progress_changes(
                 progress, existed, hints_used=progress.hints_used + 1
             )
             session = replace(state.session, version=state.session.version + 1)
-            receipt = LearnerSupportReceipt(
-                command.session_id, command.turn_id, command.activity_id,
-                "hint", f"{speech} {activity.prompt_es}",
-            )
-            result = self._commit(
-                command, session=session, activity_progress=(progress,),
-                expected_activity_progress=expected_progress,
-                events=(TutoringEvent("hint-committed", command.session_id,
-                                      activity.objective_id, command.activity_id, hint_id),),
-                support_receipts=(receipt,), payload=receipt,
-            )
-            return self._support_result_or_race_winner(command, result)
+            speech = f"{speech} {activity.prompt_es}"
+            action = ExecutedRegulationAction.GIVE_ORDERED_HINT
+            receipt_action = "hint"
+            progress_changes = (progress,)
+            events = (TutoringEvent("hint-committed", command.session_id,
+                                    activity.objective_id, command.activity_id, hint_id),)
+        else:
+            speech = activity.prompt_es
+            action = ExecutedRegulationAction.REPEAT_INSTRUCTION
+            receipt_action = "repeat"
+            expected_progress = ()
+            progress_changes = ()
+            events = ()
+            session = None
         receipt = LearnerSupportReceipt(
             command.session_id, command.turn_id, command.activity_id,
-            "repeat", activity.prompt_es,
+            receipt_action, speech,
         )
-        result = self._commit(command, support_receipts=(receipt,), payload=receipt)
+        next_count = min(cap, state.consecutive_regulation_turns + (0 if at_cap else 1))
+        pending = PendingRegulationEvent(
+            f"regulation-{command.session_id}-{command.turn_id}", command.turn_id,
+            command.activity_id, ConversationalSignal.REQUESTING_HELP,
+            ConfidenceBand.HIGH, action, state.activity_sequence + 1,
+        )
+        result = self._commit(
+            command, session=session, activity_progress=progress_changes,
+            expected_activity_progress=expected_progress, events=events,
+            support_receipts=(receipt,), payload=receipt,
+            expected_regulation_revision=state.regulation_revision,
+            regulation_mutation=RegulationMutation(
+                state.regulation_revision + 1, next_count,
+                state.activity_sequence + 1, action, pending,
+                RegulationOutcome.REPEATED_DIFFICULTY if state.pending_regulation_event else None,
+            ),
+        )
         return self._support_result_or_race_winner(command, result)
 
     def _support_result_or_race_winner(
@@ -633,7 +694,13 @@ class TutoringService:
         return self._commit(command, session=session, activities=(StoredActivity(command.activity_id, activity),),
             activity_progress=progress_changes, expected_activity_progress=expected_progress,
             expected_absent_activity_ids=(command.activity_id,),
-            events=(TutoringEvent("activity-selected", command.session_id, activity.objective_id, command.activity_id, f"{activity.template_id}:{reason}:{source_activity.difficulty if source_id else activity.difficulty}->{activity.difficulty}"),), payload=activity)
+            events=(TutoringEvent("activity-selected", command.session_id, activity.objective_id, command.activity_id, f"{activity.template_id}:{reason}:{source_activity.difficulty if source_id else activity.difficulty}->{activity.difficulty}"),),
+            expected_regulation_revision=state.regulation_revision,
+            regulation_mutation=RegulationMutation(
+                state.regulation_revision + 1, 0, 0,
+                state.pending_regulation_event.strategy if state.pending_regulation_event else ExecutedRegulationAction.CAP_CHOICE,
+                close_outcome=RegulationOutcome.UNKNOWN,
+            ), payload=activity)
 
     def propose_evidence(self, command: ProposeEvidence) -> CommandResult:
         state, error = self._state(command)
@@ -699,7 +766,13 @@ class TutoringService:
             session = state.session.end(reason=command.reason)
         except (TypeError, ValueError):
             return self._rejected(command, "domain-validation-error")
-        return self._commit(command, session=session, events=(TutoringEvent("session-ended", command.session_id, detail=command.reason),))
+        return self._commit(command, session=session, events=(TutoringEvent("session-ended", command.session_id, detail=command.reason),),
+            expected_regulation_revision=state.regulation_revision,
+            regulation_mutation=RegulationMutation(
+                state.regulation_revision + 1, 0, state.activity_sequence,
+                state.pending_regulation_event.strategy if state.pending_regulation_event else ExecutedRegulationAction.CAP_CHOICE,
+                close_outcome=(RegulationOutcome.STOPPED if command.reason == "stop-requested" else RegulationOutcome.UNKNOWN),
+            ))
 
     def stop_now(self, command: EndSession) -> CommandResult:
         """Cancel locally first, then attempt the durable terminal transition."""
@@ -719,6 +792,12 @@ class TutoringService:
                 session_id=command.session_id, expected_session_version=state.session.version,
                 expected_profile_version=state.profile_version, result=result, session=session,
                 events=(TutoringEvent("session-stop-requested", command.session_id, detail=command.reason),),
+                expected_regulation_revision=state.regulation_revision,
+                regulation_mutation=RegulationMutation(
+                    state.regulation_revision + 1, 0, state.activity_sequence,
+                    state.pending_regulation_event.strategy if state.pending_regulation_event else ExecutedRegulationAction.CAP_CHOICE,
+                    close_outcome=(RegulationOutcome.STOPPED if command.reason == "stop-requested" else RegulationOutcome.UNKNOWN),
+                ),
             )
             decision = self._repository.commit_once(batch)
         except Exception:
