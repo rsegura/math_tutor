@@ -53,6 +53,8 @@ def test_offline_eval_catalog_is_strict_and_covers_required_behaviours(tmp_path)
         "regulation-disallowed-strategy",
         "regulation-cap",
         "regulation-replay-privacy",
+        "regulation-stale-concurrency",
+        "regulation-crash-reopen",
     }
 
     source = (SCENARIOS / "correct-answer.yaml").read_text()
@@ -126,7 +128,7 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
 
     assert first == second
     assert first.exit_code == 0
-    assert first.scenarios_run == 20
+    assert first.scenarios_run == 22
     assert first.hard_failures == ()
     assert first.metrics.mathematical_speech_errors == 0
     assert first.metrics.unsupported_profile_updates == 0
@@ -157,6 +159,7 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     assert first.durable_outcomes["ambiguous-language"].ambiguous == 1
     assert first.durable_outcomes["frustration"].observations == 0
     assert first.durable_outcomes["regulation-frustration"].regulation_signals == ("frustrated",)
+    assert first.durable_outcomes["regulation-frustration"].structured_log_events == 2
     assert first.durable_outcomes["regulation-replay-privacy"].regulation_events == 1
     replay = first.durable_outcomes["regulation-replay-privacy"]
     assert "privado@example.com" not in " ".join(
@@ -166,6 +169,13 @@ def test_eval_gate_grades_durable_state_and_is_deterministic(tmp_path):
     assert first.durable_outcomes["regulation-false-positive-answer"].regulation_events == 0
     assert first.durable_outcomes["regulation-disallowed-strategy"].repair_calls == 1
     assert first.durable_outcomes["regulation-cap"].regulation_strategies[-1] == "cap-choice"
+    stale = first.durable_outcomes["regulation-stale-concurrency"]
+    assert stale.regulation_events == 0
+    assert not stale.stale_speech_released
+    reopened = first.durable_outcomes["regulation-crash-reopen"]
+    assert reopened.regulation_revision == 3
+    assert reopened.pending_regulation_signal == "frustrated"
+    assert not replay.privacy_marker_found
     assert first.durable_outcomes["out-of-scope-objective"].profile_proposals == 0
     assert first.durable_outcomes["self-correction"].observation_sequence == (
         "incorrect", "correct"
@@ -279,6 +289,39 @@ def test_diagnostic_or_private_narrative_is_a_hard_failure(tmp_path):
         for speech in outcome.model_artifacts
     )
 
+
+def test_unreviewed_regulation_speech_is_a_hard_failure(tmp_path):
+    report = run_evaluation(
+        load_scenarios(SCENARIOS),
+        database_path=tmp_path / "unreviewed-regulation.db",
+        faults=FaultAdapter(unreviewed_regulation_speech=True),
+    )
+    assert report.metrics.mathematical_speech_errors == 1
+    assert "mathematical_speech_errors" in report.hard_failures
+    assert "2 + 2 = 5" in " ".join(
+        report.durable_outcomes["regulation-frustration"].released_speech
+    )
+
+
+def test_privacy_marker_in_actual_regulation_storage_is_a_hard_failure(tmp_path):
+    report = run_evaluation(
+        load_scenarios(SCENARIOS), database_path=tmp_path / "marker.db",
+        faults=FaultAdapter(privacy_marker_storage=True),
+    )
+
+    assert report.durable_outcomes["regulation-replay-privacy"].privacy_marker_found
+    assert report.metrics.diagnostic_or_privacy_violations == 1
+    assert "diagnostic_or_privacy_violations" in report.hard_failures
+
+
+def test_privacy_marker_in_captured_structured_log_is_a_hard_failure(tmp_path):
+    report = run_evaluation(
+        load_scenarios(SCENARIOS), database_path=tmp_path / "marker-log.db",
+        faults=FaultAdapter(privacy_marker_log=True),
+    )
+
+    assert report.durable_outcomes["regulation-replay-privacy"].privacy_marker_found
+    assert report.metrics.diagnostic_or_privacy_violations == 1
 
 def test_generated_phone_and_email_leak_is_detected_without_diagnostic_words(tmp_path):
     report = run_evaluation(

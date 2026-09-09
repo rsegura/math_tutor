@@ -1,0 +1,16 @@
+schema_version: 4
+scenario_id: regulation-stale-concurrency
+description: Un turno determinista nuevo invalida una propuesta de regulación aún en vuelo.
+learner_id: learner-eval
+session_id: session-regulation-stale
+objective_id: units-tens
+stop_requested: false
+execution_mode: concurrent-stale
+intervention_rating_fixture: adequate
+profile_objective: null
+authorised_objectives: [units-tens]
+turns:
+  - {turn_id: old, response_text: "esto es difícil", stt_confidence: 0.98, model_output: {type: tool, name: regulate_conversation, arguments: {turn_id: "$turn_id", signal: frustrated, confidence: 0.94, strategy: validate-emotion}}, repair_output: null, model_delay_ms: 100}
+  - {turn_id: new, response_text: "audio no fiable", stt_confidence: 0.20, model_output: {type: reply, speech: "Vamos paso a paso.", speech_kind: social}, repair_output: null, model_delay_ms: 0}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 0, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [], repair_calls: 0, decisions: 1, intervention: conversation-regulated, latency_ms: 0, terminal: false, regulation_events: 0, regulation_signals: [], regulation_strategies: [], regulation_revision: 1, pending_regulation_signal: null, stale_speech_released: false}
+review_fixture_duration_seconds: 12

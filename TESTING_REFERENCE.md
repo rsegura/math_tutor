@@ -144,12 +144,15 @@ LLM rationale, or arbitrary text. A single lower-priority signal is retained as
 bounded pending state; high-priority frustration, task rejection, and pause
 requests are materialized immediately, while repeated difficulty materializes
 the prior event. Replay is idempotent, and stale generation/revision proposals
-cannot mutate or release stale speech. Application logs expose closed reason
-codes such as `low-regulation-confidence`, `strategy-not-authorised`,
-`strategy-incompatible`, `stale-regulation-revision`, and
-`canonical-regulation-result-missing`; logs must not include transcripts,
-provider bodies, child identifiers beyond the existing opaque operational ids,
-or exception chains.
+cannot mutate or release stale speech. The harness emits only the structured
+events `conversation_regulation_proposed`, `conversation_regulation_applied`,
+and `conversation_regulation_rejected`. Proposal fields are `signal`,
+`requested_strategy`, `confidence_band`, and `consecutive_count`. Applied
+events add `executed_action`, `outcome`, and `regulation_revision`; rejected
+events add `rejection_code`. Exact deterministic help emits an applied event
+without a proposal and uses `requested_strategy: null`. Values are closed
+enums/codes; logs contain no transcripts, provider bodies, profile data, or
+exception chains.
 
 ## Offline tutoring acceptance gate
 
@@ -167,10 +170,11 @@ confidence, ambiguous language, hint exhaustion, explicit stop, out-of-scope
 objective proposals, and replayed evidence. Regulation scenarios add
 paraphrased confusion and repetition, frustration, refusal, off-task speech,
 pause, an emotional-but-evaluable answer false positive, a disallowed strategy
-repair, the consecutive-turn cap, and privacy-safe replay. Stale concurrent
-generation and revision behavior is exercised in the integration suite because
-the YAML runner is intentionally sequential. Its schema rejects unknown and
-missing fields so fixtures cannot silently drift.
+repair, the consecutive-turn cap, privacy-safe replay, an executable stale-turn
+race, and runtime reconstruction after a simulated crash. The latter two use
+explicit `concurrent-stale` and `crash-reopen` execution modes while retaining
+deterministic fixtures. Its schema rejects unknown and missing fields so
+fixtures cannot silently drift.
 
 Schema version 4 separates explicit model output and tool arguments from the
 expected outcome. The fake adapter only replays that output (substituting the
@@ -182,6 +186,20 @@ terminal state, and materialized regulation event signals/strategies. Every
 mismatch is a named hard failure of the form
 `scenario-id.field`, so `make eval-math` is independently useful as a CI gate
 without relying on pytest assertions.
+
+For regulated and deterministic-help decisions, the gate reconstructs expected
+speech from the persisted executed action, canonical activity, reviewed hint
+catalog, presentation, and adaptations. A `reason=regulated` label alone is not
+trusted. A negative fault injects unreviewed free-form mathematical speech and
+must increment `mathematical_speech_errors`.
+
+Privacy-marker scenarios inspect actual SQLite rows in `regulation_state`,
+`regulation_events`, `processed_commands`, and `learner_support_receipts`, plus
+structured records captured from the `math_tutor` logger tree. Finding the
+marker in any artifact is a hard `diagnostic_or_privacy_violations` failure.
+Generic telephone-pattern matching is not applied to opaque database hashes,
+which can coincidentally resemble numbers; the explicit marker is the exact
+persistence/log leak oracle.
 
 `intervention_classifications` reports what the executed behavior did (for
 example, `scope-rejected` or `self-correction-recorded`); it is not presented as

@@ -1,6 +1,7 @@
 """Authorization and mutation fence for pedagogical tools."""
 from collections.abc import Mapping
 from itertools import count
+import logging
 from typing import Protocol
 from math_tutor.application.results import CommandStatus
 from math_tutor.application.regulation import RegulationResult
@@ -13,6 +14,8 @@ from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, P
 from math_tutor.harness.context import HarnessContext
 from math_tutor.harness.contracts import HarnessDecision, ToolName, ToolProposal
 from math_tutor.harness.limits import HarnessLimits
+
+logger = logging.getLogger(__name__)
 
 class ToolRejected(ValueError):
     def __init__(self, reason: str, *, crossed_fence: bool = False) -> None:
@@ -116,17 +119,31 @@ class PedagogicalToolRegistry:
                 confidence_band = ConfidenceBand.from_confidence(args.get("confidence"))
             except (TypeError, ValueError):
                 raise ToolRejected("regulation-contract-invalid") from None
+            telemetry = {
+                "signal": signal.value,
+                "requested_strategy": strategy.value,
+                "confidence_band": confidence_band.value,
+                "consecutive_count": context.consecutive_regulation_turns,
+            }
+            logger.info("conversation_regulation_proposed", extra=telemetry)
             if confidence_band is ConfidenceBand.LOW:
+                logger.info(
+                    "conversation_regulation_rejected",
+                    extra={**telemetry, "rejection_code": "low-regulation-confidence"},
+                )
                 return HarnessDecision(
                     speech=context.activity.prompt_es,
                     applied_tool=name,
                     reason="low-regulation-confidence",
                 )
             if context.regulation_policy is None:
+                logger.info("conversation_regulation_rejected", extra={**telemetry, "rejection_code": "regulation-policy-missing"})
                 raise ToolRejected("regulation-policy-missing")
             if strategy not in context.regulation_policy.allowed_strategies:
+                logger.info("conversation_regulation_rejected", extra={**telemetry, "rejection_code": "strategy-not-authorised"})
                 raise ToolRejected("strategy-not-authorised")
             if strategy not in compatible_strategies(signal):
+                logger.info("conversation_regulation_rejected", extra={**telemetry, "rejection_code": "strategy-incompatible"})
                 raise ToolRejected("strategy-incompatible")
             result = self._service.commit_regulation(CommitRegulation(
                 **base,
@@ -140,13 +157,26 @@ class PedagogicalToolRegistry:
                 presentation=context.learner_state.presentation,
                 adaptations=context.adaptations,
             ))
-            self._applied(result)
+            if getattr(result, "status", None) is not CommandStatus.APPLIED:
+                rejection = getattr(result, "reason", "mutation-rejected")
+                logger.info("conversation_regulation_rejected", extra={**telemetry, "rejection_code": rejection})
+                raise ToolRejected(rejection, crossed_fence=True)
             if (
                 not isinstance(result.payload, RegulationResult)
                 or not result.payload.speech
                 or result.payload.regulation_revision != context.regulation_revision + 1
             ):
+                logger.info("conversation_regulation_rejected", extra={**telemetry, "rejection_code": "canonical-regulation-result-missing"})
                 raise ToolRejected("canonical-regulation-result-missing", crossed_fence=True)
+            logger.info(
+                "conversation_regulation_applied",
+                extra={
+                    **telemetry,
+                    "executed_action": result.payload.executed_action.value,
+                    "outcome": "unknown",
+                    "regulation_revision": result.payload.regulation_revision,
+                },
+            )
             return HarnessDecision(speech=result.payload.speech, applied_tool=name, reason="regulated")
         if name is ToolName.END_SESSION:
             self._keys(args, required=set(), optional={"reason"})

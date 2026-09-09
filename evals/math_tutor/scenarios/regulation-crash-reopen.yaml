@@ -1,0 +1,16 @@
+schema_version: 4
+scenario_id: regulation-crash-reopen
+description: El estado y puntero provisional sobreviven la reconstrucción del runtime.
+learner_id: learner-eval
+session_id: session-regulation-crash
+objective_id: units-tens
+stop_requested: false
+execution_mode: crash-reopen
+intervention_rating_fixture: adequate
+profile_objective: null
+authorised_objectives: [units-tens]
+turns:
+  - {turn_id: turn-1, response_text: "esto me enfada", stt_confidence: 0.98, model_output: {type: tool, name: regulate_conversation, arguments: {turn_id: "$turn_id", signal: frustrated, confidence: 0.94, strategy: validate-emotion}}, repair_output: null, model_delay_ms: 100}
+  - {turn_id: turn-2, response_text: "sigue siendo difícil", stt_confidence: 0.98, model_output: {type: tool, name: regulate_conversation, arguments: {turn_id: "$turn_id", signal: frustrated, confidence: 0.94, strategy: simplify-language}}, repair_output: null, model_delay_ms: 100}
+expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 0, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [], repair_calls: 0, decisions: 2, intervention: conversation-regulated, latency_ms: 200, terminal: false, regulation_events: 2, regulation_signals: [frustrated, frustrated], regulation_strategies: [validate-emotion, simplify-language], regulation_revision: 3, pending_regulation_signal: frustrated, stale_speech_released: false}
+review_fixture_duration_seconds: 15

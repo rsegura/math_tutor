@@ -190,6 +190,14 @@ The policy must retain at least one compatible strategy for every supported
 signal and at least one durable help fallback (`repeat-instruction` or
 `simplify-language`); invalid or incomplete policies fail closed.
 
+Operational logs use closed structured events rather than learner text. A
+proposal records its signal, requested strategy, confidence band, and current
+consecutive count. An accepted action records the executed strategy, current
+outcome, and regulation revision; a rejection records its closed rejection
+code. Exact deterministic help emits the accepted event directly. Transcripts,
+provider response bodies, free-text rationales, and learner profiles are not
+included.
+
 For ElevenLabs, `TTS_VOICE_ID` may be empty; the runtime then omits `voice_id`
 and lets the pinned LiveKit plugin select its default. Successful construction
 does not prove that this default is available under a particular ElevenLabs

@@ -117,6 +117,56 @@ def test_valid_regulation_crosses_service_fence_and_releases_only_canonical_resu
     assert result.reason == "regulated"
 
 
+def test_regulation_observability_uses_closed_fields_without_child_text(context, caplog):
+    caplog.set_level("INFO", logger="math_tutor.harness.registry")
+    registry = PedagogicalToolRegistry(CapturingService(), HarnessLimits())
+
+    registry.execute(ToolProposal(ToolName.REGULATE_CONVERSATION, {
+        "turn_id": "turn-1", "signal": "confused", "confidence": .8,
+        "strategy": "simplify-language",
+    }), replace(context, current_turn=TurnEvidence(
+        "turn-1", "secreto menor@example.com y dato privado", .9
+    )))
+
+    records = [record for record in caplog.records if record.name == "math_tutor.harness.registry"]
+    assert [record.message for record in records] == [
+        "conversation_regulation_proposed", "conversation_regulation_applied"
+    ]
+    assert records[0].signal == "confused"
+    assert records[0].requested_strategy == "simplify-language"
+    assert records[0].confidence_band == "high"
+    assert records[0].consecutive_count == 1
+    assert records[1].executed_action == "simplify-language"
+    assert records[1].outcome == "unknown"
+    assert records[1].regulation_revision == 3
+    assert "menor@example.com" not in caplog.text
+    assert "dato privado" not in caplog.text
+
+
+def test_rejected_regulation_logs_only_closed_rejection_code(context, caplog):
+    caplog.set_level("INFO", logger="math_tutor.harness.registry")
+    policy = replace(
+        context.regulation_policy,
+        allowed_strategies=tuple(
+            item for item in context.regulation_policy.allowed_strategies
+            if item is not PedagogicalStrategy.SIMPLIFY_LANGUAGE
+        ),
+    )
+    with pytest.raises(ToolRejected, match="strategy-not-authorised"):
+        PedagogicalToolRegistry(CapturingService(), HarnessLimits()).execute(
+            ToolProposal(ToolName.REGULATE_CONVERSATION, {
+                "turn_id": "turn-1", "signal": "confused", "confidence": .8,
+                "strategy": "simplify-language",
+            }),
+            replace(context, regulation_policy=policy),
+        )
+
+    assert [record.message for record in caplog.records] == [
+        "conversation_regulation_proposed", "conversation_regulation_rejected"
+    ]
+    assert caplog.records[-1].rejection_code == "strategy-not-authorised"
+
+
 def test_record_answer_requires_current_turn_evidence_and_structured_answer(context):
     registry = PedagogicalToolRegistry(CapturingService(), HarnessLimits())
     with pytest.raises(ToolRejected, match="current-turn-evidence"):

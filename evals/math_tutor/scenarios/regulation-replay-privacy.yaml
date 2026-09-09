@@ -8,6 +8,7 @@ stop_requested: false
 intervention_rating_fixture: adequate
 profile_objective: null
 authorised_objectives: [units-tens]
+privacy_marker: privado@example.com
 turns:
   - {turn_id: turn-1, response_text: "me enfada; mi correo es privado@example.com", stt_confidence: 0.98, model_output: {type: tool, name: regulate_conversation, arguments: {turn_id: "$turn_id", signal: frustrated, confidence: 0.94, strategy: validate-emotion}}, repair_output: null, model_delay_ms: 130}
   - {turn_id: turn-1, response_text: "me enfada; mi correo es privado@example.com", stt_confidence: 0.98, model_output: {type: tool, name: regulate_conversation, arguments: {turn_id: "$turn_id", signal: frustrated, confidence: 0.94, strategy: validate-emotion}}, repair_output: null, model_delay_ms: 130}

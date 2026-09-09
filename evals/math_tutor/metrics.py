@@ -65,3 +65,8 @@ class DurableOutcome:
     regulation_events: int = 0
     regulation_signals: tuple[str, ...] = ()
     regulation_strategies: tuple[str, ...] = ()
+    regulation_revision: int = 0
+    pending_regulation_signal: str | None = None
+    stale_speech_released: bool = False
+    privacy_marker_found: bool = False
+    structured_log_events: int = 0

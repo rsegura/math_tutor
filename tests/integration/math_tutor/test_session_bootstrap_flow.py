@@ -288,6 +288,23 @@ async def test_help_turn_commits_one_reviewed_hint_without_observation_or_model(
     assert "transcript" not in columns and "text" not in columns
 
 
+async def test_help_turn_emits_closed_regulation_observability_without_transcript(tmp_path, caplog):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    caplog.set_level("INFO", logger="math_tutor.agent.runtime_factory")
+
+    await engine.decide(VoiceTurn("help-observed","ayúdame",.99,Event()))
+
+    records=[record for record in caplog.records if record.message == "conversation_regulation_applied"]
+    assert len(records) == 1
+    assert records[0].signal == "requesting-help"
+    assert records[0].executed_action in {"give-ordered-hint", "simplify-language", "repeat-instruction", "cap-choice"}
+    assert isinstance(records[0].consecutive_count, int)
+    assert records[0].outcome == "unknown"
+    assert "ayúdame" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_help_fast_path_uses_snapshotted_therapist_policy(tmp_path):
     policy = RegulationPolicy((
