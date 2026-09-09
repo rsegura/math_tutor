@@ -300,9 +300,30 @@ async def test_help_turn_emits_closed_regulation_observability_without_transcrip
     assert len(records) == 1
     assert records[0].signal == "requesting-help"
     assert records[0].executed_action in {"give-ordered-hint", "simplify-language", "repeat-instruction", "cap-choice"}
-    assert isinstance(records[0].consecutive_count, int)
     assert records[0].outcome == "unknown"
+    assert not hasattr(records[0], "consecutive_count")
+    assert not hasattr(records[0], "regulation_revision")
     assert "ayúdame" not in caplog.text
+
+
+async def test_help_telemetry_never_reads_repository_after_commit(tmp_path, caplog):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    original=repo.load_state
+    calls=0
+    def fail_after_decision_state(session_id):
+        nonlocal calls
+        calls += 1
+        if calls > 2:
+            raise OSError("telemetry read must not happen")
+        return original(session_id)
+    repo.load_state=fail_after_decision_state
+
+    decision=await engine.decide(VoiceTurn("help-no-read","ayúdame",.99,Event()))
+
+    assert decision.reason.startswith("learner-support-")
+    assert calls == 2
 
 
 @pytest.mark.asyncio

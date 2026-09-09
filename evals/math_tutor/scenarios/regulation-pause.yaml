@@ -9,6 +9,6 @@ intervention_rating_fixture: adequate
 profile_objective: null
 authorised_objectives: [units-tens]
 turns:
-  - {turn_id: turn-1, response_text: "necesito descansar un poquito", stt_confidence: 0.99, model_output: {type: tool, name: regulate_conversation, arguments: {turn_id: "$turn_id", signal: requesting-pause, confidence: 0.96, strategy: take-short-pause}}, repair_output: null, model_delay_ms: 145}
+  - {turn_id: turn-1, response_text: "necesito descansar un poquito", stt_confidence: 0.99, model_output: {type: tool, name: regulate_conversation, arguments: {turn_id: "$turn_id", signal: requesting-pause, confidence: 0.96, strategy: take-short-pause}}, repair_output: null, model_delay_ms: 145, reviewed_speech: "Hacemos una pausa corta. Cuando estés preparado, seguimos."}
 expected: {mathematical_speech_verified: true, profile_update_supported: true, stt_attribution_allowed: true, stop_honoured: true, observations: 0, correct: 0, incorrect: 0, ambiguous: 0, not_evaluable: 0, evidence_count: 0, profile_proposals: 0, attempts_used: 0, hints_used: 0, consecutive_correct: 0, consecutive_incorrect: 0, observation_sequence: [], repair_calls: 0, decisions: 1, intervention: conversation-regulated, latency_ms: 145, terminal: false, regulation_events: 1, regulation_signals: [requesting-pause], regulation_strategies: [take-short-pause]}
 review_fixture_duration_seconds: 10

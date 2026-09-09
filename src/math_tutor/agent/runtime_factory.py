@@ -129,17 +129,15 @@ class BoundedConversationEngine:
                 await asyncio.sleep(0.01)
         return None
 
-    def _log_support_applied(self, session_id: str, receipt) -> None:
-        state = self._repository.load_state(session_id)
+    @staticmethod
+    def _log_support_applied(receipt) -> None:
         executed_action = {
             "hint": "give-ordered-hint",
             "repeat": "repeat-instruction",
         }.get(receipt.action, receipt.action)
         logger.info("conversation_regulation_applied", extra={
             "signal": "requesting-help", "requested_strategy": None,
-            "confidence_band": "high", "consecutive_count": state.consecutive_regulation_turns,
             "executed_action": executed_action, "outcome": "unknown",
-            "regulation_revision": state.regulation_revision,
         })
 
     def _runtime_cap_reason(self) -> str | None:
@@ -371,13 +369,13 @@ class BoundedConversationEngine:
                     aggregate.session.session_id, turn.turn_id
                 )
                 if receipt is not None:
-                    self._log_support_applied(aggregate.session.session_id, receipt)
+                    self._log_support_applied(receipt)
                     return VoiceDecision(
                         receipt.speech, reason=f"learner-support-{receipt.action}"
                     )
                 raise RuntimeError(f"learner support rejected: {result.reason}")
             receipt = result.payload
-            self._log_support_applied(aggregate.session.session_id, receipt)
+            self._log_support_applied(receipt)
             return VoiceDecision(receipt.speech, reason=f"learner-support-{receipt.action}")
         try:
             harness = await self._get_harness()

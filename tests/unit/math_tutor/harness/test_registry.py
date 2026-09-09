@@ -167,6 +167,25 @@ def test_rejected_regulation_logs_only_closed_rejection_code(context, caplog):
     assert caplog.records[-1].rejection_code == "strategy-not-authorised"
 
 
+@pytest.mark.parametrize(("arguments", "code"), [
+    ({"turn_id":"old", "signal":"confused", "confidence":.8, "strategy":"simplify-language"}, "current-turn-evidence-required"),
+    ({"turn_id":"turn-1", "signal":"unknown", "confidence":.8, "strategy":"simplify-language"}, "regulation-contract-invalid"),
+    ({"turn_id":"turn-1", "signal":"confused", "confidence":float("nan"), "strategy":"simplify-language"}, "regulation-contract-invalid"),
+    ({"turn_id":"turn-1", "signal":"confused", "confidence":.8, "strategy":"unknown"}, "regulation-contract-invalid"),
+    ({"turn_id":"turn-1", "signal":"confused", "confidence":.8}, "tool-arguments-invalid"),
+])
+def test_every_early_regulation_rejection_emits_closed_code_without_arguments(context, caplog, arguments, code):
+    caplog.set_level("INFO", logger="math_tutor.harness.registry")
+    with pytest.raises(ToolRejected, match=code):
+        PedagogicalToolRegistry(CapturingService(), HarnessLimits()).execute(
+            ToolProposal(ToolName.REGULATE_CONVERSATION, arguments), context,
+        )
+
+    rejected=[record for record in caplog.records if record.message == "conversation_regulation_rejected"]
+    assert len(rejected) == 1 and rejected[0].rejection_code == code
+    assert str(arguments) not in caplog.text
+
+
 def test_record_answer_requires_current_turn_evidence_and_structured_answer(context):
     registry = PedagogicalToolRegistry(CapturingService(), HarnessLimits())
     with pytest.raises(ToolRejected, match="current-turn-evidence"):

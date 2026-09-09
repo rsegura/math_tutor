@@ -110,14 +110,20 @@ class PedagogicalToolRegistry:
             result = self._service.propose_profile_change(ProposeProfileChange(**base, objective_id=str(objective))); self._applied(result)
             return HarnessDecision(applied_tool=name, reason="proposal-only")
         if name is ToolName.REGULATE_CONVERSATION:
-            self._keys(args, required={"turn_id", "signal", "confidence", "strategy"})
+            try:
+                self._keys(args, required={"turn_id", "signal", "confidence", "strategy"})
+            except ToolRejected:
+                logger.info("conversation_regulation_rejected", extra={"rejection_code": "tool-arguments-invalid"})
+                raise
             if args.get("turn_id") != context.current_turn.turn_id:
+                logger.info("conversation_regulation_rejected", extra={"rejection_code": "current-turn-evidence-required"})
                 raise ToolRejected("current-turn-evidence-required")
             try:
                 signal = ConversationalSignal(args.get("signal"))
                 strategy = PedagogicalStrategy(args.get("strategy"))
                 confidence_band = ConfidenceBand.from_confidence(args.get("confidence"))
             except (TypeError, ValueError):
+                logger.info("conversation_regulation_rejected", extra={"rejection_code": "regulation-contract-invalid"})
                 raise ToolRejected("regulation-contract-invalid") from None
             telemetry = {
                 "signal": signal.value,

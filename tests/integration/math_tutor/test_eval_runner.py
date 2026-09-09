@@ -3,6 +3,7 @@ import inspect
 from dataclasses import replace
 
 import pytest
+import math_tutor.application.regulation as production_regulation
 
 from evals.math_tutor.runner import (
     FaultAdapter,
@@ -301,6 +302,33 @@ def test_unreviewed_regulation_speech_is_a_hard_failure(tmp_path):
     assert "2 + 2 = 5" in " ".join(
         report.durable_outcomes["regulation-frustration"].released_speech
     )
+
+
+def test_reviewed_speech_oracle_is_independent_of_production_renderer(tmp_path, monkeypatch):
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "regulation-frustration")
+    monkeypatch.setattr(production_regulation, "canonical_regulation_speech", lambda *args, **kwargs: "Texto libre 2 + 2 = 5")
+
+    report = run_evaluation((scenario,), database_path=tmp_path / "mutated-renderer.db")
+
+    assert report.metrics.mathematical_speech_errors == 1
+    assert "mathematical_speech_errors" in report.hard_failures
+
+
+def test_concurrent_stale_mode_requires_exactly_two_turns(tmp_path):
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "regulation-stale-concurrency")
+
+    with pytest.raises(EvalScenarioError, match="exactly two turns"):
+        run_evaluation((replace(scenario, turns=scenario.turns[:1]),), database_path=tmp_path / "bad-stale.db")
+
+
+def test_concurrent_stale_timeout_is_a_named_hard_failure(tmp_path, monkeypatch):
+    import evals.math_tutor.runner as runner
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "regulation-stale-concurrency")
+    monkeypatch.setattr(runner, "_CONCURRENT_WAIT_SECONDS", 0)
+
+    report = run_evaluation((scenario,), database_path=tmp_path / "stale-timeout.db")
+
+    assert "regulation-stale-concurrency.concurrent-stale-timeout" in report.hard_failures
 
 
 def test_privacy_marker_in_actual_regulation_storage_is_a_hard_failure(tmp_path):

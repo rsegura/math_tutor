@@ -191,12 +191,14 @@ signal and at least one durable help fallback (`repeat-instruction` or
 `simplify-language`); invalid or incomplete policies fail closed.
 
 Operational logs use closed structured events rather than learner text. A
-proposal records its signal, requested strategy, confidence band, and current
-consecutive count. An accepted action records the executed strategy, current
-outcome, and regulation revision; a rejection records its closed rejection
-code. Exact deterministic help emits the accepted event directly. Transcripts,
-provider response bodies, free-text rationales, and learner profiles are not
-included.
+valid proposal records its signal, requested strategy, confidence band, and
+current consecutive count. An accepted LLM action adds the executed strategy,
+current outcome, and regulation revision; a rejection records its closed code
+(and only that code when contract parsing did not safely produce closed
+values). Exact deterministic help emits an accepted event directly with its
+closed signal/action/outcome, without extra telemetry-only persistence reads.
+Transcripts, raw arguments, provider response bodies, free-text rationales, and
+learner profiles are not included.
 
 For ElevenLabs, `TTS_VOICE_ID` may be empty; the runtime then omits `voice_id`
 and lets the pinned LiveKit plugin select its default. Successful construction

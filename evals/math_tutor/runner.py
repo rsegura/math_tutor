@@ -22,8 +22,7 @@ import yaml
 
 from math_tutor.domain.evidence import EvidenceRecord, Observation, ObservationOutcome, TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import CompetencyState, LearningSession, ProposedProfileChange
-from math_tutor.domain.regulation import ExecutedRegulationAction, PedagogicalStrategy, RegulationPolicy
-from math_tutor.application.regulation import canonical_regulation_speech
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
 from math_tutor.agent.runtime_factory import (
     BoundedConversationEngine,
     ProviderSettings,
@@ -45,6 +44,9 @@ from evals.math_tutor.metrics import DurableOutcome, EvalMetrics, EvalReport, HA
 
 class EvalScenarioError(ValueError):
     """A scenario is incomplete, ambiguous, or outside the versioned schema."""
+
+
+_CONCURRENT_WAIT_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +104,7 @@ class EvalTurn:
     model_output: Mapping[str, object]
     repair_output: Mapping[str, object] | None
     model_delay_ms: int
+    reviewed_speech: str | None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_output", MappingProxyType(dict(self.model_output)))
@@ -138,7 +141,9 @@ _ROOT_FIELDS = {
 }
 _TURN_FIELDS = {
     "turn_id", "response_text", "stt_confidence", "model_output", "repair_output", "model_delay_ms",
+    "reviewed_speech",
 }
+_OPTIONAL_TURN_FIELDS = frozenset({"reviewed_speech"})
 _EXPECTED_FIELDS = {
     "mathematical_speech_verified", "profile_update_supported",
     "stt_attribution_allowed", "stop_honoured", "evidence_count", "observations",
@@ -242,7 +247,7 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
         raise EvalScenarioError(f"{source}: turns must be a nonempty list")
     turns: list[EvalTurn] = []
     for index, value in enumerate(raw_turns):
-        turn = _exact_mapping(value, _TURN_FIELDS, f"{source}: turn {index}")
+        turn = _exact_mapping(value, _TURN_FIELDS, f"{source}: turn {index}", optional=_OPTIONAL_TURN_FIELDS)
         confidence = turn["stt_confidence"]
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
             raise EvalScenarioError(f"{source}: turn {index}: invalid STT confidence")
@@ -277,6 +282,7 @@ def _parse_scenario(raw: object, source: Path) -> EvalScenario:
             stt_confidence=float(confidence), model_output=model_output,
             repair_output=repair_output,
             model_delay_ms=_integer(turn["model_delay_ms"], f"{source}: turn {index}: model_delay_ms"),
+            reviewed_speech=_text(turn.get("reviewed_speech"), f"{source}: turn {index}: reviewed_speech", nullable=True),
         ))
     expected_raw = _exact_mapping(data["expected"], _EXPECTED_FIELDS, f"{source}: expected", optional=_OPTIONAL_EXPECTED_FIELDS)
     expected = ScenarioExpected(
@@ -461,6 +467,7 @@ class _Executed:
     stale_speech_released: bool
     database_artifacts: tuple[str, ...]
     log_artifacts: tuple[str, ...]
+    execution_failure: str | None
 
 
 def _intervention(scenario: EvalScenario, aggregate, model: ProductionFakeModelAdapter) -> str:
@@ -552,32 +559,10 @@ def _database_artifacts(repo: SQLiteTutoringRepository) -> tuple[str, ...]:
     return tuple(artifacts)
 
 
-def _is_canonical_regulation_speech(repo, runtime, decision: VoiceDecision) -> bool:
+def _is_canonical_regulation_speech(turn: EvalTurn, decision: VoiceDecision) -> bool:
     if not (decision.reason == "regulated" or decision.reason.startswith("learner-support-")):
         return True
-    state = repo.load_state(runtime.bootstrap.session.session_id)
-    pending = state.pending_regulation_event if state else None
-    if pending is None:
-        return False
-    action = pending.strategy
-    if action is ExecutedRegulationAction.CAP_CHOICE:
-        return decision.speech == "¿Quieres continuar o hacer una pausa?"
-    activity = repo.load_activity(runtime.bootstrap.session.session_id, pending.activity_id)
-    if activity is None:
-        return False
-    if action is ExecutedRegulationAction.GIVE_ORDERED_HINT:
-        curriculum, _ = load_curriculum_catalogs(
-            Path("src/math_tutor/curricula/primary-math-v1.yaml"),
-            Path("src/math_tutor/curricula/activity-templates-v1.yaml"),
-        )
-        hint_texts = {hint.text for hint in curriculum.objective(activity.objective_id).hints}
-        return any(decision.speech == f"{hint} {activity.prompt_es}" for hint in hint_texts)
-    expected = canonical_regulation_speech(
-        PedagogicalStrategy(action.value), prompt=activity.prompt_es,
-        presentation=(runtime.bootstrap.plan.plan.presentation.language_style, runtime.bootstrap.plan.plan.presentation.instruction_length),
-        adaptations=runtime.bootstrap.plan.adaptations,
-    )
-    return decision.speech == expected
+    return turn.reviewed_speech is not None and decision.speech == turn.reviewed_speech
 
 
 async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenario) -> _Executed:
@@ -593,6 +578,7 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
     latencies: list[int] = []
     verified: list[bool] = []
     stale_speech_released = False
+    execution_failure = None
     capture = _StructuredLogCapture()
     telemetry_logger = logging.getLogger("math_tutor")
     prior_log_level = telemetry_logger.level
@@ -605,11 +591,13 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
         decision = await engine.decide(VoiceTurn(turn_id, turn.response_text, turn.stt_confidence, Event()))
         decisions.append(decision)
         latencies.append(round((clock.monotonic() - started) * 1000))
-        verified.append(_is_canonical_regulation_speech(repo, runtime, decision))
+        verified.append(_is_canonical_regulation_speech(turn, decision))
         return decision
 
     try:
         if scenario.execution_mode == "concurrent-stale":
+            if len(scenario.turns) != 2:
+                raise EvalScenarioError("concurrent-stale mode requires exactly two turns")
             entered, release = asyncio.Event(), asyncio.Event()
             original_complete = model.complete
             async def blocked_complete(**kwargs):
@@ -618,14 +606,24 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
                 return await original_complete(**kwargs)
             model.complete = blocked_complete
             older = asyncio.create_task(execute(scenario.turns[0]))
-            await entered.wait()
-            await execute(scenario.turns[1])
-            release.set()
             try:
-                await older
-                stale_speech_released = True
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(entered.wait(), _CONCURRENT_WAIT_SECONDS)
+                await execute(scenario.turns[1])
+                release.set()
+                try:
+                    await asyncio.wait_for(older, _CONCURRENT_WAIT_SECONDS)
+                    stale_speech_released = True
+                except asyncio.CancelledError:
+                    pass
+                except TimeoutError:
+                    execution_failure = "concurrent-stale-timeout"
+            except TimeoutError:
+                execution_failure = "concurrent-stale-timeout"
+            finally:
+                release.set()
+                if not older.done():
+                    older.cancel()
+                await asyncio.gather(older, return_exceptions=True)
         else:
             for index, turn in enumerate(scenario.turns):
                 if scenario.execution_mode == "crash-reopen" and index:
@@ -652,7 +650,7 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
         repo.load_regulation_events(runtime.bootstrap.session.session_id),
         repo.load_state(runtime.bootstrap.session.session_id),
         tuple(verified), stale_speech_released, _database_artifacts(repo),
-        tuple(capture.artifacts),
+        tuple(capture.artifacts), execution_failure,
     )
     return replace(executed, outcome=_durable_outcome(executed))
 
@@ -927,6 +925,10 @@ def run_evaluation(
         if getattr(item.scenario.expected, field) is not None
         and getattr(item.outcome, field) != getattr(item.scenario.expected, field)
     )
+    execution_failures = tuple(
+        f"{item.scenario.scenario_id}.{item.execution_failure}"
+        for item in executed if item.execution_failure is not None
+    )
     latency_failures = tuple(
         f"{item.scenario.scenario_id}.latency_budget_ms"
         for item in executed
@@ -936,7 +938,7 @@ def run_evaluation(
         ("intervention_adequacy_below_target",)
         if adequate_or_correctable < intervention_adequacy_target else ()
     )
-    failures = (*failures, *behaviour_failures, *optional_behaviour_failures, *latency_failures, *rating_failures)
+    failures = (*failures, *behaviour_failures, *optional_behaviour_failures, *execution_failures, *latency_failures, *rating_failures)
     outcomes = {item.scenario.scenario_id: item.outcome for item in executed}
     return EvalReport(len(values), metrics, failures, int(bool(failures)), outcomes)
 

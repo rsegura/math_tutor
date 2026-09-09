@@ -148,11 +148,15 @@ cannot mutate or release stale speech. The harness emits only the structured
 events `conversation_regulation_proposed`, `conversation_regulation_applied`,
 and `conversation_regulation_rejected`. Proposal fields are `signal`,
 `requested_strategy`, `confidence_band`, and `consecutive_count`. Applied
-events add `executed_action`, `outcome`, and `regulation_revision`; rejected
-events add `rejection_code`. Exact deterministic help emits an applied event
-without a proposal and uses `requested_strategy: null`. Values are closed
-enums/codes; logs contain no transcripts, provider bodies, profile data, or
-exception chains.
+LLM-applied events add `executed_action`, `outcome`, and
+`regulation_revision`; rejected events add `rejection_code`. Rejections before
+a valid closed contract contain only `rejection_code`; later rejections retain
+the already validated proposal fields. Exact deterministic help emits an
+applied event without a proposal and contains `signal=requesting-help`,
+`requested_strategy=null`, `executed_action`, and `outcome`; it deliberately
+does not perform an extra repository read for count or revision. Values are
+closed enums/codes; logs contain no arguments, transcripts, provider bodies,
+profile data, or exception chains.
 
 ## Offline tutoring acceptance gate
 
@@ -173,8 +177,10 @@ pause, an emotional-but-evaluable answer false positive, a disallowed strategy
 repair, the consecutive-turn cap, privacy-safe replay, an executable stale-turn
 race, and runtime reconstruction after a simulated crash. The latter two use
 explicit `concurrent-stale` and `crash-reopen` execution modes while retaining
-deterministic fixtures. Its schema rejects unknown and missing fields so
-fixtures cannot silently drift.
+deterministic fixtures. Concurrent mode requires exactly two turns, bounds both
+coordination waits, cancels and gathers the old task in `finally`, and reports
+`scenario-id.concurrent-stale-timeout` instead of hanging the gate. Its schema
+rejects unknown and missing fields so fixtures cannot silently drift.
 
 Schema version 4 separates explicit model output and tool arguments from the
 expected outcome. The fake adapter only replays that output (substituting the
@@ -187,11 +193,12 @@ mismatch is a named hard failure of the form
 `scenario-id.field`, so `make eval-math` is independently useful as a CI gate
 without relying on pytest assertions.
 
-For regulated and deterministic-help decisions, the gate reconstructs expected
-speech from the persisted executed action, canonical activity, reviewed hint
-catalog, presentation, and adaptations. A `reason=regulated` label alone is not
-trusted. A negative fault injects unreviewed free-form mathematical speech and
-must increment `mathematical_speech_errors`.
+Each regulation turn declares independent, version-controlled
+`reviewed_speech` fixture text. The gate compares released speech with that
+fixture; it does not call the production renderer to build its oracle. A
+`reason=regulated` label alone is not trusted. A test replaces the production
+renderer and proves the unchanged fixture catches its free-form mathematical
+speech; the fault adapter separately tests the same hard metric.
 
 Privacy-marker scenarios inspect actual SQLite rows in `regulation_state`,
 `regulation_events`, `processed_commands`, and `learner_support_receipts`, plus
