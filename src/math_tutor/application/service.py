@@ -289,6 +289,36 @@ class TutoringService:
         except Exception:
             return None, self._failed(command, "persistence-unavailable")
 
+    def _regulation_result_or_race_winner(
+        self, command: CommitRegulation, result: CommandResult
+    ) -> CommandResult:
+        if result.status is CommandStatus.APPLIED or result.reason == "command-id-collision":
+            return result
+        for _ in range(8):
+            try:
+                receipt = self._repository.load_support_receipt(
+                    command.session_id, command.turn_id
+                )
+            except Exception:
+                return result
+            if receipt is None:
+                continue
+            if (
+                receipt.activity_id != command.activity_id
+                or receipt.regulation_revision != command.expected_regulation_revision + 1
+                or receipt.decision_reason != "regulated"
+            ):
+                return result
+            return CommandResult(
+                command.command_id, CommandStatus.APPLIED, "replayed",
+                RegulationResult(
+                    receipt.speech, self._receipt_action(receipt),
+                    receipt.regulation_revision,
+                ),
+                replayed=True,
+            )
+        return result
+
     @staticmethod
     def _rejected(command: Command, reason: str) -> CommandResult:
         return CommandResult(command.command_id, CommandStatus.REJECTED, reason)
@@ -538,7 +568,7 @@ class TutoringService:
             command.session_id, command.turn_id, command.activity_id,
             executed_action.value, speech, revision, "regulated",
         )
-        return self._commit(
+        result = self._commit(
             command,
             activity_progress=progress_changes,
             expected_activity_progress=expected_progress,
@@ -553,6 +583,7 @@ class TutoringService:
             support_receipts=(receipt,),
             payload=payload,
         )
+        return self._regulation_result_or_race_winner(command, result)
 
     def support_learner(self, command: SupportLearner) -> CommandResult:
         """Persist and replay deterministic help without storing learner text."""

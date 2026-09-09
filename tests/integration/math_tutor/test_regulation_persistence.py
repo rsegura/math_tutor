@@ -1,6 +1,8 @@
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
+from threading import Barrier
 
 from math_tutor.application.ports import ActivityProgress, CommitOutcome, MutationBatch, RegulationMutation, RegulationOutcome, StoredActivity
 from math_tutor.application.results import CommandResult, CommandStatus
@@ -140,6 +142,54 @@ def test_turn_receipt_does_not_mask_a_same_command_id_collision(tmp_path):
         CommandStatus.REJECTED, "command-id-collision",
     )
     assert _durable_regulation_snapshot(repo) == before
+
+
+def test_two_workers_same_regulation_turn_return_exact_durable_winner(tmp_path):
+    database, repo, _, _ = _setup(tmp_path)
+    barrier = Barrier(2)
+
+    class RacingRepository(SQLiteTutoringRepository):
+        def commit_once(self, batch):
+            barrier.wait(timeout=2)
+            return super().commit_once(batch)
+
+    workers = []
+    for number in (1, 2):
+        worker_repo = RacingRepository(database)
+        worker_runtime = SessionRuntime()
+        worker_service = _setup(tmp_path / f"worker-{number}")[3]
+        worker_service._repository = worker_repo
+        worker_service._runtime = worker_runtime
+        generation = worker_runtime.start_generation("session")
+        command = CommitRegulation(
+            command_id=f"racing-regulation-{number}", session_id="session",
+            expected_session_version=1, expected_profile_version=1,
+            generation_id=generation.generation_id, turn_id="shared-turn",
+            activity_id="activity", expected_regulation_revision=0,
+            signal=ConversationalSignal.REQUESTING_HELP,
+            confidence_band=ConfidenceBand.HIGH,
+            strategy=PedagogicalStrategy.GIVE_ORDERED_HINT,
+            regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
+            presentation=("short",), adaptations=(),
+        )
+        workers.append((worker_service, command))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(lambda pair: pair[0].commit_regulation(pair[1]), workers))
+
+    assert all(result.status is CommandStatus.APPLIED for result in results)
+    assert {result.reason for result in results} == {"applied", "replayed"}
+    assert results[0].payload == results[1].payload
+    assert results[0].payload.executed_action is ExecutedRegulationAction.GIVE_ORDERED_HINT
+    assert results[0].payload.regulation_revision == 1
+    state = repo.load_state("session")
+    assert (state.regulation_revision, state.activity_sequence) == (1, 1)
+    assert state.progress_for("activity").hints_used == 1
+    assert state.pending_regulation_event.turn_id == "shared-turn"
+    assert repo.load_regulation_events("session") == ()
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM learner_support_receipts").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM tutoring_events WHERE kind='hint-committed'").fetchone()[0] == 1
 
 
 def test_evaluable_answer_closes_open_event_and_resets_count_not_ordinal(tmp_path):

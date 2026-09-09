@@ -172,7 +172,7 @@ class PedagogicalToolRegistry:
                 or not result.payload.speech
                 or (
                     result.replayed
-                    and not 0 <= result.payload.regulation_revision <= context.regulation_revision
+                    and not 0 <= result.payload.regulation_revision <= context.regulation_revision + 1
                 )
                 or (
                     not result.replayed
