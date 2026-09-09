@@ -1,5 +1,7 @@
 import pytest
 
+from math_tutor.application.provisioning import DEFAULT_REGULATION_POLICY
+
 from math_tutor.harness.context import (
     ActivityContext,
     ContextError,
@@ -84,3 +86,20 @@ def test_context_rejects_unknown_input_keys_with_stable_error():
 def test_presentation_is_a_bounded_allowlist_not_an_arbitrary_profile_channel():
     with pytest.raises(ContextError, match="presentation contains unrelated"):
         LearnerState((("units-tens", "exploring"),), ("favorite-food-pizza",))
+
+
+def test_context_carries_bounded_regulation_snapshot():
+    context = build_harness_context(
+        session_id="session-1", learner_id="learner-1",
+        expected_session_version=1, expected_profile_version=1, generation_id="gen-1",
+        authorised_objective_ids=("units-tens",), active_objective_ids=("units-tens",),
+        activity=ActivityContext("a", "t", "units-tens", 1, "Suma", (), (), 0),
+        learner_state=LearnerState((("units-tens", "exploring"),), ("short",)),
+        recent_history=(), current_turn=TurnEvidence("turn", "No entiendo", .9),
+        max_history_turns=2, regulation_policy=DEFAULT_REGULATION_POLICY,
+        regulation_revision=7, consecutive_regulation_turns=3,
+    )
+
+    assert context.regulation_policy is DEFAULT_REGULATION_POLICY
+    assert context.regulation_revision == 7
+    assert context.consecutive_regulation_turns == 3

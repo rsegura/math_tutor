@@ -26,6 +26,8 @@ class PersistedTutoringState:
     session: LearningSession
     profile_version: int
     activity_progress: tuple[ActivityProgress, ...] = ()
+    regulation_revision: int = 0
+    consecutive_regulation_turns: int = 0
 
     def __post_init__(self) -> None:
         progress = tuple(self.activity_progress)
@@ -34,6 +36,10 @@ class PersistedTutoringState:
         if len({item.activity_id for item in progress}) != len(progress):
             raise ValueError("activity progress ids must be unique")
         object.__setattr__(self, "activity_progress", progress)
+        for name in ("regulation_revision", "consecutive_regulation_turns"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
 
     def progress_for(self, activity_id: str) -> ActivityProgress | None:
         return next((item for item in self.activity_progress if item.activity_id == activity_id), None)
@@ -77,6 +83,18 @@ class TutoringEvent:
     objective_id: str | None = None
     activity_id: str | None = None
     detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RegulationMutation:
+    next_revision: int
+    consecutive_turns: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.next_revision, bool) or not isinstance(self.next_revision, int) or self.next_revision < 1:
+            raise ValueError("next regulation revision must be positive")
+        if isinstance(self.consecutive_turns, bool) or not isinstance(self.consecutive_turns, int) or self.consecutive_turns < 0:
+            raise ValueError("consecutive regulation turns must be nonnegative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +156,8 @@ class MutationBatch:
     expected_activity_progress: tuple[ActivityProgressExpectation, ...] = ()
     expected_absent_activity_ids: tuple[str, ...] = ()
     support_receipts: tuple[LearnerSupportReceipt, ...] = ()
+    expected_regulation_revision: int | None = None
+    regulation_mutation: RegulationMutation | None = None
 
     def __post_init__(self) -> None:
         """Reject ambiguous writes before they reach the durable fence."""
@@ -158,6 +178,17 @@ class MutationBatch:
                 raise ValueError(f"{name} ids must be unique")
         if not all(isinstance(value, str) and value.strip() for value in absent_ids):
             raise ValueError("expected absent activity ids must be nonempty strings")
+        if self.expected_regulation_revision is not None and (
+            isinstance(self.expected_regulation_revision, bool)
+            or not isinstance(self.expected_regulation_revision, int)
+            or self.expected_regulation_revision < 0
+        ):
+            raise ValueError("expected regulation revision must be nonnegative")
+        if self.regulation_mutation is not None:
+            if self.expected_regulation_revision is None:
+                raise ValueError("regulation mutation requires expected revision")
+            if self.regulation_mutation.next_revision != self.expected_regulation_revision + 1:
+                raise ValueError("regulation mutation must advance revision by one")
 
 
 class CommitOutcome(Enum):

@@ -13,6 +13,7 @@ from math_tutor.application.ports import (
     ActivityProgress,
     ActivityProgressExpectation,
     MutationBatch,
+    RegulationMutation,
     LearnerSupportReceipt,
     ObservationExpectation,
     StoredActivity,
@@ -20,6 +21,12 @@ from math_tutor.application.ports import (
     TutoringRepository,
 )
 from math_tutor.application.results import CommandResult, CommandStatus
+from math_tutor.application.regulation import (
+    CanonicalHintTextMissing,
+    RegulationResult,
+    canonical_regulation_speech,
+    select_next_reviewed_hint,
+)
 from math_tutor.application.session_runtime import SessionRuntime
 from math_tutor.domain.activities import InvalidActivity, StructuredAnswer, generate_activity
 from math_tutor.domain.evidence import (
@@ -31,6 +38,12 @@ from math_tutor.domain.evidence import (
 from math_tutor.domain.learning import ProgressionPolicy
 from math_tutor.domain.mathematics import AnswerCheck, verify_answer
 from math_tutor.domain.templates import ActivityTemplateCatalog, InvalidActivityTemplate
+from math_tutor.domain.regulation import (
+    ConfidenceBand,
+    ConversationalSignal,
+    PedagogicalStrategy,
+    compatible_strategies,
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -66,6 +79,17 @@ class CommitHint(Command):
 class SupportLearner(Command):
     turn_id: str
     activity_id: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CommitRegulation(Command):
+    turn_id: str
+    activity_id: str
+    expected_regulation_revision: int
+    signal: ConversationalSignal
+    confidence_band: ConfidenceBand
+    strategy: PedagogicalStrategy
+    max_consecutive_regulation_turns: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -347,15 +371,20 @@ class TutoringService:
         if activity.objective_id not in state.session.authorised_objective_ids:
             return self._rejected(command, "objective-not-authorised")
         progress, existed = self._progress(state, command.activity_id, activity.difficulty)
-        if progress.hints_used >= self._pedagogical_policy.max_hints_per_activity:
-            return self._rejected(command, "hint-cap-reached")
         if command.hint_index != progress.hints_used:
             return self._rejected(command, "hint-not-next")
-        if command.hint_index < 0 or command.hint_index >= len(activity.hint_ids) or activity.hint_ids[command.hint_index] != command.hint_id:
-            return self._rejected(command, "hint-not-reviewed-at-index")
-        speech = self._reviewed_hint_texts.get(command.hint_id)
-        if not isinstance(speech, str) or not speech.strip():
+        try:
+            selection = select_next_reviewed_hint(
+                activity, progress,
+                max_hints=self._pedagogical_policy.max_hints_per_activity,
+                reviewed_hint_texts=self._reviewed_hint_texts,
+            )
+        except CanonicalHintTextMissing:
             return self._rejected(command, "canonical-hint-text-missing")
+        if selection is None:
+            return self._rejected(command, "hint-cap-reached")
+        if command.hint_index < 0 or selection.hint_id != command.hint_id:
+            return self._rejected(command, "hint-not-reviewed-at-index")
         progress, expected_progress = self._progress_changes(
             progress, existed, hints_used=progress.hints_used + 1
         )
@@ -363,7 +392,87 @@ class TutoringService:
         return self._commit(command, session=session,
             activity_progress=(progress,), expected_activity_progress=expected_progress,
             events=(TutoringEvent("hint-committed", command.session_id, activity.objective_id, command.activity_id, command.hint_id),),
-            payload=CanonicalHintResult(command.hint_id, speech))
+            payload=CanonicalHintResult(command.hint_id, selection.speech))
+
+    def commit_regulation(self, command: CommitRegulation) -> CommandResult:
+        """Execute one validated strategy and return speech only after the fence."""
+
+        state, error = self._state(command)
+        if error:
+            return error
+        if command.expected_regulation_revision != state.regulation_revision:
+            return self._rejected(command, "stale-regulation-revision")
+        if (
+            not isinstance(command.signal, ConversationalSignal)
+            or not isinstance(command.confidence_band, ConfidenceBand)
+            or not isinstance(command.strategy, PedagogicalStrategy)
+            or command.strategy not in compatible_strategies(command.signal)
+        ):
+            return self._rejected(command, "invalid-regulation-command")
+        if (
+            isinstance(command.max_consecutive_regulation_turns, bool)
+            or not isinstance(command.max_consecutive_regulation_turns, int)
+            or command.max_consecutive_regulation_turns < 1
+        ):
+            return self._rejected(command, "invalid-regulation-command")
+        try:
+            activity = self._repository.load_activity(command.session_id, command.activity_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if activity is None:
+            return self._rejected(command, "activity-not-found")
+        if activity.objective_id not in state.session.authorised_objective_ids:
+            return self._rejected(command, "objective-not-authorised")
+
+        progress, existed = self._progress(state, command.activity_id, activity.difficulty)
+        strategy = command.strategy
+        progress_changes = ()
+        expected_progress = ()
+        events = ()
+        if state.consecutive_regulation_turns >= command.max_consecutive_regulation_turns:
+            speech = "¿Quieres continuar o hacer una pausa?"
+            next_count = command.max_consecutive_regulation_turns
+        else:
+            next_count = state.consecutive_regulation_turns + 1
+            if strategy is PedagogicalStrategy.GIVE_ORDERED_HINT:
+                try:
+                    selection = select_next_reviewed_hint(
+                        activity, progress,
+                        max_hints=self._pedagogical_policy.max_hints_per_activity,
+                        reviewed_hint_texts=self._reviewed_hint_texts,
+                    )
+                except CanonicalHintTextMissing:
+                    return self._rejected(command, "canonical-hint-text-missing")
+                if selection is None:
+                    strategy = PedagogicalStrategy.SIMPLIFY_LANGUAGE
+                    speech = canonical_regulation_speech(strategy, prompt=activity.prompt_es)
+                else:
+                    progress, expected_progress = self._progress_changes(
+                        progress, existed, hints_used=progress.hints_used + 1
+                    )
+                    progress_changes = (progress,)
+                    events = (TutoringEvent(
+                        "hint-committed", command.session_id, activity.objective_id,
+                        command.activity_id, selection.hint_id,
+                    ),)
+                    speech = f"{selection.speech} {activity.prompt_es}"
+            else:
+                try:
+                    speech = canonical_regulation_speech(strategy, prompt=activity.prompt_es)
+                except ValueError:
+                    return self._rejected(command, "canonical-regulation-content-missing")
+
+        revision = state.regulation_revision + 1
+        payload = RegulationResult(speech, strategy, revision)
+        return self._commit(
+            command,
+            activity_progress=progress_changes,
+            expected_activity_progress=expected_progress,
+            events=events,
+            expected_regulation_revision=state.regulation_revision,
+            regulation_mutation=RegulationMutation(revision, next_count),
+            payload=payload,
+        )
 
     def support_learner(self, command: SupportLearner) -> CommandResult:
         """Persist and replay deterministic help without storing learner text."""

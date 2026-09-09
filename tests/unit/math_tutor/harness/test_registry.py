@@ -4,6 +4,10 @@ import pytest
 
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.service import CanonicalHintResult, RecordAnswerResult
+from math_tutor.application.regulation import RegulationResult
+from math_tutor.application.provisioning import DEFAULT_REGULATION_POLICY
+from math_tutor.application.service import CommitRegulation
+from math_tutor.domain.regulation import PedagogicalStrategy
 from math_tutor.domain.evidence import ObservationOutcome
 from math_tutor.domain.activities import AnswerInputStatus
 from math_tutor.domain.mathematics import AnswerCheck, AnswerOutcome
@@ -37,6 +41,10 @@ class CapturingService:
         ))
     def propose_profile_change(self, command): return self._apply(command, "proposal")
     def stop_now(self, command): return self._apply(command)
+    def commit_regulation(self, command):
+        return self._apply(command, RegulationResult(
+            "Vamos paso a paso. ¿Cuántas?", command.strategy, command.expected_regulation_revision + 1
+        ))
 
 
 @pytest.fixture
@@ -48,6 +56,8 @@ def context():
         activity=ActivityContext("a", "t", "units-tens", 2, "¿Cuántas?", ("h1", "h2"), ("Pista uno", "Pista dos"), 0),
         learner_state=LearnerState((("units-tens", "exploring"),), ("short-instructions",)),
         recent_history=(), current_turn=TurnEvidence("turn-1", "Cuatro", 0.9), max_history_turns=2,
+        regulation_policy=DEFAULT_REGULATION_POLICY, regulation_revision=2,
+        consecutive_regulation_turns=1,
     )
 
 
@@ -60,6 +70,47 @@ def test_tool_surface_is_intentionally_small():
         ToolName.END_SESSION,
         ToolName.REGULATE_CONVERSATION,
     }
+
+
+def test_regulation_requires_exact_current_turn_and_authorised_compatible_strategy(context):
+    registry = PedagogicalToolRegistry(CapturingService(), HarnessLimits())
+    base = {"signal": "confused", "confidence": .7, "strategy": "simplify-language"}
+    with pytest.raises(ToolRejected, match="current-turn-evidence"):
+        registry.execute(ToolProposal(ToolName.REGULATE_CONVERSATION, {"turn_id": "old", **base}), context)
+    with pytest.raises(ToolRejected, match="strategy-incompatible"):
+        registry.execute(ToolProposal(ToolName.REGULATE_CONVERSATION, {
+            "turn_id": "turn-1", "signal": "off-task", "confidence": .7,
+            "strategy": "simplify-language",
+        }), context)
+
+
+def test_low_confidence_regulation_repeats_without_calling_service(context):
+    service = CapturingService()
+    result = PedagogicalToolRegistry(service, HarnessLimits()).execute(
+        ToolProposal(ToolName.REGULATE_CONVERSATION, {
+            "turn_id": "turn-1", "signal": "confused", "confidence": .49,
+            "strategy": "simplify-language",
+        }), context,
+    )
+
+    assert result.speech == context.activity.prompt_es
+    assert result.reason == "low-regulation-confidence"
+    assert service.commands == []
+
+
+def test_valid_regulation_crosses_service_fence_and_releases_only_canonical_result(context):
+    service = CapturingService()
+    result = PedagogicalToolRegistry(service, HarnessLimits()).execute(
+        ToolProposal(ToolName.REGULATE_CONVERSATION, {
+            "turn_id": "turn-1", "signal": "confused", "confidence": .8,
+            "strategy": "simplify-language",
+        }), context,
+    )
+
+    assert isinstance(service.commands[-1], CommitRegulation)
+    assert service.commands[-1].expected_regulation_revision == 2
+    assert result.speech == "Vamos paso a paso. ¿Cuántas?"
+    assert result.reason == "regulated"
 
 
 def test_record_answer_requires_current_turn_evidence_and_structured_answer(context):
