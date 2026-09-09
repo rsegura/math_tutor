@@ -137,6 +137,8 @@ class PedagogicalToolRegistry:
                 confidence_band=confidence_band,
                 strategy=strategy,
                 max_consecutive_regulation_turns=context.regulation_policy.max_consecutive_regulation_turns,
+                presentation=context.learner_state.presentation,
+                adaptations=context.adaptations,
             ))
             self._applied(result)
             if (

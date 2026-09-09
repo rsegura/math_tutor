@@ -90,6 +90,8 @@ class CommitRegulation(Command):
     confidence_band: ConfidenceBand
     strategy: PedagogicalStrategy
     max_consecutive_regulation_turns: int
+    presentation: tuple[str, ...]
+    adaptations: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -445,7 +447,14 @@ class TutoringService:
                     return self._rejected(command, "canonical-hint-text-missing")
                 if selection is None:
                     strategy = PedagogicalStrategy.SIMPLIFY_LANGUAGE
-                    speech = canonical_regulation_speech(strategy, prompt=activity.prompt_es)
+                    try:
+                        speech = canonical_regulation_speech(
+                            strategy, prompt=activity.prompt_es,
+                            presentation=command.presentation,
+                            adaptations=command.adaptations,
+                        )
+                    except ValueError:
+                        return self._rejected(command, "invalid-regulation-presentation")
                 else:
                     progress, expected_progress = self._progress_changes(
                         progress, existed, hints_used=progress.hints_used + 1
@@ -458,9 +467,13 @@ class TutoringService:
                     speech = f"{selection.speech} {activity.prompt_es}"
             else:
                 try:
-                    speech = canonical_regulation_speech(strategy, prompt=activity.prompt_es)
+                    speech = canonical_regulation_speech(
+                        strategy, prompt=activity.prompt_es,
+                        presentation=command.presentation,
+                        adaptations=command.adaptations,
+                    )
                 except ValueError:
-                    return self._rejected(command, "canonical-regulation-content-missing")
+                    return self._rejected(command, "invalid-regulation-presentation")
 
         revision = state.regulation_revision + 1
         payload = RegulationResult(speech, strategy, revision)

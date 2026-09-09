@@ -109,6 +109,8 @@ def test_valid_regulation_crosses_service_fence_and_releases_only_canonical_resu
 
     assert isinstance(service.commands[-1], CommitRegulation)
     assert service.commands[-1].expected_regulation_revision == 2
+    assert service.commands[-1].presentation == context.learner_state.presentation
+    assert service.commands[-1].adaptations == context.adaptations
     assert result.speech == "Vamos paso a paso. ¿Cuántas?"
     assert result.reason == "regulated"
 

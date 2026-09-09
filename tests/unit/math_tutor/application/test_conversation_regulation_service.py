@@ -88,6 +88,7 @@ def command(strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE, **changes):
         activity_id="activity", expected_regulation_revision=2,
         signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.MEDIUM,
         strategy=strategy, max_consecutive_regulation_turns=4,
+        presentation=("clear-and-encouraging",), adaptations=(),
     )
     values.update(changes)
     return CommitRegulation(**values)
@@ -150,6 +151,27 @@ def test_missing_reviewed_hint_content_fails_closed_without_mutation():
     assert result.status is CommandStatus.REJECTED
     assert result.reason == "canonical-hint-text-missing"
     assert repository.batches == []
+
+
+def test_short_instruction_profile_selects_a_reviewed_concise_variant():
+    repository = Repository(); runtime = SessionRuntime(); runtime.start_generation("session")
+
+    result = make_service(repository, runtime).commit_regulation(command(
+        presentation=("short-instructions",),
+    ))
+
+    assert result.payload.speech == "Vamos despacio. ¿Cuántas unidades hay?"
+
+
+def test_extra_repetition_adaptation_selects_a_reviewed_repeat_variant():
+    repository = Repository(); runtime = SessionRuntime(); runtime.start_generation("session")
+
+    result = make_service(repository, runtime).commit_regulation(command(
+        PedagogicalStrategy.REPEAT_INSTRUCTION,
+        adaptations=("extra-repetition",),
+    ))
+
+    assert result.payload.speech == "Te lo repito. ¿Cuántas unidades hay?"
 
 
 def test_cap_uses_neutral_choice_without_advancing_counter():
