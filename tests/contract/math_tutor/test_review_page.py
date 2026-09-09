@@ -21,7 +21,7 @@ def test_review_page_and_asset_are_no_store_and_contain_no_secret_or_diagnostic_
 def test_review_page_exposes_business_review_sections_and_safe_csp(tmp_path):
     api=TestClient(create_app(WebSettings(False,None),database_path=tmp_path/"review.db"))
     response=api.get("/tutoring-review.html")
-    for marker in ("Progreso por objetivo","Evidencias","Hipótesis","Correcciones","Historial"):
+    for marker in ("Progreso por objetivo","Evidencias","Hipótesis","Apoyo conversacional","Correcciones","Historial"):
         assert marker in response.text
     assert "content-security-policy" in response.headers
     assert "default-src 'self'" in response.headers["content-security-policy"]
@@ -43,3 +43,5 @@ def test_static_review_client_uses_text_content_and_never_requests_full_transcri
     assert "Aprobar objetivo" in script
     assert "Rechazar objetivo" in script
     assert "expected_plan_version" in script
+    assert "conversation_support" in script
+    assert "Apoyo provisional" in script

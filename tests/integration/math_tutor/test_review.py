@@ -142,6 +142,30 @@ def test_discard_is_append_only_idempotent_and_recalculates_estimate(tmp_path):
     assert [row.version for row in repo.load_therapist_reviews("review-1")] == [1]
 
 
+def test_summary_reports_conversation_support_without_mathematical_evidence_links(tmp_path):
+    repo = repository(tmp_path)
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO regulation_events(event_id,session_id,activity_id,turn_id,signal,confidence_band,strategy,ordinal,outcome) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("regulation-session-1-turn-2", "session-1", "activity-1", "turn-2",
+             "frustrated", "high", "validate-emotion", 2, "answered"),
+        )
+
+    summary = SummaryService(repo).build("session-1")
+
+    assert len(summary.regulation_support) == 1
+    item = summary.regulation_support[0]
+    assert (item.event_id, item.signal.value, item.confidence_band.value) == (
+        "regulation-session-1-turn-2", "frustrated", "high",
+    )
+    assert (item.executed_action.value, item.outcome.value, item.ordinal, item.provisional) == (
+        "validate-emotion", "answered", 2, True,
+    )
+    assert item.event_id not in {
+        evidence_id for claim in summary.claims for evidence_id in claim.evidence_ids
+    }
+
+
 def test_review_command_collision_and_stale_versions_fail_closed(tmp_path):
     repo = repository(tmp_path)
     service = TherapistReviewService(repo, policy())

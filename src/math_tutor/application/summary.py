@@ -5,8 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from math_tutor.application.ports import RegulationEvent, RegulationOutcome
 from math_tutor.domain.evidence import EvidenceRecord
 from math_tutor.domain.learning import ProposedProfileChange, SkillEstimate
+from math_tutor.domain.regulation import (
+    ConfidenceBand,
+    ConversationalSignal,
+    ExecutedRegulationAction,
+)
 
 
 class NarrativeValidationError(ValueError):
@@ -34,6 +40,7 @@ class SessionSummarySource:
     authorised_objective_ids: tuple[str, ...] = ()
     activity_refs: tuple[SummaryActivityRef, ...] = ()
     proposal_session_ids: tuple[str, ...] = ()
+    regulation_events: tuple[RegulationEvent, ...] = ()
 
 
 class SummarySourcePort(Protocol):
@@ -50,6 +57,19 @@ class SummaryClaim:
 
 
 @dataclass(frozen=True, slots=True)
+class RegulationSummaryItem:
+    """Review-only conversational support record, never mathematical evidence."""
+
+    event_id: str
+    signal: ConversationalSignal
+    confidence_band: ConfidenceBand
+    executed_action: ExecutedRegulationAction
+    outcome: RegulationOutcome
+    ordinal: int
+    provisional: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class SessionSummary:
     session_id: str
     learner_id: str
@@ -58,6 +78,7 @@ class SessionSummary:
     claims: tuple[SummaryClaim, ...]
     historical_evidence_ids: tuple[str, ...]
     discarded_evidence_ids: tuple[str, ...]
+    regulation_support: tuple[RegulationSummaryItem, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +134,10 @@ class SummaryService:
             source.session_id, source.learner_id, source.session_version,
             source.profile_version, tuple(claims), tuple(canonical),
             tuple(item for item in canonical if item in discarded),
+            tuple(RegulationSummaryItem(
+                event.event_id, event.signal, event.confidence_band,
+                event.strategy, event.outcome, event.ordinal,
+            ) for event in source.regulation_events),
         )
 
     @staticmethod
@@ -203,6 +228,33 @@ class SummaryService:
             raise malformed
         if len(set(source.discarded_evidence_ids)) != len(source.discarded_evidence_ids):
             raise malformed
+        event_ids: set[str] = set()
+        activity_ordinals: set[tuple[str, int]] = set()
+        for event in source.regulation_events:
+            if not isinstance(event, RegulationEvent):
+                raise malformed
+            activity_ordinal = (event.activity_id, event.ordinal)
+            if (
+                event.session_id != source.session_id
+                or not isinstance(event.event_id, str)
+                or not event.event_id.strip()
+                or not isinstance(event.activity_id, str)
+                or not event.activity_id.strip()
+                or not isinstance(event.turn_id, str)
+                or not event.turn_id.strip()
+                or event.event_id in event_ids
+                or activity_ordinal in activity_ordinals
+                or not isinstance(event.signal, ConversationalSignal)
+                or not isinstance(event.confidence_band, ConfidenceBand)
+                or not isinstance(event.strategy, ExecutedRegulationAction)
+                or not isinstance(event.outcome, RegulationOutcome)
+                or isinstance(event.ordinal, bool)
+                or not isinstance(event.ordinal, int)
+                or event.ordinal < 1
+            ):
+                raise malformed
+            event_ids.add(event.event_id)
+            activity_ordinals.add(activity_ordinal)
 
     def validate_narrative(
         self, summary: SessionSummary, claims: tuple[NarrativeClaim, ...]

@@ -5,10 +5,12 @@ import pytest
 from math_tutor.application.summary import (
     NarrativeClaim,
     NarrativeValidationError,
+    RegulationSummaryItem,
     SummaryActivityRef,
     SessionSummarySource,
     SummaryService,
 )
+from math_tutor.application.ports import RegulationEvent, RegulationOutcome
 from math_tutor.domain.evidence import (
     EvidenceRecord,
     Observation,
@@ -19,6 +21,11 @@ from math_tutor.domain.learning import (
     CompetencyState,
     ProposedProfileChange,
     SkillEstimate,
+)
+from math_tutor.domain.regulation import (
+    ConfidenceBand,
+    ConversationalSignal,
+    ExecutedRegulationAction,
 )
 
 
@@ -103,6 +110,48 @@ def test_narrative_can_only_rephrase_the_authoritative_claim_links():
     )
 
     assert narrative[0].claim_id == claim.claim_id
+
+
+def test_regulation_events_are_separate_provisional_summary_items():
+    event = RegulationEvent(
+        "regulation-session-1-turn-2", "session-1", "activity-evidence-1",
+        "turn-2", ConversationalSignal.FRUSTRATED, ConfidenceBand.HIGH,
+        ExecutedRegulationAction.VALIDATE_EMOTION, 2,
+        RegulationOutcome.ANSWERED, "2026-09-08T10:00:00+00:00",
+    )
+
+    summary = SummaryService(Source(replace(source(), regulation_events=(event,)))).build("session-1")
+
+    assert summary.regulation_support == (
+        RegulationSummaryItem(
+            event_id="regulation-session-1-turn-2",
+            signal=ConversationalSignal.FRUSTRATED,
+            confidence_band=ConfidenceBand.HIGH,
+            executed_action=ExecutedRegulationAction.VALIDATE_EMOTION,
+            outcome=RegulationOutcome.ANSWERED,
+            ordinal=2,
+            provisional=True,
+        ),
+    )
+    assert "regulation-session-1-turn-2" not in {
+        evidence_id for claim in summary.claims for evidence_id in claim.evidence_ids
+    }
+
+
+def test_regulation_event_cannot_be_laundered_into_a_narrative_claim():
+    event = RegulationEvent(
+        "regulation-session-1-turn-2", "session-1", "activity-evidence-1",
+        "turn-2", ConversationalSignal.CONFUSED, ConfidenceBand.MEDIUM,
+        ExecutedRegulationAction.SIMPLIFY_LANGUAGE, 2,
+        RegulationOutcome.REPEATED_DIFFICULTY, "2026-09-08T10:00:00+00:00",
+    )
+    service = SummaryService(Source(replace(source(), regulation_events=(event,))))
+    summary = service.build("session-1")
+
+    with pytest.raises(NarrativeValidationError, match="unknown"):
+        service.validate_narrative(summary, (
+            NarrativeClaim(event.event_id, "observation", False, "Tiene una dificultad", (event.event_id,)),
+        ))
 
 
 def test_cross_session_support_is_linked_without_reporting_old_turn_as_current():

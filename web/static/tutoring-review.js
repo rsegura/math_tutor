@@ -60,9 +60,9 @@ async function showSession(learnerId, sessionId) {
   const detail = await request(`/api/review/learners/${encodeURIComponent(learnerId)}/sessions/${encodeURIComponent(sessionId)}`);
   current=detail;
   playbackUrls.forEach(value=>URL.revokeObjectURL(value)); playbackUrls.clear();
-  const progress=document.querySelector("#progress"), assistance=document.querySelector("#assistance"), evidence=document.querySelector("#evidence");
+  const progress=document.querySelector("#progress"), assistance=document.querySelector("#assistance"), conversationSupport=document.querySelector("#conversation-support"), evidence=document.querySelector("#evidence");
   const claims=document.querySelector("#claims"), hypotheses=document.querySelector("#hypotheses"), profileProposals=document.querySelector("#profile-proposals"), nextObjectives=document.querySelector("#next-objectives"), nextHistory=document.querySelector("#next-objective-history"), history=document.querySelector("#history");
-  [progress,assistance,evidence,claims,hypotheses,profileProposals,nextObjectives,nextHistory,history].forEach(clear);
+  [progress,assistance,conversationSupport,evidence,claims,hypotheses,profileProposals,nextObjectives,nextHistory,history].forEach(clear);
   detail.objective_estimates.forEach(item => {
     const confidence=item.support_confidence.minimum === null ? "sin soporte retenido" : `confianza STT ${item.support_confidence.minimum}–${item.support_confidence.maximum}`;
     const block=node("article",`${item.objective_id}: ${item.state} · ${item.status} · versión ${item.estimate_version} · ${confidence}`);
@@ -75,6 +75,8 @@ async function showSession(learnerId, sessionId) {
     block.append(select,button); progress.append(block);
   });
   detail.assistance_observations.forEach(item=>assistance.append(node("p",`${item.objective_id}: nivel ${item.assistance_level} · evidencia ${item.evidence_id}`)));
+  if (!detail.conversation_support.length) conversationSupport.append(node("p","No se registraron apoyos conversacionales relevantes."));
+  detail.conversation_support.forEach(item=>conversationSupport.append(node("p",`Apoyo provisional ${item.ordinal}: ${item.signal} · ${item.confidence_band} · acción ${item.executed_action} · resultado ${item.outcome} · evento ${item.event_id}`)));
   detail.evidence.forEach(item => {
     const block=node("article", `${item.objective_id}: ${item.response_excerpt} · ayuda ${item.assistance_level}`);
     block.id=`evidence-${item.evidence_id}`; block.tabIndex=-1;

@@ -8,8 +8,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from math_tutor.application.review import ReviewResult, ReviewStatus
-from math_tutor.application.summary import SessionSummary, SummaryClaim
+from math_tutor.application.summary import RegulationSummaryItem, SessionSummary, SummaryClaim
+from math_tutor.application.ports import RegulationOutcome
 from math_tutor.domain.learning import CompetencyState, SkillEstimate
+from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, ExecutedRegulationAction
 from math_tutor.infrastructure.persistence.repositories import EvidenceClipRecord
 from web.review_api import create_review_router
 from math_tutor.application.next_objectives import NextObjectiveProposal, ProposalDecisionStatus
@@ -66,7 +68,13 @@ class Summary:
         return SessionSummary(session_id, "learner-1", 2, 3, (
             SummaryClaim("observation:o1", "observation", "Resultado correcto con ayuda 1.", ("evidence-1",)),
             SummaryClaim("profile-proposal:units-tens:1", "profile-proposal", "Se propone exploring.", ("evidence-1",), True),
-        ), ("evidence-1",), ())
+        ), ("evidence-1",), (), (
+            RegulationSummaryItem(
+                "regulation-session-1-turn-2", ConversationalSignal.FRUSTRATED,
+                ConfidenceBand.HIGH, ExecutedRegulationAction.VALIDATE_EMOTION,
+                RegulationOutcome.ANSWERED, 2, True,
+            ),
+        ))
 
 
 class Reviews:
@@ -120,6 +128,13 @@ def test_review_reads_require_auth_and_return_business_safe_authoritative_data()
     assert body["next_objective_proposals"][0]["objective_id"]=="add-within-10"
     assert body["next_objective_proposals"][0]["status"]=="pending"
     assert body["next_objective_history"]==[]
+    assert body["conversation_support"]==[{
+        "event_id":"regulation-session-1-turn-2", "signal":"frustrated",
+        "confidence_band":"high", "executed_action":"validate-emotion",
+        "outcome":"answered", "ordinal":2, "provisional":True,
+    }]
+    assert "evidence_ids" not in body["conversation_support"][0]
+    assert "transcript" not in str(body["conversation_support"]).lower()
     assert all(response.headers["cache-control"]=="no-store" for response in (learners,sessions,detail))
     assert "diagnos" not in detail.text.lower()
 

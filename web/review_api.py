@@ -203,6 +203,7 @@ def create_review_router(repository, therapist_token: str | None, *, summary_ser
             "authoritative_claims":material_claims,"summary":material_claims,
             "hypotheses":[claim for claim in material_claims if claim["status"] == "hypothesis" and claim["kind"] != "profile-proposal"],
             "profile_change_proposals":profile_proposals,
+            "conversation_support":_wire(summary.regulation_support),
             "next_objective_proposals":[next_wire(item) for item in next_proposals if item.status is ProposalDecisionStatus.PENDING],
             "next_objective_history":next_history,
             "evidence":evidence,"history":[{"review_id":item.review_id,"version":item.version,"created_at":item.created_at,"action":_wire(item.review)} for item in aggregate.reviews]}

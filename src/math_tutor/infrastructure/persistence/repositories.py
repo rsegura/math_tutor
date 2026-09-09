@@ -1515,6 +1515,7 @@ class SQLiteTutoringRepository:
             aggregate.session.authorised_objective_ids,
             tuple(activity_refs),
             tuple(aggregate.session.session_id for _ in proposals),
+            self.load_regulation_events(session_id),
         )
 
     def resolve_review_command(
