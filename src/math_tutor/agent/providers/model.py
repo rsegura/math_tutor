@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping
 
 from math_tutor.agent.providers.settings import ProviderConfigError, ProviderSettings
+from math_tutor.domain.regulation import ConversationalSignal
 from math_tutor.harness.model import (
     ProviderFailure, ProviderInvalidResponse, ProviderRateLimited,
     ProviderRequestRejected, ProviderTimeout, ProviderUpstreamUnavailable,
@@ -90,7 +91,27 @@ class OpenResponsesAdapter:
             "propose_skill_update": ({"objective_id": {"type": "string", "enum": list(context.authorised_objective_ids)}}, ["objective_id"]),
             "end_session": ({"reason": {"type": "string"}}, []),
         }
-        return [{"type": "function", "name": name, "description": "Acción pedagógica validada por el harness.", "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False}, "strict": False} for name, (properties, required) in schemas.items()]
+        tools = [{"type": "function", "name": name, "description": "Acción pedagógica validada por el harness.", "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False}, "strict": False} for name, (properties, required) in schemas.items()]
+        policy = getattr(context, "regulation_policy", None)
+        if policy is not None:
+            branches = []
+            for signal in ConversationalSignal:
+                strategies = policy.allowed_for(signal)
+                if strategies:
+                    branches.append({
+                        "type": "object",
+                        "properties": {
+                            "turn_id": {"const": context.current_turn.turn_id},
+                            "signal": {"const": signal.value},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                            "strategy": {"type": "string", "enum": [strategy.value for strategy in strategies]},
+                        },
+                        "required": ["turn_id", "signal", "confidence", "strategy"],
+                        "additionalProperties": False,
+                    })
+            if branches:
+                tools.append({"type": "function", "name": "regulate_conversation", "description": "Señal conversacional provisional y estrategia autorizada; no diagnostica ni evalúa matemáticas.", "parameters": {"type": "object", "oneOf": branches, "additionalProperties": False}, "strict": False})
+        return tools
 
     async def complete(self, *, prompt: str, context, repair: bool, validation_error: str | None = None) -> object:
         tools = self._tools(context)
@@ -105,6 +126,8 @@ class OpenResponsesAdapter:
             "session_limits": {"duration_minutes": context.duration_minutes, "max_activities": context.max_activities},
             "hints_used": context.activity.hints_used, "attempts_used": context.activity.attempts_used,
             "activities_used": context.activities_used,
+            "regulation_policy": None if context.regulation_policy is None else {"allowed_strategies": [strategy.value for strategy in context.regulation_policy.allowed_strategies]},
+            "regulation_state": {"revision": context.regulation_revision, "consecutive_turns": context.consecutive_regulation_turns, "activity_sequence": context.regulation_activity_sequence, "max_consecutive_turns": None if context.regulation_policy is None else context.regulation_policy.max_consecutive_regulation_turns},
             "validation_error": None if validation_error is None else {"code": validation_error},
             "allowed_contract": {tool["name"]: tool["parameters"] for tool in tools},
         }

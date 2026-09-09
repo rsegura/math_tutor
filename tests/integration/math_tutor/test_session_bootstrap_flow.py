@@ -117,6 +117,110 @@ async def test_lazy_model_factory_is_cached_for_normal_turns(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_model_regulation_uses_durable_snapshot_and_canonical_speech(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    seen=[]
+    class RegulationModel:
+        def complete(self,**kwargs):
+            context=kwargs["context"]; seen.append(context)
+            return {"type":"tool","name":"regulate_conversation","arguments":{
+                "turn_id":context.current_turn.turn_id,"signal":"frustrated",
+                "confidence":.91,"strategy":"validate-emotion"}}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=RegulationModel())
+
+    decision=await engine.decide(VoiceTurn("frustrated-1","Esto es muy difícil",.99,Event()))
+
+    assert decision.reason == "regulated"
+    assert decision.speech == "Está bien que cueste. Lo hacemos juntos."
+    assert seen[0].regulation_policy == runtime.bootstrap.plan.regulation_policy
+    assert (seen[0].regulation_revision,seen[0].consecutive_regulation_turns,seen[0].regulation_activity_sequence) == (1,0,0)
+    state=repo.load_state(metadata.tutoring_session_id)
+    assert (state.regulation_revision,state.consecutive_regulation_turns,state.activity_sequence) == (2,1,1)
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_regulation_repeats_prompt_without_durable_mutation(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class RegulationModel:
+        def complete(self,**kwargs):
+            context=kwargs["context"]
+            return {"type":"tool","name":"regulate_conversation","arguments":{
+                "turn_id":context.current_turn.turn_id,"signal":"frustrated",
+                "confidence":.2,"strategy":"validate-emotion"}}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=RegulationModel())
+    before=repo.load_state(metadata.tutoring_session_id)
+    decision=await engine.decide(VoiceTurn("uncertain-regulation","Quizá cuesta",.99,Event()))
+    after=repo.load_state(metadata.tutoring_session_id)
+    assert decision.reason == "low-regulation-confidence"
+    assert decision.speech == engine.initial_prompt
+    assert (after.regulation_revision,after.consecutive_regulation_turns,after.activity_sequence) == (before.regulation_revision,before.consecutive_regulation_turns,before.activity_sequence)
+
+
+@pytest.mark.asyncio
+async def test_evaluated_answer_resets_regulation_count_without_model_reset_tool(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    activity_engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    activity=repo.load_activity(metadata.tutoring_session_id,"activity-1")
+    class SequenceModel:
+        def __init__(self): self.calls=0
+        def complete(self,**kwargs):
+            self.calls += 1
+            context=kwargs["context"]
+            if self.calls == 1:
+                return {"type":"tool","name":"regulate_conversation","arguments":{"turn_id":context.current_turn.turn_id,"signal":"frustrated","confidence":.9,"strategy":"validate-emotion"}}
+            return {"type":"tool","name":"record_answer","arguments":{"turn_id":context.current_turn.turn_id,"answer":{"status":"evaluable","kind":activity.expected_answer.kind.value,"values":dict(activity.expected_answer.values)}}}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SequenceModel())
+    await engine.decide(VoiceTurn("hard","es difícil",.99,Event()))
+    assert repo.load_state(metadata.tutoring_session_id).consecutive_regulation_turns == 1
+    await engine.decide(VoiceTurn("answer","mi respuesta",.99,Event()))
+    assert repo.load_state(metadata.tutoring_session_id).consecutive_regulation_turns == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_regulation_proposal_cannot_mutate_after_newer_deterministic_turn(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    entered=asyncio.Event(); release=asyncio.Event()
+    class DelayedRegulation:
+        async def complete(self,**kwargs):
+            context=kwargs["context"]; entered.set(); await release.wait()
+            return {"type":"tool","name":"regulate_conversation","arguments":{"turn_id":context.current_turn.turn_id,"signal":"frustrated","confidence":.9,"strategy":"validate-emotion"}}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=DelayedRegulation())
+    before=repo.load_state(metadata.tutoring_session_id)
+    older=asyncio.create_task(engine.decide(VoiceTurn("older-regulation","esto cuesta",.99,Event())))
+    await entered.wait()
+    newer=await engine.decide(VoiceTurn("new-low","inaudible",.2,Event()))
+    release.set()
+    with pytest.raises(asyncio.CancelledError): await older
+    after=repo.load_state(metadata.tutoring_session_id)
+    assert newer.needs_confirmation
+    assert (after.regulation_revision,after.consecutive_regulation_turns,after.activity_sequence) == (before.regulation_revision,before.consecutive_regulation_turns,before.activity_sequence)
+
+
+@pytest.mark.asyncio
+async def test_terminal_close_suppresses_in_flight_regulation_result(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    entered=asyncio.Event(); release=asyncio.Event()
+    class DelayedRegulation:
+        async def complete(self,**kwargs):
+            context=kwargs["context"]; entered.set(); await release.wait()
+            return {"type":"tool","name":"regulate_conversation","arguments":{"turn_id":context.current_turn.turn_id,"signal":"frustrated","confidence":.9,"strategy":"validate-emotion"}}
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=DelayedRegulation())
+    pending=asyncio.create_task(engine.decide(VoiceTurn("closing-regulation","esto cuesta",.99,Event())))
+    await entered.wait()
+    engine.force_stop("transport-closed")
+    release.set()
+    with pytest.raises(asyncio.CancelledError): await pending
+    state=repo.load_state(metadata.tutoring_session_id)
+    assert state.session.ended and state.session.end_reason == "transport-closed"
+    assert state.consecutive_regulation_turns == 0
+
+
+@pytest.mark.asyncio
 async def test_help_turn_commits_one_reviewed_hint_without_observation_or_model(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)

@@ -6,6 +6,8 @@ import pytest
 
 from math_tutor.agent.providers.model import OpenResponsesAdapter
 from math_tutor.domain.templates import ExpectedAnswerKind
+from math_tutor.application.provisioning import DEFAULT_REGULATION_POLICY
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
 from math_tutor.harness.loop import _parse
 from math_tutor.harness.contracts import ToolName
 from math_tutor.harness.model import ProviderInvalidResponse, ProviderTimeout
@@ -23,6 +25,10 @@ def context():
         active_objective_ids=("units-tens",),authorised_objective_ids=("units-tens",),
         adaptations=("slow-pace",),duration_minutes=10,max_activities=4,
         activities_used=1,
+        regulation_policy=DEFAULT_REGULATION_POLICY,
+        regulation_revision=3,
+        consecutive_regulation_turns=2,
+        regulation_activity_sequence=4,
     )
 
 
@@ -39,10 +45,40 @@ async def test_adapter_sends_exact_bounded_tool_contract_and_canonical_answer_sh
     values=record["parameters"]["properties"]["answer"]["oneOf"][0]["properties"]["values"]
     assert values["required"] == ["tens","units"]
     assert values["additionalProperties"] is False
-    assert {tool["name"] for tool in call["tools"]} == {"record_answer","give_hint","adapt_difficulty","propose_skill_update","end_session"}
+    assert {tool["name"] for tool in call["tools"]} == {"record_answer","give_hint","adapt_difficulty","propose_skill_update","end_session","regulate_conversation"}
     sent=json.loads(call["input"][1]["content"])
     assert sent["adaptations"] == ["slow-pace"]
     assert sent["session_limits"] == {"duration_minutes":10,"max_activities":4}
+    assert sent["regulation_state"] == {"revision":3,"consecutive_turns":2,"activity_sequence":4,"max_consecutive_turns":4}
+
+
+def test_regulation_schema_exposes_only_current_turn_and_authorised_compatible_pairs():
+    tools=OpenResponsesAdapter._tools(context())
+    regulation=next(tool for tool in tools if tool["name"]=="regulate_conversation")["parameters"]
+    assert regulation["type"] == "object"
+    assert regulation["additionalProperties"] is False
+    branches=regulation["oneOf"]
+    pairs={(branch["properties"]["signal"]["const"], strategy)
+           for branch in branches
+           for strategy in branch["properties"]["strategy"]["enum"]}
+    assert ("frustrated","validate-emotion") in pairs
+    assert ("frustrated","redirect-gently") not in pairs
+    assert all(branch["properties"]["turn_id"] == {"const":"turn-1"} for branch in branches)
+    assert all(branch["properties"]["confidence"] == {"type":"number","minimum":0,"maximum":1} for branch in branches)
+    assert all(branch["required"] == ["turn_id","signal","confidence","strategy"] for branch in branches)
+
+
+def test_regulation_schema_omits_plan_disallowed_strategies():
+    restricted=RegulationPolicy((
+        PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ),3)
+    value=context(); value.regulation_policy=restricted
+    regulation=next(tool for tool in OpenResponsesAdapter._tools(value) if tool["name"]=="regulate_conversation")["parameters"]
+    advertised={strategy for branch in regulation["oneOf"] for strategy in branch["properties"]["strategy"]["enum"]}
+    assert advertised == {"simplify-language","redirect-gently","validate-emotion","take-short-pause"}
 
 
 @pytest.mark.asyncio

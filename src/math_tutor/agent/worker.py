@@ -78,7 +78,10 @@ def _instructions(runtime) -> str:
         f"Dirígete al alumno como {learner.pseudonym}. Estilo: {plan.plan.presentation.language_style}; "
         f"instrucciones: {plan.plan.presentation.instruction_length}. Objetivos autorizados: {objectives}. "
         f"Adaptaciones: {adaptations}. Límites: {plan.limits.duration_minutes} minutos y "
-        f"{plan.limits.max_activities} actividades. Respeta inmediatamente cualquier petición de parar."
+        f"{plan.limits.max_activities} actividades. Interpreta confusión, frustración, rechazo, distracción, "
+        "peticiones de ayuda o pausa solo como señales provisionales del turno actual; nunca como diagnósticos. "
+        "Las estrategias conversacionales deben respetar el contrato y la política del plan. "
+        "Respeta inmediatamente cualquier petición de parar."
     )
 
 

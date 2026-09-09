@@ -79,6 +79,7 @@ class BoundedConversationEngine:
         self._consecutive_llm_failures = 0
         self._limits = limits
         self._llm_total_seconds = runtime.providers.llm_total_seconds
+        self._terminal = False
         self.startup_terminal_reason = self._cap_reason(self._repository.load_session_aggregate(self._bootstrap.session.session_id))
         if self.startup_terminal_reason is not None:
             self._stop(self.startup_terminal_reason)
@@ -143,6 +144,7 @@ class BoundedConversationEngine:
         return None
 
     def _stop(self, reason: str) -> None:
+        self._terminal = True
         state = self._repository.load_state(self._bootstrap.session.session_id)
         if state is None or state.session.ended:
             return
@@ -277,6 +279,9 @@ class BoundedConversationEngine:
         objective = self._curriculum.objective(activity.objective_id)
         hint_text_by_id = {hint.id: hint.text for hint in objective.hints}
         generation = self._runtime.start_generation(aggregate.session.session_id)
+        persisted_state = self._repository.load_state(aggregate.session.session_id)
+        if persisted_state is None:
+            raise RuntimeError("session state is missing")
         context = build_harness_context(
             max_history_turns=4, session_id=aggregate.session.session_id, learner_id=aggregate.session.learner_id,
             expected_session_version=aggregate.session.version, expected_profile_version=aggregate.profile_version,
@@ -290,6 +295,10 @@ class BoundedConversationEngine:
             recent_history=(), current_turn=TurnEvidence(turn.turn_id, turn.text, turn.confidence or 0.0),
             adaptations=self._bootstrap.plan.adaptations, duration_minutes=self._bootstrap.plan.limits.duration_minutes,
             max_activities=self._bootstrap.plan.limits.max_activities, activities_used=len(aggregate.activities),
+            regulation_policy=self._bootstrap.plan.regulation_policy,
+            regulation_revision=persisted_state.regulation_revision,
+            consecutive_regulation_turns=persisted_state.consecutive_regulation_turns,
+            regulation_activity_sequence=persisted_state.activity_sequence,
         )
         if stop_requested:
             decision = self._registry.execute(ToolProposal(ToolName.END_SESSION, {"reason": "stop-requested"}), context)
@@ -356,6 +365,9 @@ class BoundedConversationEngine:
             await self._cancel_llm_turn(epoch, generation.generation_id)
             raise
         except (ProviderFailure, HarnessProposalInvalid, HarnessContractExhausted) as failure:
+            if self._terminal:
+                await self._cancel_llm_turn(epoch, generation.generation_id)
+                raise asyncio.CancelledError
             count = await self._llm_failed(epoch, generation.generation_id)
             if count is None:
                 raise asyncio.CancelledError
@@ -381,6 +393,9 @@ class BoundedConversationEngine:
         except Exception:
             await self._cancel_llm_turn(epoch, generation.generation_id)
             raise
+        if self._terminal:
+            await self._cancel_llm_turn(epoch, generation.generation_id)
+            raise asyncio.CancelledError
         if not await self._llm_succeeded(epoch):
             raise asyncio.CancelledError
         cap = self._runtime_cap_reason()

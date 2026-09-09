@@ -8,6 +8,7 @@ from math_tutor.agent.providers.model import OpenResponsesAdapter, build_model_a
 from math_tutor.harness.model import ProviderInvalidResponse, ProviderRateLimited, ProviderRequestRejected, ProviderTimeout, ProviderUpstreamUnavailable
 from math_tutor.agent.providers.settings import ProviderSettings
 from math_tutor.domain.templates import ExpectedAnswerKind
+from math_tutor.application.provisioning import DEFAULT_REGULATION_POLICY
 
 
 class Responses:
@@ -35,6 +36,8 @@ def context():
         activity=SimpleNamespace(activity_id="activity-1", template_id="place-value-1", objective_id="units-tens", difficulty=2, prompt_es="Pregunta", expected_answer_kind=ExpectedAnswerKind.INTEGER_PAIR, expected_answer_fields=("tens", "units"), hints_used=0, attempts_used=0),
         active_objective_ids=("units-tens",), authorised_objective_ids=("units-tens",),
         adaptations=("slow-pace",), duration_minutes=10, max_activities=4, activities_used=1,
+        regulation_policy=DEFAULT_REGULATION_POLICY, regulation_revision=0,
+        consecutive_regulation_turns=0, regulation_activity_sequence=0,
     )
 
 

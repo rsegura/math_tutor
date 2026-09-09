@@ -90,6 +90,7 @@ class HarnessContext:
     regulation_policy: RegulationPolicy | None = None
     regulation_revision: int = 0
     consecutive_regulation_turns: int = 0
+    regulation_activity_sequence: int = 0
     def __post_init__(self) -> None:
         if self.child_safe_policy != CHILD_SAFE_POLICY: raise ContextError("child safe policy is fixed")
         for value, label in ((self.session_id,"session id"),(self.learner_id,"learner id"),(self.generation_id,"generation id")): _clean(value,label)
@@ -106,7 +107,7 @@ class HarnessContext:
         if isinstance(self.max_activities, bool) or not isinstance(self.max_activities, int) or not 1 <= self.max_activities <= 20: raise ContextError("maximum activities out of range")
         if isinstance(self.activities_used, bool) or not isinstance(self.activities_used, int) or not 0 <= self.activities_used <= self.max_activities: raise ContextError("activities used out of range")
         if self.regulation_policy is not None and not isinstance(self.regulation_policy, RegulationPolicy): raise ContextError("regulation policy must be typed")
-        for name in ("regulation_revision", "consecutive_regulation_turns"):
+        for name in ("regulation_revision", "consecutive_regulation_turns", "regulation_activity_sequence"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0: raise ContextError(f"{name.replace('_', ' ')} must be nonnegative")
         if self.regulation_policy is not None and self.consecutive_regulation_turns > self.regulation_policy.max_consecutive_regulation_turns: raise ContextError("consecutive regulation turns exceed policy cap")
@@ -114,10 +115,10 @@ class HarnessContext:
 def build_harness_context(*, max_history_turns: int, max_history_chars: int = _MAX_HISTORY_CHARS, **values: object) -> HarnessContext:
     if isinstance(max_history_turns, bool) or not isinstance(max_history_turns, int) or max_history_turns < 0: raise ContextError("max history turns must be a nonnegative integer")
     if isinstance(max_history_chars, bool) or not isinstance(max_history_chars, int) or max_history_chars < 0: raise ContextError("max history chars must be a nonnegative integer")
-    allowed = {"session_id", "learner_id", "expected_session_version", "expected_profile_version", "generation_id", "authorised_objective_ids", "active_objective_ids", "activity", "learner_state", "recent_history", "current_turn", "adaptations", "duration_minutes", "max_activities", "activities_used", "regulation_policy", "regulation_revision", "consecutive_regulation_turns"}
+    allowed = {"session_id", "learner_id", "expected_session_version", "expected_profile_version", "generation_id", "authorised_objective_ids", "active_objective_ids", "activity", "learner_state", "recent_history", "current_turn", "adaptations", "duration_minutes", "max_activities", "activities_used", "regulation_policy", "regulation_revision", "consecutive_regulation_turns", "regulation_activity_sequence"}
     unknown = set(values) - allowed
     if unknown: raise ContextError(f"unknown context field: {sorted(unknown)[0]}")
-    missing = allowed - {"adaptations", "duration_minutes", "max_activities", "activities_used", "regulation_policy", "regulation_revision", "consecutive_regulation_turns"} - set(values)
+    missing = allowed - {"adaptations", "duration_minutes", "max_activities", "activities_used", "regulation_policy", "regulation_revision", "consecutive_regulation_turns", "regulation_activity_sequence"} - set(values)
     if missing: raise ContextError(f"missing context field: {sorted(missing)[0]}")
     history = tuple(values.pop("recent_history"))
     for item in history: _clean(item, "history")

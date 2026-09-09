@@ -98,8 +98,10 @@ def test_context_carries_bounded_regulation_snapshot():
         recent_history=(), current_turn=TurnEvidence("turn", "No entiendo", .9),
         max_history_turns=2, regulation_policy=DEFAULT_REGULATION_POLICY,
         regulation_revision=7, consecutive_regulation_turns=3,
+        regulation_activity_sequence=9,
     )
 
     assert context.regulation_policy is DEFAULT_REGULATION_POLICY
     assert context.regulation_revision == 7
     assert context.consecutive_regulation_turns == 3
+    assert context.regulation_activity_sequence == 9
