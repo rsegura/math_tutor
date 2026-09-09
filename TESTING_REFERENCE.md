@@ -177,8 +177,9 @@ pause, an emotional-but-evaluable answer false positive, a disallowed strategy
 repair, the consecutive-turn cap, privacy-safe replay, an executable stale-turn
 race, and runtime reconstruction after a simulated crash. The latter two use
 explicit `concurrent-stale` and `crash-reopen` execution modes while retaining
-deterministic fixtures. Concurrent mode requires exactly two turns, bounds both
-coordination waits, cancels and gathers the old task in `finally`, and reports
+deterministic fixtures. Concurrent mode requires exactly two turns, bounds the
+old-turn entry barrier as well as both turn completions, blocks only the declared
+old turn at the model boundary, cancels and gathers it in `finally`, and reports
 `scenario-id.concurrent-stale-timeout` instead of hanging the gate. Its schema
 rejects unknown and missing fields so fixtures cannot silently drift.
 

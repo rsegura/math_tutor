@@ -599,16 +599,20 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
             if len(scenario.turns) != 2:
                 raise EvalScenarioError("concurrent-stale mode requires exactly two turns")
             entered, release = asyncio.Event(), asyncio.Event()
+            old_turn_id = f"{scenario.scenario_id}-{scenario.turns[0].turn_id}"
             original_complete = model.complete
             async def blocked_complete(**kwargs):
-                entered.set()
-                await release.wait()
+                if kwargs["context"].current_turn.turn_id == old_turn_id:
+                    entered.set()
+                    await release.wait()
                 return await original_complete(**kwargs)
             model.complete = blocked_complete
             older = asyncio.create_task(execute(scenario.turns[0]))
             try:
                 await asyncio.wait_for(entered.wait(), _CONCURRENT_WAIT_SECONDS)
-                await execute(scenario.turns[1])
+                await asyncio.wait_for(
+                    execute(scenario.turns[1]), _CONCURRENT_WAIT_SECONDS,
+                )
                 release.set()
                 try:
                     await asyncio.wait_for(older, _CONCURRENT_WAIT_SECONDS)

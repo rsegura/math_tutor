@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 import inspect
 from dataclasses import replace
@@ -327,6 +328,28 @@ def test_concurrent_stale_timeout_is_a_named_hard_failure(tmp_path, monkeypatch)
     monkeypatch.setattr(runner, "_CONCURRENT_WAIT_SECONDS", 0)
 
     report = run_evaluation((scenario,), database_path=tmp_path / "stale-timeout.db")
+
+    assert "regulation-stale-concurrency.concurrent-stale-timeout" in report.hard_failures
+
+
+def test_concurrent_stale_newer_model_deadlock_is_bounded(tmp_path, monkeypatch):
+    import evals.math_tutor.runner as runner
+    original = runner.ProductionFakeModelAdapter.complete
+
+    async def block_newer(self, *, context, **kwargs):
+        if context.current_turn.turn_id.endswith("-new"):
+            await asyncio.Event().wait()
+        return await original(self, context=context, **kwargs)
+
+    monkeypatch.setattr(runner.ProductionFakeModelAdapter, "complete", block_newer)
+    monkeypatch.setattr(runner, "_CONCURRENT_WAIT_SECONDS", 0.01)
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "regulation-stale-concurrency")
+    newer = replace(scenario.turns[1], stt_confidence=.99)
+
+    report = run_evaluation(
+        (replace(scenario, turns=(scenario.turns[0], newer)),),
+        database_path=tmp_path / "newer-deadlock.db",
+    )
 
     assert "regulation-stale-concurrency.concurrent-stale-timeout" in report.hard_failures
 
