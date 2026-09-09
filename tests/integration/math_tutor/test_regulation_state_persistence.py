@@ -18,7 +18,7 @@ from math_tutor.domain.learning import (
     AssistanceThreshold, CompetencyState, LearningPlan, LearningSession,
     PresentationProfile, ProgressionPolicy, SkillEstimate,
 )
-from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, PedagogicalStrategy
+from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, PedagogicalStrategy, RegulationPolicy
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
@@ -75,7 +75,7 @@ def regulate(service, runtime, *, number, revision, strategy=PedagogicalStrategy
         generation_id=generation.generation_id, turn_id=f"turn-{number}",
         activity_id="activity", expected_regulation_revision=revision,
         signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.HIGH,
-        strategy=strategy, max_consecutive_regulation_turns=4,
+        strategy=strategy, regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
         presentation=("short",), adaptations=(),
     ))
 

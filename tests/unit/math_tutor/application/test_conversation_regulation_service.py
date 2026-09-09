@@ -24,6 +24,7 @@ from math_tutor.domain.regulation import (
     ConfidenceBand,
     ConversationalSignal,
     PedagogicalStrategy,
+    RegulationPolicy,
 )
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
@@ -87,7 +88,7 @@ def command(strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE, **changes):
         expected_profile_version=1, generation_id="gen-1", turn_id="turn-1",
         activity_id="activity", expected_regulation_revision=2,
         signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.MEDIUM,
-        strategy=strategy, max_consecutive_regulation_turns=4,
+        strategy=strategy, regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
         presentation=("clear-and-encouraging",), adaptations=(),
     )
     values.update(changes)
@@ -141,16 +142,40 @@ def test_exhausted_ordered_hint_falls_back_to_canonical_simplification():
     assert repository.batches[0].activity_progress == ()
 
 
-def test_missing_reviewed_hint_content_fails_closed_without_mutation():
+def test_exhausted_hint_uses_authorised_repeat_when_simplify_is_disabled():
+    repository = Repository()
+    repository.state = replace(
+        repository.state,
+        activity_progress=(replace(repository.state.activity_progress[0], hints_used=1),),
+    )
+    runtime = SessionRuntime(); runtime.start_generation("session")
+    policy = RegulationPolicy((
+        PedagogicalStrategy.GIVE_ORDERED_HINT,
+        PedagogicalStrategy.REPEAT_INSTRUCTION,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 4)
+
+    result = make_service(repository, runtime).commit_regulation(command(
+        PedagogicalStrategy.GIVE_ORDERED_HINT, regulation_policy=policy,
+    ))
+
+    assert result.payload.executed_action is ExecutedRegulationAction.REPEAT_INSTRUCTION
+    assert result.payload.speech == "¿Cuántas unidades hay?"
+    assert repository.batches[0].regulation_mutation.pending_event.strategy is ExecutedRegulationAction.REPEAT_INSTRUCTION
+
+
+def test_missing_reviewed_hint_content_uses_authorised_durable_fallback():
     repository = Repository(); runtime = SessionRuntime(); runtime.start_generation("session")
     tutor = make_service(repository, runtime)
     tutor._reviewed_hint_texts = {}
 
     result = tutor.commit_regulation(command(PedagogicalStrategy.GIVE_ORDERED_HINT))
 
-    assert result.status is CommandStatus.REJECTED
-    assert result.reason == "canonical-hint-text-missing"
-    assert repository.batches == []
+    assert result.status is CommandStatus.APPLIED
+    assert result.payload.executed_action is ExecutedRegulationAction.SIMPLIFY_LANGUAGE
+    assert repository.batches[0].activity_progress == ()
 
 
 def test_short_instruction_profile_selects_a_reviewed_concise_variant():

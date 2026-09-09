@@ -25,8 +25,9 @@ from math_tutor.application.ports import (
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.application.regulation import (
     CanonicalHintTextMissing,
+    NoAuthorisedRegulationFallback,
     RegulationResult,
-    canonical_regulation_speech,
+    plan_regulation_response,
     select_next_reviewed_hint,
 )
 from math_tutor.application.session_runtime import SessionRuntime
@@ -96,7 +97,7 @@ class CommitRegulation(Command):
     signal: ConversationalSignal
     confidence_band: ConfidenceBand
     strategy: PedagogicalStrategy
-    max_consecutive_regulation_turns: int
+    regulation_policy: RegulationPolicy
     presentation: tuple[str, ...]
     adaptations: tuple[str, ...]
 
@@ -428,11 +429,7 @@ class TutoringService:
             or command.strategy not in compatible_strategies(command.signal)
         ):
             return self._rejected(command, "invalid-regulation-command")
-        if (
-            isinstance(command.max_consecutive_regulation_turns, bool)
-            or not isinstance(command.max_consecutive_regulation_turns, int)
-            or command.max_consecutive_regulation_turns < 1
-        ):
+        if not isinstance(command.regulation_policy, RegulationPolicy):
             return self._rejected(command, "invalid-regulation-command")
         try:
             activity = self._repository.load_activity(command.session_id, command.activity_id)
@@ -444,55 +441,39 @@ class TutoringService:
             return self._rejected(command, "objective-not-authorised")
 
         progress, existed = self._progress(state, command.activity_id, activity.difficulty)
-        strategy = command.strategy
         progress_changes = ()
         expected_progress = ()
         events = ()
-        if state.consecutive_regulation_turns >= command.max_consecutive_regulation_turns:
-            speech = "¿Quieres continuar o hacer una pausa?"
-            next_count = command.max_consecutive_regulation_turns
-            executed_action = ExecutedRegulationAction.CAP_CHOICE
-        else:
-            next_count = state.consecutive_regulation_turns + 1
-            if strategy is PedagogicalStrategy.GIVE_ORDERED_HINT:
-                try:
-                    selection = select_next_reviewed_hint(
-                        activity, progress,
-                        max_hints=self._pedagogical_policy.max_hints_per_activity,
-                        reviewed_hint_texts=self._reviewed_hint_texts,
-                    )
-                except CanonicalHintTextMissing:
-                    return self._rejected(command, "canonical-hint-text-missing")
-                if selection is None:
-                    strategy = PedagogicalStrategy.SIMPLIFY_LANGUAGE
-                    try:
-                        speech = canonical_regulation_speech(
-                            strategy, prompt=activity.prompt_es,
-                            presentation=command.presentation,
-                            adaptations=command.adaptations,
-                        )
-                    except ValueError:
-                        return self._rejected(command, "invalid-regulation-presentation")
-                else:
-                    progress, expected_progress = self._progress_changes(
-                        progress, existed, hints_used=progress.hints_used + 1
-                    )
-                    progress_changes = (progress,)
-                    events = (TutoringEvent(
-                        "hint-committed", command.session_id, activity.objective_id,
-                        command.activity_id, selection.hint_id,
-                    ),)
-                    speech = f"{selection.speech} {activity.prompt_es}"
-            else:
-                try:
-                    speech = canonical_regulation_speech(
-                        strategy, prompt=activity.prompt_es,
-                        presentation=command.presentation,
-                        adaptations=command.adaptations,
-                    )
-                except ValueError:
-                    return self._rejected(command, "invalid-regulation-presentation")
-            executed_action = ExecutedRegulationAction(strategy.value)
+        try:
+            plan = plan_regulation_response(
+                signal=command.signal, requested_strategy=command.strategy,
+                policy=command.regulation_policy,
+                consecutive_turns=state.consecutive_regulation_turns,
+                activity=activity, progress=progress,
+                max_hints=self._pedagogical_policy.max_hints_per_activity,
+                reviewed_hint_texts=self._reviewed_hint_texts,
+                presentation=command.presentation, adaptations=command.adaptations,
+            )
+        except NoAuthorisedRegulationFallback as error:
+            return self._rejected(command, str(error))
+        except ValueError:
+            return self._rejected(command, "invalid-regulation-presentation")
+        if plan.hint is not None:
+            progress, expected_progress = self._progress_changes(
+                progress, existed, hints_used=progress.hints_used + 1
+            )
+            progress_changes = (progress,)
+            events = (TutoringEvent(
+                "hint-committed", command.session_id, activity.objective_id,
+                command.activity_id, plan.hint.hint_id,
+            ),)
+        executed_action = plan.executed_action
+        speech = plan.speech
+        next_count = (
+            command.regulation_policy.max_consecutive_regulation_turns
+            if executed_action is ExecutedRegulationAction.CAP_CHOICE
+            else state.consecutive_regulation_turns + 1
+        )
 
         revision = state.regulation_revision + 1
         pending = PendingRegulationEvent(
@@ -546,67 +527,47 @@ class TutoringService:
             return self._rejected(command, "invalid-regulation-command")
         progress, existed = self._progress(state, command.activity_id, activity.difficulty)
         cap = command.regulation_policy.max_consecutive_regulation_turns
-        at_cap = state.consecutive_regulation_turns >= cap
-        allowed = set(command.regulation_policy.allowed_for(ConversationalSignal.REQUESTING_HELP))
-        can_hint = (
-            not at_cap
-            and PedagogicalStrategy.GIVE_ORDERED_HINT in allowed
-            and
-            progress.hints_used < self._pedagogical_policy.max_hints_per_activity
-            and progress.hints_used < len(activity.hint_ids)
-        )
-        speech = None
-        if can_hint:
-            hint_id = activity.hint_ids[progress.hints_used]
-            speech = self._reviewed_hint_texts.get(hint_id)
-            can_hint = isinstance(speech, str) and bool(speech.strip())
-        if at_cap:
-            speech = "¿Quieres continuar o hacer una pausa?"
-            action = ExecutedRegulationAction.CAP_CHOICE
-            receipt_action = "repeat"
-            expected_progress = ()
-            progress_changes = ()
-            events = ()
-            session = None
-        elif can_hint:
+        try:
+            plan = plan_regulation_response(
+                signal=ConversationalSignal.REQUESTING_HELP,
+                requested_strategy=None,
+                policy=command.regulation_policy,
+                consecutive_turns=state.consecutive_regulation_turns,
+                activity=activity, progress=progress,
+                max_hints=self._pedagogical_policy.max_hints_per_activity,
+                reviewed_hint_texts=self._reviewed_hint_texts,
+                presentation=command.presentation, adaptations=command.adaptations,
+            )
+        except NoAuthorisedRegulationFallback as error:
+            return self._rejected(command, str(error))
+        except ValueError:
+            return self._rejected(command, "invalid-regulation-presentation")
+        action, speech = plan.executed_action, plan.speech
+        if plan.hint is not None:
             progress, expected_progress = self._progress_changes(
                 progress, existed, hints_used=progress.hints_used + 1
             )
             session = replace(state.session, version=state.session.version + 1)
-            speech = f"{speech} {activity.prompt_es}"
-            action = ExecutedRegulationAction.GIVE_ORDERED_HINT
             receipt_action = "hint"
             progress_changes = (progress,)
             events = (TutoringEvent("hint-committed", command.session_id,
-                                    activity.objective_id, command.activity_id, hint_id),)
-        elif PedagogicalStrategy.SIMPLIFY_LANGUAGE in allowed:
-            speech = canonical_regulation_speech(
-                PedagogicalStrategy.SIMPLIFY_LANGUAGE,
-                prompt=activity.prompt_es,
-                presentation=command.presentation,
-                adaptations=command.adaptations,
-            )
-            action = ExecutedRegulationAction.SIMPLIFY_LANGUAGE
-            receipt_action = action.value
-            expected_progress = ()
-            progress_changes = ()
-            events = ()
-            session = None
-        elif PedagogicalStrategy.REPEAT_INSTRUCTION in allowed:
-            speech = activity.prompt_es
-            action = ExecutedRegulationAction.REPEAT_INSTRUCTION
-            receipt_action = "repeat"
-            expected_progress = ()
-            progress_changes = ()
-            events = ()
-            session = None
+                                    activity.objective_id, command.activity_id,
+                                    plan.hint.hint_id),)
         else:
-            return self._rejected(command, "no-authorised-help-fallback")
+            receipt_action = (
+                "repeat" if action is ExecutedRegulationAction.REPEAT_INSTRUCTION
+                else action.value
+            )
+            expected_progress = progress_changes = events = ()
+            session = None
         receipt = LearnerSupportReceipt(
             command.session_id, command.turn_id, command.activity_id,
             receipt_action, speech,
         )
-        next_count = min(cap, state.consecutive_regulation_turns + (0 if at_cap else 1))
+        next_count = min(
+            cap, state.consecutive_regulation_turns
+            + (0 if action is ExecutedRegulationAction.CAP_CHOICE else 1),
+        )
         pending = PendingRegulationEvent(
             f"regulation-{command.session_id}-{command.turn_id}", command.turn_id,
             command.activity_id, ConversationalSignal.REQUESTING_HELP,

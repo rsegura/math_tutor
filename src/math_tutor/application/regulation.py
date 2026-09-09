@@ -7,7 +7,10 @@ from typing import Mapping
 
 from math_tutor.application.ports import ActivityProgress
 from math_tutor.domain.activities import Activity
-from math_tutor.domain.regulation import ExecutedRegulationAction, PedagogicalStrategy
+from math_tutor.domain.regulation import (
+    ConversationalSignal, ExecutedRegulationAction, PedagogicalStrategy,
+    RegulationPolicy,
+)
 
 _PRESENTATION_VALUES = frozenset({
     "concrete-and-playful", "clear-and-encouraging", "age-respectful",
@@ -32,7 +35,18 @@ class RegulationResult:
     regulation_revision: int
 
 
+@dataclass(frozen=True, slots=True)
+class RegulationDecisionPlan:
+    speech: str
+    executed_action: ExecutedRegulationAction
+    hint: HintSelection | None = None
+
+
 class CanonicalHintTextMissing(ValueError):
+    pass
+
+
+class NoAuthorisedRegulationFallback(ValueError):
     pass
 
 
@@ -87,3 +101,66 @@ def canonical_regulation_speech(
     if strategy is PedagogicalStrategy.TAKE_SHORT_PAUSE:
         return "Hacemos una pausa corta. Cuando estés preparado, seguimos."
     raise ValueError("canonical-regulation-content-missing")
+
+
+def plan_regulation_response(
+    *,
+    signal: ConversationalSignal,
+    requested_strategy: PedagogicalStrategy | None,
+    policy: RegulationPolicy,
+    consecutive_turns: int,
+    activity: Activity,
+    progress: ActivityProgress,
+    max_hints: int,
+    reviewed_hint_texts: Mapping[str, str],
+    presentation: tuple[str, ...],
+    adaptations: tuple[str, ...],
+) -> RegulationDecisionPlan:
+    """Choose one authorised, reviewed response for every regulation entry path."""
+
+    if not isinstance(policy, RegulationPolicy):
+        raise NoAuthorisedRegulationFallback("invalid-regulation-policy")
+    allowed = set(policy.allowed_for(signal))
+    if requested_strategy is None:
+        requested_strategy = next((candidate for candidate in (
+            PedagogicalStrategy.GIVE_ORDERED_HINT,
+            PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+            PedagogicalStrategy.REPEAT_INSTRUCTION,
+        ) if candidate in allowed), None)
+        if requested_strategy is None:
+            raise NoAuthorisedRegulationFallback("no-authorised-help-fallback")
+    elif requested_strategy not in allowed:
+        raise NoAuthorisedRegulationFallback("strategy-not-authorised")
+    if consecutive_turns >= policy.max_consecutive_regulation_turns:
+        return RegulationDecisionPlan(
+            "¿Quieres continuar o hacer una pausa?",
+            ExecutedRegulationAction.CAP_CHOICE,
+        )
+
+    strategy = requested_strategy
+    if strategy is PedagogicalStrategy.GIVE_ORDERED_HINT:
+        try:
+            hint = select_next_reviewed_hint(
+                activity, progress, max_hints=max_hints,
+                reviewed_hint_texts=reviewed_hint_texts,
+            )
+        except CanonicalHintTextMissing:
+            hint = None
+        if hint is not None:
+            return RegulationDecisionPlan(
+                f"{hint.speech} {activity.prompt_es}",
+                ExecutedRegulationAction.GIVE_ORDERED_HINT,
+                hint,
+            )
+        strategy = next((candidate for candidate in (
+            PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+            PedagogicalStrategy.REPEAT_INSTRUCTION,
+        ) if candidate in allowed), None)
+        if strategy is None:
+            raise NoAuthorisedRegulationFallback("no-authorised-help-fallback")
+
+    speech = canonical_regulation_speech(
+        strategy, prompt=activity.prompt_es, presentation=presentation,
+        adaptations=adaptations,
+    )
+    return RegulationDecisionPlan(speech, ExecutedRegulationAction(strategy.value))

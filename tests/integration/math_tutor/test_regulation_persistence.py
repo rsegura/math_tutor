@@ -45,7 +45,7 @@ def _regulate(repo, runtime, service, number, signal=ConversationalSignal.CONFUS
     state = repo.load_state("session")
     generation = runtime.start_generation("session")
     strategy = PedagogicalStrategy.VALIDATE_EMOTION if signal is ConversationalSignal.FRUSTRATED else PedagogicalStrategy.SIMPLIFY_LANGUAGE
-    return service.commit_regulation(CommitRegulation(command_id=f"regulate-{number}", session_id="session", expected_session_version=state.session.version, expected_profile_version=1, generation_id=generation.generation_id, turn_id=f"turn-{number}", activity_id="activity", expected_regulation_revision=state.regulation_revision, signal=signal, confidence_band=ConfidenceBand.HIGH, strategy=strategy, max_consecutive_regulation_turns=4, presentation=("short",), adaptations=()))
+    return service.commit_regulation(CommitRegulation(command_id=f"regulate-{number}", session_id="session", expected_session_version=state.session.version, expected_profile_version=1, generation_id=generation.generation_id, turn_id=f"turn-{number}", activity_id="activity", expected_regulation_revision=state.regulation_revision, signal=signal, confidence_band=ConfidenceBand.HIGH, strategy=strategy, regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4), presentation=("short",), adaptations=()))
 
 
 def _rows(repo):
@@ -73,7 +73,7 @@ def test_low_priority_turns_promote_exactly_on_second_and_advance_on_third(tmp_p
 def test_high_priority_materializes_immediately_and_replay_is_exactly_idempotent(tmp_path):
     _, repo, runtime, service = _setup(tmp_path)
     generation = runtime.start_generation("session")
-    command = CommitRegulation(command_id="regulate-1", session_id="session", expected_session_version=1, expected_profile_version=1, generation_id=generation.generation_id, turn_id="turn-1", activity_id="activity", expected_regulation_revision=0, signal=ConversationalSignal.FRUSTRATED, confidence_band=ConfidenceBand.HIGH, strategy=PedagogicalStrategy.VALIDATE_EMOTION, max_consecutive_regulation_turns=4, presentation=("short",), adaptations=())
+    command = CommitRegulation(command_id="regulate-1", session_id="session", expected_session_version=1, expected_profile_version=1, generation_id=generation.generation_id, turn_id="turn-1", activity_id="activity", expected_regulation_revision=0, signal=ConversationalSignal.FRUSTRATED, confidence_band=ConfidenceBand.HIGH, strategy=PedagogicalStrategy.VALIDATE_EMOTION, regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4), presentation=("short",), adaptations=())
     result = service.commit_regulation(command)
     before = (repo.load_state("session"), _rows(repo))
     replay = service.commit_regulation(command)
@@ -169,7 +169,7 @@ def test_stale_revision_and_stale_generation_create_no_event_or_receipt(tmp_path
         activity_id="activity", expected_regulation_revision=0,
         signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.HIGH,
         strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
-        max_consecutive_regulation_turns=4, presentation=("short",), adaptations=(),
+        regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4), presentation=("short",), adaptations=(),
     ))
     current = runtime.start_generation("session")
     stale_revision = service.commit_regulation(CommitRegulation(
@@ -179,7 +179,7 @@ def test_stale_revision_and_stale_generation_create_no_event_or_receipt(tmp_path
         activity_id="activity", expected_regulation_revision=1,
         signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.HIGH,
         strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
-        max_consecutive_regulation_turns=4, presentation=("short",), adaptations=(),
+        regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4), presentation=("short",), adaptations=(),
     ))
     assert stale_generation.reason == "generation-not-active"
     assert stale_revision.reason == "stale-regulation-revision"
@@ -400,3 +400,58 @@ def test_impossible_corrupt_help_policy_fails_closed_without_mutation_or_speech(
     )
     assert repo.load_state("session") == before
     assert repo.load_command_result("corrupt-policy") is None
+
+
+def _commit_llm_help(repo, runtime, service, *, turn_id, policy):
+    state = repo.load_state("session"); generation = runtime.start_generation("session")
+    return service.commit_regulation(CommitRegulation(
+        command_id=f"llm-{turn_id}", session_id="session",
+        expected_session_version=state.session.version, expected_profile_version=1,
+        generation_id=generation.generation_id, turn_id=turn_id,
+        activity_id="activity", expected_regulation_revision=state.regulation_revision,
+        signal=ConversationalSignal.REQUESTING_HELP,
+        confidence_band=ConfidenceBand.HIGH,
+        strategy=PedagogicalStrategy.GIVE_ORDERED_HINT,
+        regulation_policy=policy, presentation=("short",), adaptations=(),
+    ))
+
+
+def test_llm_exhausted_hint_persists_authorised_repeat_not_simplify(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path); _set_hint_exhausted(repo)
+    policy = RegulationPolicy((
+        PedagogicalStrategy.GIVE_ORDERED_HINT,
+        PedagogicalStrategy.REPEAT_INSTRUCTION,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 4)
+    first = _commit_llm_help(repo, runtime, service, turn_id="fallback-1", policy=policy)
+    second = _commit_llm_help(repo, runtime, service, turn_id="fallback-2", policy=policy)
+    assert first.payload.executed_action is ExecutedRegulationAction.REPEAT_INSTRUCTION
+    assert second.payload.executed_action is ExecutedRegulationAction.REPEAT_INSTRUCTION
+    events = repo.load_regulation_events("session")
+    assert [event.strategy for event in events] == [
+        ExecutedRegulationAction.REPEAT_INSTRUCTION,
+        ExecutedRegulationAction.REPEAT_INSTRUCTION,
+    ]
+
+
+def test_llm_and_deterministic_help_share_hint_selection_and_canonical_speech(tmp_path):
+    _, support_repo, support_runtime, support_service = _setup(tmp_path / "support")
+    _, llm_repo, llm_runtime, llm_service = _setup(tmp_path / "llm")
+    policy = RegulationPolicy(tuple(PedagogicalStrategy), 4)
+    generation = support_runtime.start_generation("session")
+    support = support_service.support_learner(SupportLearner(
+        command_id="support-parity", session_id="session", expected_session_version=1,
+        expected_profile_version=1, generation_id=generation.generation_id,
+        turn_id="parity", activity_id="activity", regulation_policy=policy,
+        presentation=("short",), adaptations=(),
+    ))
+    llm = _commit_llm_help(
+        llm_repo, llm_runtime, llm_service, turn_id="parity", policy=policy,
+    )
+    assert support.payload.speech == llm.payload.speech
+    assert support_repo.load_state("session").progress_for("activity").hints_used == 1
+    assert llm_repo.load_state("session").progress_for("activity").hints_used == 1
+    assert support_repo.load_state("session").pending_regulation_event.strategy is ExecutedRegulationAction.GIVE_ORDERED_HINT
+    assert llm_repo.load_state("session").pending_regulation_event.strategy is ExecutedRegulationAction.GIVE_ORDERED_HINT
