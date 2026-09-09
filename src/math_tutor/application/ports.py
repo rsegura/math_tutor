@@ -170,8 +170,10 @@ class LearnerSupportReceipt:
         for name in ("session_id", "turn_id", "activity_id", "speech"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f"{name.replace('_', ' ')} must be nonempty")
-        if self.action not in {"hint", "repeat"}:
-            raise ValueError("support action must be hint or repeat")
+        if self.action not in {
+            "hint", "repeat", "simplify-language", "cap-choice",
+        }:
+            raise ValueError("support action must be a closed canonical action")
 
 
 @dataclass(frozen=True, slots=True)

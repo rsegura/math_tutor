@@ -328,6 +328,12 @@ class BoundedConversationEngine:
                     generation_id=generation.generation_id,
                     turn_id=turn.turn_id,
                     activity_id=activity_id,
+                    regulation_policy=self._bootstrap.plan.regulation_policy,
+                    presentation=(
+                        self._bootstrap.plan.plan.presentation.language_style,
+                        self._bootstrap.plan.plan.presentation.instruction_length,
+                    ),
+                    adaptations=self._bootstrap.plan.adaptations,
                 ))
             if getattr(result.status, "value", None) not in {"applied", "replayed"}:
                 receipt = await self._await_support_receipt(

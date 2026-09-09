@@ -88,6 +88,11 @@ def test_regulation_state_accumulates_persists_across_restart_and_caps(tmp_path)
     assert result.payload.executed_action is ExecutedRegulationAction.CAP_CHOICE
     state = SQLiteTutoringRepository(path).load_state("session")
     assert (state.regulation_revision, state.consecutive_regulation_turns, state.activity_sequence) == (5, 4, 5)
+    assert state.pending_regulation_event.ordinal == 5
+    events = SQLiteTutoringRepository(path).load_regulation_events("session")
+    assert [event.ordinal for event in events] == [1, 2, 3, 4, 5]
+    assert events[-2].outcome.value == "repeated_difficulty"
+    assert events[-1].strategy is ExecutedRegulationAction.CAP_CHOICE
 
 
 def test_distinct_commands_with_the_same_regulation_revision_conflict(tmp_path):
@@ -115,3 +120,6 @@ def test_ordered_hint_and_regulation_revision_roll_back_together(tmp_path):
     state = repo.load_state("session")
     assert state.regulation_revision == 0
     assert state.progress_for("activity").hints_used == 0
+    assert state.pending_regulation_event is None
+    assert repo.load_regulation_events("session") == ()
+    assert repo.load_command_result("regulate-1") is None

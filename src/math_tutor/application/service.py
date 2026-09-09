@@ -45,6 +45,7 @@ from math_tutor.domain.regulation import (
     ConversationalSignal,
     ExecutedRegulationAction,
     PedagogicalStrategy,
+    RegulationPolicy,
     compatible_strategies,
 )
 
@@ -82,7 +83,9 @@ class CommitHint(Command):
 class SupportLearner(Command):
     turn_id: str
     activity_id: str
-    max_consecutive_regulation_turns: int = 4
+    regulation_policy: RegulationPolicy
+    presentation: tuple[str, ...]
+    adaptations: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -539,17 +542,15 @@ class TutoringService:
             return self._rejected(command, "activity-not-found")
         if activity.objective_id not in state.session.authorised_objective_ids:
             return self._rejected(command, "objective-not-authorised")
-        if (
-            isinstance(command.max_consecutive_regulation_turns, bool)
-            or not isinstance(command.max_consecutive_regulation_turns, int)
-            or command.max_consecutive_regulation_turns < 1
-        ):
+        if not isinstance(command.regulation_policy, RegulationPolicy):
             return self._rejected(command, "invalid-regulation-command")
         progress, existed = self._progress(state, command.activity_id, activity.difficulty)
-        cap = command.max_consecutive_regulation_turns
+        cap = command.regulation_policy.max_consecutive_regulation_turns
         at_cap = state.consecutive_regulation_turns >= cap
+        allowed = set(command.regulation_policy.allowed_for(ConversationalSignal.REQUESTING_HELP))
         can_hint = (
             not at_cap
+            and PedagogicalStrategy.GIVE_ORDERED_HINT in allowed
             and
             progress.hints_used < self._pedagogical_policy.max_hints_per_activity
             and progress.hints_used < len(activity.hint_ids)
@@ -578,6 +579,19 @@ class TutoringService:
             progress_changes = (progress,)
             events = (TutoringEvent("hint-committed", command.session_id,
                                     activity.objective_id, command.activity_id, hint_id),)
+        elif PedagogicalStrategy.SIMPLIFY_LANGUAGE in allowed:
+            speech = canonical_regulation_speech(
+                PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+                prompt=activity.prompt_es,
+                presentation=command.presentation,
+                adaptations=command.adaptations,
+            )
+            action = ExecutedRegulationAction.SIMPLIFY_LANGUAGE
+            receipt_action = action.value
+            expected_progress = ()
+            progress_changes = ()
+            events = ()
+            session = None
         else:
             speech = activity.prompt_es
             action = ExecutedRegulationAction.REPEAT_INSTRUCTION
@@ -599,7 +613,8 @@ class TutoringService:
         result = self._commit(
             command, session=session, activity_progress=progress_changes,
             expected_activity_progress=expected_progress, events=events,
-            support_receipts=(receipt,), payload=receipt,
+            support_receipts=((receipt,) if receipt.action in {"hint", "repeat"} else ()),
+            payload=receipt,
             expected_regulation_revision=state.regulation_revision,
             regulation_mutation=RegulationMutation(
                 state.regulation_revision + 1, next_count,

@@ -18,6 +18,7 @@ from math_tutor.infrastructure.persistence.repositories import _dump
 from math_tutor.application.ports import ActivityProgress
 from math_tutor.application.results import CommandResult, CommandStatus
 from math_tutor.agent.voice_agent import HarnessVoiceAgent, VoiceTurn
+from math_tutor.domain.regulation import PedagogicalStrategy, RegulationPolicy
 
 
 class Purger:
@@ -32,12 +33,15 @@ PROVIDERS = {
 }
 
 
-def setup(tmp_path, *, consent=False):
+def setup(tmp_path, *, consent=False, regulation_policy=None):
     path=tmp_path/"bootstrap.db"; migrate(path)
     curriculum,_=load_curriculum_catalogs(Path("src/math_tutor/curricula/primary-math-v1.yaml"),Path("src/math_tutor/curricula/activity-templates-v1.yaml"))
     repo=SQLiteTutoringRepository(path); purger=Purger(); service=ProvisioningService(repo,curriculum,purger)
     service.create_learner(CreateLearner("learner-X", "Ana", 7))
-    plan=service.create_learning_plan(CreateLearningPlan("plan-X", "learner-X", ("units-tens",), ("slow-pace",), SessionLimits(11, 5)))
+    plan=service.create_learning_plan(CreateLearningPlan(
+        "plan-X", "learner-X", ("units-tens",), ("slow-pace",),
+        SessionLimits(11, 5), regulation_policy=regulation_policy,
+    ))
     grant=service.grant_audio_consent("learner-X",retention_days=2) if consent else None
     started=service.start_learning_session(StartLearningSession("learner-X", grant.consent_id if grant else None))
     metadata=DispatchMetadata(started.tutoring_session_id,1,plan.plan_id,plan.version)
@@ -137,6 +141,28 @@ async def test_help_turn_commits_one_reviewed_hint_without_observation_or_model(
 
 
 @pytest.mark.asyncio
+async def test_help_fast_path_uses_snapshotted_therapist_policy(tmp_path):
+    policy = RegulationPolicy((
+        PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 1)
+    repo,_,_,_,_,metadata=setup(tmp_path,regulation_policy=policy)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+
+    first=await engine.decide(VoiceTurn("policy-1","ayúdame",.99,Event()))
+    second=await engine.decide(VoiceTurn("policy-2","ayúdame",.99,Event()))
+
+    assert first.speech.startswith("Vamos paso a paso")
+    assert second.speech == "¿Quieres continuar o hacer una pausa?"
+    state=repo.load_state(metadata.tutoring_session_id)
+    assert state.activity_sequence == 2
+    assert state.pending_regulation_event.strategy.value == "cap-choice"
+
+
+@pytest.mark.asyncio
 async def test_replayed_help_turn_returns_exact_receipt_and_does_not_consume_second_hint(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
@@ -179,6 +205,8 @@ async def test_elapsed_cap_preempts_low_confidence_and_support_receipt_replay(tm
     decision=await engine.decide(VoiceTurn("reused","ayuda",.2,Event()))
 
     assert decision.terminal and decision.reason == "duration-cap-reached"
+    event=repo.load_regulation_events(metadata.tutoring_session_id)[0]
+    assert event.outcome.value == "unknown"
 
 
 @pytest.mark.asyncio
@@ -196,6 +224,8 @@ async def test_activity_cap_preempts_low_confidence_and_support_receipt_replay(t
     decision=await engine.decide(VoiceTurn("reused","ayuda",.2,Event()))
 
     assert decision.terminal and decision.reason == "activity-cap-reached"
+    event=repo.load_regulation_events(metadata.tutoring_session_id)[0]
+    assert event.outcome.value == "unknown"
 
 
 @pytest.mark.asyncio
@@ -280,7 +310,7 @@ async def test_activity_cap_preempts_correct_turn_replay_without_new_follow_up(t
 
 
 @pytest.mark.asyncio
-async def test_exhausted_help_repeats_prompt_without_progress_or_competence_mutation(tmp_path):
+async def test_exhausted_hint_uses_next_authorised_strategy_without_progress_or_competence_mutation(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
@@ -293,8 +323,8 @@ async def test_exhausted_help_repeats_prompt_without_progress_or_competence_muta
 
     after=repo.load_session_aggregate(metadata.tutoring_session_id)
     receipt=repo.load_support_receipt(metadata.tutoring_session_id,"exhausted")
-    assert decision.speech == activity.prompt_es
-    assert receipt.action == "repeat"
+    assert decision.speech == f"Vamos paso a paso. {activity.prompt_es}"
+    assert receipt is None  # new regulation results replay through processed_commands
     assert after.activity_progress == before.activity_progress
     assert after.estimates == before.estimates
     assert len(after.activities) == len(before.activities)
@@ -313,6 +343,11 @@ async def test_support_receipt_failure_rolls_back_hint_progress_event_and_comman
     progress=next(item for item in aggregate.activity_progress if item.activity_id == "activity-1")
     assert progress.hints_used == 0
     assert not any(event.kind == "hint-committed" for event in aggregate.events)
+    state=repo.load_state(metadata.tutoring_session_id)
+    assert state.regulation_revision == 1  # initial activity selection only
+    assert state.pending_regulation_event is None
+    assert repo.load_regulation_events(metadata.tutoring_session_id) == ()
+    assert repo.load_support_receipt(metadata.tutoring_session_id,"atomic-failure") is None
     assert repo.load_command_result(f"support:{metadata.tutoring_session_id}:atomic-failure") is None
 
 

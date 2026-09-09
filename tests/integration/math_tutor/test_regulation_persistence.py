@@ -9,7 +9,7 @@ from math_tutor.application.session_runtime import SessionRuntime
 from math_tutor.domain.activities import Activity, StructuredAnswer
 from math_tutor.domain.evidence import TranscriptionReliabilityPolicy
 from math_tutor.domain.learning import AssistanceThreshold, CompetencyState, LearningPlan, LearningSession, PresentationProfile, ProgressionPolicy, SkillEstimate
-from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, ExecutedRegulationAction, PedagogicalStrategy
+from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, ExecutedRegulationAction, PedagogicalStrategy, RegulationPolicy
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
@@ -121,6 +121,8 @@ def test_deterministic_support_uses_same_pending_and_promotion_state_machine(tmp
             expected_session_version=state.session.version, expected_profile_version=1,
             generation_id=generation.generation_id, turn_id=f"help-{number}",
             activity_id="activity",
+            regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
+            presentation=("short",), adaptations=(),
         ))
         assert result.status is CommandStatus.APPLIED
     assert [(row[1], row[4], row[5]) for row in _rows(repo)] == [
@@ -141,6 +143,59 @@ def test_explicit_stop_promotes_single_low_priority_pending_as_stopped(tmp_path)
     assert _rows(repo)[0][-1] == "stopped"
     state = repo.load_state("session")
     assert state.pending_regulation_event is None
+
+
+def test_end_session_closes_materialized_event_as_stopped(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path)
+    _regulate(repo, runtime, service, 1, ConversationalSignal.FRUSTRATED)
+    state = repo.load_state("session"); generation = runtime.start_generation("session")
+    result = service.end_session(EndSession(
+        command_id="end", session_id="session",
+        expected_session_version=state.session.version, expected_profile_version=1,
+        generation_id=generation.generation_id, reason="stop-requested",
+    ))
+    assert result.status is CommandStatus.APPLIED
+    assert repo.load_regulation_events("session")[0].outcome is RegulationOutcome.STOPPED
+
+
+def test_stale_revision_and_stale_generation_create_no_event_or_receipt(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path)
+    old_generation = runtime.start_generation("session")
+    runtime.start_generation("session")
+    stale_generation = service.commit_regulation(CommitRegulation(
+        command_id="stale-generation", session_id="session",
+        expected_session_version=1, expected_profile_version=1,
+        generation_id=old_generation.generation_id, turn_id="stale-generation",
+        activity_id="activity", expected_regulation_revision=0,
+        signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.HIGH,
+        strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        max_consecutive_regulation_turns=4, presentation=("short",), adaptations=(),
+    ))
+    current = runtime.start_generation("session")
+    stale_revision = service.commit_regulation(CommitRegulation(
+        command_id="stale-revision", session_id="session",
+        expected_session_version=1, expected_profile_version=1,
+        generation_id=current.generation_id, turn_id="stale-revision",
+        activity_id="activity", expected_regulation_revision=1,
+        signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.HIGH,
+        strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        max_consecutive_regulation_turns=4, presentation=("short",), adaptations=(),
+    ))
+    assert stale_generation.reason == "generation-not-active"
+    assert stale_revision.reason == "stale-regulation-revision"
+    assert repo.load_regulation_events("session") == ()
+    assert repo.load_state("session").pending_regulation_event is None
+    assert repo.load_command_result("stale-generation") is None
+    assert repo.load_command_result("stale-revision") is None
+
+
+def test_reopen_retains_open_event_with_unknown_outcome(tmp_path):
+    database, repo, runtime, service = _setup(tmp_path)
+    _regulate(repo, runtime, service, 1, ConversationalSignal.FRUSTRATED)
+    reopened = SQLiteTutoringRepository(database)
+    event = reopened.load_regulation_events("session")[0]
+    assert event.outcome is RegulationOutcome.UNKNOWN
+    assert reopened.load_state("session").pending_regulation_event.event_id == event.event_id
 
 
 def test_non_evaluable_answer_does_not_close_or_reset_pending_regulation(tmp_path):
@@ -208,13 +263,74 @@ def test_upgrade_preserves_migration_0019_support_receipt_without_backfill(tmp_p
     migrate(database)
     runtime = SessionRuntime(); service = _setup(tmp_path / "fresh")[3]
     service._repository = SQLiteTutoringRepository(database)
+    service._runtime = runtime
     result = service.support_learner(SupportLearner(
         command_id="old-support", session_id="session", expected_session_version=1,
         expected_profile_version=1, generation_id="irrelevant", turn_id="old-turn",
         activity_id="activity",
+        regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
+        presentation=("short",), adaptations=(),
     ))
     assert result.replayed and result.payload.speech == "Texto canónico histórico."
     state = service._repository.load_state("session")
     assert (state.regulation_revision, state.activity_sequence,
             state.pending_regulation_event) == (0, 0, None)
     assert service._repository.load_regulation_events("session") == ()
+    generation = runtime.start_generation("session")
+    new_result = service.support_learner(SupportLearner(
+        command_id="new-support", session_id="session", expected_session_version=1,
+        expected_profile_version=1, generation_id=generation.generation_id,
+        turn_id="new-turn", activity_id="activity",
+        regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
+        presentation=("short",), adaptations=(),
+    ))
+    assert new_result.status is CommandStatus.APPLIED
+    state = service._repository.load_state("session")
+    assert (state.regulation_revision, state.activity_sequence) == (1, 1)
+    assert state.pending_regulation_event.turn_id == "new-turn"
+
+
+def test_support_uses_authorised_order_and_therapist_cap_without_defaults(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path)
+    policy = RegulationPolicy((
+        PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 1)
+    for number in (1, 2):
+        state = repo.load_state("session"); generation = runtime.start_generation("session")
+        result = service.support_learner(SupportLearner(
+            command_id=f"policy-help-{number}", session_id="session",
+            expected_session_version=state.session.version, expected_profile_version=1,
+            generation_id=generation.generation_id, turn_id=f"policy-help-{number}",
+            activity_id="activity", regulation_policy=policy,
+            presentation=("short",), adaptations=(),
+        ))
+        assert result.status is CommandStatus.APPLIED
+        if number == 1:
+            assert result.payload.speech.startswith("Vamos paso a paso")
+            assert repo.load_state("session").pending_regulation_event.strategy is ExecutedRegulationAction.SIMPLIFY_LANGUAGE
+        else:
+            assert result.payload.speech == "¿Quieres continuar o hacer una pausa?"
+    assert repo.load_state("session").activity_sequence == 2
+
+
+def test_support_falls_back_to_authorised_repeat_when_hint_and_simplify_are_disabled(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path)
+    policy = RegulationPolicy((
+        PedagogicalStrategy.REPEAT_INSTRUCTION,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 4)
+    generation = runtime.start_generation("session")
+    result = service.support_learner(SupportLearner(
+        command_id="repeat-only", session_id="session", expected_session_version=1,
+        expected_profile_version=1, generation_id=generation.generation_id,
+        turn_id="repeat-only", activity_id="activity", regulation_policy=policy,
+        presentation=("short",), adaptations=(),
+    ))
+    assert result.payload.speech == "¿Cuántas unidades?"
+    assert result.payload.action == "repeat"
+    assert repo.load_state("session").pending_regulation_event.strategy is ExecutedRegulationAction.REPEAT_INSTRUCTION
