@@ -82,6 +82,19 @@ def test_policy_rejects_a_strategy_set_that_leaves_any_signal_unsupported() -> N
         )
 
 
+def test_policy_rejects_exhaustible_hint_as_only_help_and_confusion_fallback() -> None:
+    with pytest.raises(ValueError, match="incomplete-regulation-policy"):
+        RegulationPolicy(
+            allowed_strategies=(
+                PedagogicalStrategy.GIVE_ORDERED_HINT,
+                PedagogicalStrategy.VALIDATE_EMOTION,
+                PedagogicalStrategy.REDIRECT_GENTLY,
+                PedagogicalStrategy.TAKE_SHORT_PAUSE,
+            ),
+            max_consecutive_regulation_turns=4,
+        )
+
+
 def test_policy_rejects_duplicate_or_unknown_strategies() -> None:
     with pytest.raises(ValueError, match="duplicate-regulation-strategy"):
         RegulationPolicy(

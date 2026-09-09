@@ -109,6 +109,12 @@ class RegulationPolicy:
             raise ValueError("invalid-regulation-turn-cap")
         if any(not set(strategies).intersection(compatible_strategies(signal)) for signal in ConversationalSignal):
             raise ValueError("incomplete-regulation-policy")
+        durable_help = {
+            PedagogicalStrategy.REPEAT_INSTRUCTION,
+            PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        }
+        if not set(strategies).intersection(durable_help):
+            raise ValueError("incomplete-regulation-policy")
         object.__setattr__(self, "allowed_strategies", strategies)
 
     def allowed_for(self, signal: ConversationalSignal) -> tuple[PedagogicalStrategy, ...]:

@@ -592,7 +592,7 @@ class TutoringService:
             progress_changes = ()
             events = ()
             session = None
-        else:
+        elif PedagogicalStrategy.REPEAT_INSTRUCTION in allowed:
             speech = activity.prompt_es
             action = ExecutedRegulationAction.REPEAT_INSTRUCTION
             receipt_action = "repeat"
@@ -600,6 +600,8 @@ class TutoringService:
             progress_changes = ()
             events = ()
             session = None
+        else:
+            return self._rejected(command, "no-authorised-help-fallback")
         receipt = LearnerSupportReceipt(
             command.session_id, command.turn_id, command.activity_id,
             receipt_action, speech,

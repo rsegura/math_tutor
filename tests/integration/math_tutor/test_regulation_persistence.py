@@ -13,7 +13,7 @@ from math_tutor.domain.regulation import ConfidenceBand, ConversationalSignal, E
 from math_tutor.domain.templates import ExpectedAnswerKind
 from math_tutor.infrastructure.curriculum_loader import load_curriculum_catalogs
 from math_tutor.infrastructure.persistence.migrator import migrate
-from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository
+from math_tutor.infrastructure.persistence.repositories import SQLiteTutoringRepository, _dump
 
 ROOT = Path(__file__).parents[3]
 
@@ -256,7 +256,6 @@ def test_upgrade_preserves_migration_0019_support_receipt_without_backfill(tmp_p
     repo.save_plan(plan, policy_version="v1")
     repo.save_session(LearningSession.start(session_id="session", plan=plan), profile_version=1)
     activity = Activity("template", "units-tens", 1, "Histórico", {"number": 12}, StructuredAnswer.evaluable(ExpectedAnswerKind.INTEGER, {"answer": 2}), (), ())
-    from math_tutor.infrastructure.persistence.repositories import _dump
     with repo._connect() as db:
         db.execute("INSERT INTO activities(session_id,activity_id,objective_id,activity_json) VALUES(?,?,?,?)", ("session", "activity", "units-tens", _dump(activity)))
         db.execute("INSERT INTO learner_support_receipts(session_id,turn_id,activity_id,action,speech) VALUES(?,?,?,?,?)", ("session", "old-turn", "activity", "repeat", "Texto canónico histórico."))
@@ -334,3 +333,70 @@ def test_support_falls_back_to_authorised_repeat_when_hint_and_simplify_are_disa
     assert result.payload.speech == "¿Cuántas unidades?"
     assert result.payload.action == "repeat"
     assert repo.load_state("session").pending_regulation_event.strategy is ExecutedRegulationAction.REPEAT_INSTRUCTION
+
+
+def _set_hint_exhausted(repo):
+    state = repo.load_state("session")
+    progress = replace(state.progress_for("activity"), hints_used=1, version=2)
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE activity_progress SET progress_json=?,version=2 WHERE session_id='session' AND activity_id='activity'",
+            (_dump(progress),),
+        )
+
+
+def test_exhausted_hint_uses_authorised_simplify_fallback(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path); _set_hint_exhausted(repo)
+    generation = runtime.start_generation("session")
+    result = service.support_learner(SupportLearner(
+        command_id="exhausted", session_id="session", expected_session_version=1,
+        expected_profile_version=1, generation_id=generation.generation_id,
+        turn_id="exhausted", activity_id="activity",
+        regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
+        presentation=("short",), adaptations=(),
+    ))
+    assert result.status is CommandStatus.APPLIED
+    assert result.payload.action == "simplify-language"
+    assert repo.load_state("session").pending_regulation_event.strategy is ExecutedRegulationAction.SIMPLIFY_LANGUAGE
+
+
+def test_missing_canonical_hint_uses_authorised_repeat_fallback(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path)
+    service._reviewed_hint_texts = {}
+    policy = RegulationPolicy((
+        PedagogicalStrategy.GIVE_ORDERED_HINT,
+        PedagogicalStrategy.REPEAT_INSTRUCTION,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 4)
+    generation = runtime.start_generation("session")
+    result = service.support_learner(SupportLearner(
+        command_id="missing-hint", session_id="session", expected_session_version=1,
+        expected_profile_version=1, generation_id=generation.generation_id,
+        turn_id="missing-hint", activity_id="activity", regulation_policy=policy,
+        presentation=("short",), adaptations=(),
+    ))
+    assert result.status is CommandStatus.APPLIED
+    assert result.payload.action == "repeat"
+    assert repo.load_state("session").pending_regulation_event.strategy is ExecutedRegulationAction.REPEAT_INSTRUCTION
+
+
+def test_impossible_corrupt_help_policy_fails_closed_without_mutation_or_speech(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path); _set_hint_exhausted(repo)
+    corrupt = object.__new__(RegulationPolicy)
+    object.__setattr__(corrupt, "allowed_strategies", (PedagogicalStrategy.GIVE_ORDERED_HINT,))
+    object.__setattr__(corrupt, "max_consecutive_regulation_turns", 4)
+    before = repo.load_state("session")
+    generation = runtime.start_generation("session")
+    result = service.support_learner(SupportLearner(
+        command_id="corrupt-policy", session_id="session", expected_session_version=1,
+        expected_profile_version=1, generation_id=generation.generation_id,
+        turn_id="corrupt-policy", activity_id="activity", regulation_policy=corrupt,
+        presentation=("short",), adaptations=(),
+    ))
+    assert (result.status, result.reason, result.payload) == (
+        CommandStatus.REJECTED, "no-authorised-help-fallback", None,
+    )
+    assert repo.load_state("session") == before
+    assert repo.load_command_result("corrupt-policy") is None
