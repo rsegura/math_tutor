@@ -18,6 +18,25 @@ class Responses:
     async def create(self, **kwargs): self.calls.append(kwargs); return self.response
 
 
+def _matches_schema(value, schema):
+    """Small test validator for the schema keywords emitted by this adapter."""
+    if "oneOf" in schema and sum(_matches_schema(value, branch) for branch in schema["oneOf"]) != 1:
+        return False
+    if schema.get("type") == "object":
+        if not isinstance(value, dict): return False
+        properties=schema.get("properties", {})
+        if any(name not in value for name in schema.get("required", ())): return False
+        if schema.get("additionalProperties") is False and set(value)-set(properties): return False
+        return all(_matches_schema(item, properties[name]) for name,item in value.items() if name in properties)
+    if schema.get("type") == "string" and not isinstance(value,str): return False
+    if schema.get("type") == "number" and (isinstance(value,bool) or not isinstance(value,(int,float))): return False
+    if "const" in schema and value != schema["const"]: return False
+    if "enum" in schema and value not in schema["enum"]: return False
+    if "minimum" in schema and value < schema["minimum"]: return False
+    if "maximum" in schema and value > schema["maximum"]: return False
+    return True
+
+
 def context():
     return SimpleNamespace(
         current_turn=SimpleNamespace(turn_id="turn-1",transcript="son tres decenas",stt_confidence=.9),
@@ -56,7 +75,7 @@ def test_regulation_schema_exposes_only_current_turn_and_authorised_compatible_p
     tools=OpenResponsesAdapter._tools(context())
     regulation=next(tool for tool in tools if tool["name"]=="regulate_conversation")["parameters"]
     assert regulation["type"] == "object"
-    assert regulation["additionalProperties"] is False
+    assert "additionalProperties" not in regulation
     branches=regulation["oneOf"]
     pairs={(branch["properties"]["signal"]["const"], strategy)
            for branch in branches
@@ -79,6 +98,14 @@ def test_regulation_schema_omits_plan_disallowed_strategies():
     regulation=next(tool for tool in OpenResponsesAdapter._tools(value) if tool["name"]=="regulate_conversation")["parameters"]
     advertised={strategy for branch in regulation["oneOf"] for strategy in branch["properties"]["strategy"]["enum"]}
     assert advertised == {"simplify-language","redirect-gently","validate-emotion","take-short-pause"}
+
+
+def test_regulation_json_schema_accepts_authorised_payload_and_rejects_invalid_shapes():
+    regulation=next(tool for tool in OpenResponsesAdapter._tools(context()) if tool["name"]=="regulate_conversation")["parameters"]
+    valid={"turn_id":"turn-1","signal":"frustrated","confidence":.9,"strategy":"validate-emotion"}
+    assert _matches_schema(valid,regulation)
+    assert not _matches_schema({**valid,"rationale":"private"},regulation)
+    assert not _matches_schema({**valid,"strategy":"redirect-gently"},regulation)
 
 
 @pytest.mark.asyncio

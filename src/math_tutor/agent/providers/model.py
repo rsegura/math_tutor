@@ -110,7 +110,7 @@ class OpenResponsesAdapter:
                         "additionalProperties": False,
                     })
             if branches:
-                tools.append({"type": "function", "name": "regulate_conversation", "description": "Señal conversacional provisional y estrategia autorizada; no diagnostica ni evalúa matemáticas.", "parameters": {"type": "object", "oneOf": branches, "additionalProperties": False}, "strict": False})
+                tools.append({"type": "function", "name": "regulate_conversation", "description": "Señal conversacional provisional y estrategia autorizada; no diagnostica ni evalúa matemáticas.", "parameters": {"type": "object", "oneOf": branches}, "strict": False})
         return tools
 
     async def complete(self, *, prompt: str, context, repair: bool, validation_error: str | None = None) -> object:
