@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 import math_tutor.application.regulation as production_regulation
+from math_tutor.agent.runtime_factory import BoundedConversationEngine
 
 from evals.math_tutor.runner import (
     FaultAdapter,
@@ -17,6 +18,24 @@ from evals.math_tutor.runner import (
 
 
 SCENARIOS = Path("evals/math_tutor/scenarios")
+
+
+def test_duplicate_regulation_requires_exact_replayed_decision(tmp_path, monkeypatch):
+    scenario = next(item for item in load_scenarios(SCENARIOS) if item.scenario_id == "regulation-replay-privacy")
+    original = BoundedConversationEngine.decide
+    calls = 0
+
+    async def altered_second_replay(self, turn):
+        nonlocal calls
+        decision = await original(self, turn)
+        calls += 1
+        return replace(decision, speech="Vamos paso a paso.") if calls == 2 else decision
+
+    monkeypatch.setattr(BoundedConversationEngine, "decide", altered_second_replay)
+    report = run_evaluation((scenario,), database_path=tmp_path / "false-replay.db")
+
+    assert report.durable_outcomes[scenario.scenario_id].intervention == "regulation-replay-duplicated"
+    assert f"{scenario.scenario_id}.intervention" in report.hard_failures
 
 
 def test_eval_provider_settings_use_named_fields_without_positional_drift():

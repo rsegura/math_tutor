@@ -76,8 +76,10 @@ class PedagogicalHarness:
                     if close is not None: close()
                     raise TypeError("awaitable model result requires run_async")
                 action = _parse(output)
-                if isinstance(action, ToolProposal) and action.name is ToolName.END_SESSION:
-                    raise ValueError("model-end-session-forbidden")
+                if isinstance(action, ToolProposal) and action.name in {
+                    ToolName.END_SESSION, ToolName.GIVE_HINT,
+                }:
+                    raise ValueError("model-tool-forbidden")
                 if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
                 if tool_steps >= self._limits.max_tool_steps:
                     invalid = HarnessProposalInvalid()
@@ -109,8 +111,10 @@ class PedagogicalHarness:
                         value = self._model.complete(prompt=REPAIR_PROMPT if call_index else SYSTEM_PROMPT,context=context,repair=bool(call_index),validation_error=None if last_error is None else str(last_error))
                         output = await value if inspect.isawaitable(value) else value
                         action = _parse(output)
-                        if isinstance(action, ToolProposal) and action.name is ToolName.END_SESSION:
-                            raise ValueError("model-end-session-forbidden")
+                        if isinstance(action, ToolProposal) and action.name in {
+                            ToolName.END_SESSION, ToolName.GIVE_HINT,
+                        }:
+                            raise ValueError("model-tool-forbidden")
                         if isinstance(action, ConversationReply): return HarnessDecision(speech=action.speech)
                         try: return self._registry.execute(action, context)
                         except ToolRejected as exc:

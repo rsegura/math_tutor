@@ -468,9 +468,12 @@ class _Executed:
     database_artifacts: tuple[str, ...]
     log_artifacts: tuple[str, ...]
     execution_failure: str | None
+    replay_exact: bool
+    replay_regulation: bool
 
 
-def _intervention(scenario: EvalScenario, aggregate, model: ProductionFakeModelAdapter) -> str:
+def _intervention(executed: _Executed) -> str:
+    scenario, aggregate, model = executed.scenario, executed.aggregate, executed.model
     outcomes = tuple(item.observation.outcome.value for item in aggregate.observations)
     if scenario.stop_requested:
         return "stop-honoured" if aggregate.session.ended else "stop-ignored"
@@ -482,9 +485,8 @@ def _intervention(scenario: EvalScenario, aggregate, model: ProductionFakeModelA
     if "propose_skill_update" in proposed_tools:
         return "scope-rejected" if model.repair_calls and not aggregate.proposals else "scope-accepted"
     if len({turn.turn_id for turn in scenario.turns}) < len(scenario.turns):
-        if "regulate_conversation" in proposed_tools:
-            return "regulation-replay-deduplicated"
-        return "replay-deduplicated" if len(aggregate.observations) == 1 else "replay-duplicated"
+        prefix = "regulation-replay" if executed.replay_regulation else "replay"
+        return f"{prefix}-deduplicated" if executed.replay_exact else f"{prefix}-duplicated"
     if "regulate_conversation" in proposed_tools:
         return "conversation-regulated"
     if outcomes == ("incorrect", "correct"):
@@ -516,7 +518,7 @@ def _durable_outcome(executed: _Executed) -> DurableOutcome:
         sum(item.consecutive_incorrect for item in aggregate.activity_progress),
         tuple(item.observation.outcome.value for item in aggregate.observations),
         executed.model.repair_calls, len(executed.decisions),
-        _intervention(executed.scenario, aggregate, executed.model),
+        _intervention(executed),
         sum(executed.latencies_ms),
         tuple(item.speech for item in executed.decisions),
         tuple(str(item) for item in executed.model.outputs),
@@ -579,6 +581,9 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
     verified: list[bool] = []
     stale_speech_released = False
     execution_failure = None
+    replay_exact = True
+    replay_regulation = False
+    prior_turn_results: dict[str, tuple[VoiceDecision, object, object]] = {}
     capture = _StructuredLogCapture()
     telemetry_logger = logging.getLogger("math_tutor")
     prior_log_level = telemetry_logger.level
@@ -586,12 +591,39 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
     telemetry_logger.addHandler(capture)
 
     async def execute(turn: EvalTurn) -> VoiceDecision:
+        nonlocal replay_exact, replay_regulation
         turn_id = f"{scenario.scenario_id}-{turn.turn_id}"
         started = clock.monotonic()
         decision = await engine.decide(VoiceTurn(turn_id, turn.response_text, turn.stt_confidence, Event()))
         decisions.append(decision)
         latencies.append(round((clock.monotonic() - started) * 1000))
         verified.append(_is_canonical_regulation_speech(turn, decision))
+        state = repo.load_state(runtime.bootstrap.session.session_id)
+        aggregate = repo.load_session_aggregate(runtime.bootstrap.session.session_id)
+        receipt = repo.load_support_receipt(runtime.bootstrap.session.session_id, turn_id)
+        receipt_result = None if receipt is None else (
+            receipt.action, receipt.speech, receipt.regulation_revision,
+            receipt.decision_reason,
+        )
+        durable = (
+            aggregate.session.version,
+            tuple((item.activity_id, item.attempts_used, item.hints_used, item.version)
+                  for item in aggregate.activity_progress),
+            state.regulation_revision, state.consecutive_regulation_turns,
+            state.activity_sequence, state.pending_regulation_event,
+            repo.load_regulation_events(runtime.bootstrap.session.session_id),
+            tuple(aggregate.events),
+        )
+        if turn_id in prior_turn_results:
+            previous_decision, previous_receipt, previous_durable = prior_turn_results[turn_id]
+            replay_regulation = replay_regulation or previous_receipt is not None
+            replay_exact = replay_exact and (
+                decision == previous_decision
+                and receipt_result == previous_receipt
+                and durable == previous_durable
+            )
+        else:
+            prior_turn_results[turn_id] = (decision, receipt_result, durable)
         return decision
 
     try:
@@ -654,7 +686,7 @@ async def _execute_scenario(repo: SQLiteTutoringRepository, scenario: EvalScenar
         repo.load_regulation_events(runtime.bootstrap.session.session_id),
         repo.load_state(runtime.bootstrap.session.session_id),
         tuple(verified), stale_speech_released, _database_artifacts(repo),
-        tuple(capture.artifacts), execution_failure,
+        tuple(capture.artifacts), execution_failure, replay_exact, replay_regulation,
     )
     return replace(executed, outcome=_durable_outcome(executed))
 

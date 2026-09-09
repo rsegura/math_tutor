@@ -140,6 +140,72 @@ async def test_model_regulation_uses_durable_snapshot_and_canonical_speech(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_model_regulation_same_turn_replays_exactly_after_engine_reopen(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class ChangingRegulationModel:
+        def __init__(self): self.calls=0
+        def complete(self,**kwargs):
+            self.calls += 1; context=kwargs["context"]
+            signal,strategy=("frustrated","validate-emotion") if self.calls == 1 else ("confused","simplify-language")
+            return {"type":"tool","name":"regulate_conversation","arguments":{
+                "turn_id":context.current_turn.turn_id,"signal":signal,
+                "confidence":.91,"strategy":strategy}}
+    model=ChangingRegulationModel()
+    first_engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=model)
+    turn=VoiceTurn("durable-regulation-replay","Esto es muy difícil",.99,Event())
+    first=await first_engine.decide(turn)
+    before_state=repo.load_state(metadata.tutoring_session_id)
+    before_events=repo.load_regulation_events(metadata.tutoring_session_id)
+    with repo._connect() as db:
+        before_counts=tuple(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in ("processed_commands","learner_support_receipts","tutoring_events"))
+
+    reopened_repo=SQLiteTutoringRepository(repo.database)
+    current=reopened_repo.load_state(metadata.tutoring_session_id)
+    reopened_metadata=DispatchMetadata(metadata.tutoring_session_id,current.session.version,metadata.plan_id,metadata.expected_plan_version)
+    reopened_runtime=build_tutoring_runtime(metadata=reopened_metadata,repository=reopened_repo,env=PROVIDERS)
+    replay_engine=BoundedConversationEngine(repository=reopened_repo,runtime=reopened_runtime,curricula_dir=Path("src/math_tutor/curricula"),model=model)
+    replay=await replay_engine.decide(turn)
+
+    assert replay == first
+    assert reopened_repo.load_state(metadata.tutoring_session_id) == before_state
+    assert reopened_repo.load_regulation_events(metadata.tutoring_session_id) == before_events
+    with reopened_repo._connect() as db:
+        after_counts=tuple(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in ("processed_commands","learner_support_receipts","tutoring_events"))
+    assert after_counts == before_counts
+
+
+@pytest.mark.asyncio
+async def test_deterministic_simplify_and_cap_replay_after_engine_reopen(tmp_path):
+    policy=RegulationPolicy((
+        PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ),1)
+    repo,_,_,_,_,metadata=setup(tmp_path,regulation_policy=policy)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    turns=(VoiceTurn("simplify-replay","ayuda",.99,Event()),VoiceTurn("cap-replay","repítelo",.99,Event()))
+    originals=tuple([await engine.decide(turns[0]),await engine.decide(turns[1])])
+    before_state=repo.load_state(metadata.tutoring_session_id)
+    before_events=repo.load_regulation_events(metadata.tutoring_session_id)
+
+    reopened_repo=SQLiteTutoringRepository(repo.database)
+    current=reopened_repo.load_state(metadata.tutoring_session_id)
+    reopened_metadata=DispatchMetadata(metadata.tutoring_session_id,current.session.version,metadata.plan_id,metadata.expected_plan_version)
+    reopened_runtime=build_tutoring_runtime(metadata=reopened_metadata,repository=reopened_repo,env=PROVIDERS)
+    replay_engine=BoundedConversationEngine(repository=reopened_repo,runtime=reopened_runtime,curricula_dir=Path("src/math_tutor/curricula"),model=SimpleModel())
+    replays=tuple([await replay_engine.decide(turns[0]),await replay_engine.decide(turns[1])])
+
+    assert replays == originals
+    assert originals[0].reason == "learner-support-simplify-language"
+    assert originals[1].reason == "learner-support-cap-choice"
+    assert reopened_repo.load_state(metadata.tutoring_session_id) == before_state
+    assert reopened_repo.load_regulation_events(metadata.tutoring_session_id) == before_events
+
+
+@pytest.mark.asyncio
 async def test_model_cannot_end_on_refusal_and_repair_can_regulate(tmp_path):
     repo,_,_,_,_,metadata=setup(tmp_path)
     runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
@@ -157,6 +223,38 @@ async def test_model_cannot_end_on_refusal_and_repair_can_regulate(tmp_path):
     assert model.calls == 2
     assert decision.reason == "regulated" and not decision.terminal
     assert not state.session.ended and state.consecutive_regulation_turns == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_regulation_model_hint_repairs_through_shared_regulation_path(tmp_path):
+    repo,_,_,_,_,metadata=setup(tmp_path)
+    runtime=build_tutoring_runtime(metadata=metadata,repository=repo,env=PROVIDERS)
+    class HintRepairModel:
+        def __init__(self): self.calls=0
+        def complete(self,**kwargs):
+            self.calls += 1; context=kwargs["context"]
+            if self.calls == 1:
+                return {"type":"tool","name":"regulate_conversation","arguments":{
+                    "turn_id":context.current_turn.turn_id,"signal":"confused",
+                    "confidence":.9,"strategy":"simplify-language"}}
+            if not kwargs["repair"]:
+                return {"type":"tool","name":"give_hint","arguments":{}}
+            return {"type":"tool","name":"regulate_conversation","arguments":{
+                "turn_id":context.current_turn.turn_id,"signal":"requesting-help",
+                "confidence":.9,"strategy":"give-ordered-hint"}}
+    model=HintRepairModel()
+    engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=model)
+    engine._service.commit_hint=Mock(wraps=engine._service.commit_hint)
+
+    await engine.decide(VoiceTurn("pending-before-hint","No lo comprendo",.99,Event()))
+    decision=await engine.decide(VoiceTurn("model-hint","Dame una pista distinta",.99,Event()))
+
+    state=repo.load_state(metadata.tutoring_session_id)
+    assert decision.reason == "regulated"
+    assert state.pending_regulation_event.strategy.value == "give-ordered-hint"
+    assert state.progress_for("activity-1").hints_used == 1
+    assert engine._service.commit_hint.call_count == 0
+    assert model.calls == 3
 
 
 @pytest.mark.asyncio
@@ -510,7 +608,7 @@ async def test_exhausted_hint_uses_next_authorised_strategy_without_progress_or_
     after=repo.load_session_aggregate(metadata.tutoring_session_id)
     receipt=repo.load_support_receipt(metadata.tutoring_session_id,"exhausted")
     assert decision.speech == f"Vamos paso a paso. {activity.prompt_es}"
-    assert receipt is None  # new regulation results replay through processed_commands
+    assert receipt.action == "simplify-language"
     assert after.activity_progress == before.activity_progress
     assert after.estimates == before.estimates
     assert len(after.activities) == len(before.activities)
@@ -597,7 +695,7 @@ async def test_missing_race_winner_uses_a_bounded_number_of_receipt_reads(tmp_pa
     with pytest.raises(RuntimeError,match="generation-not-active"):
         await asyncio.wait_for(engine.decide(VoiceTurn("no-winner","ayuda",.99,Event())),1)
 
-    assert len(reads) == 8
+    assert len(reads) == 9  # one authoritative replay preflight plus eight bounded race polls
 
 
 @pytest.mark.asyncio
@@ -909,10 +1007,13 @@ async def test_unexpected_programming_or_mutation_errors_are_not_conversationall
     class Model:
         async def complete(self,**kwargs):
             if boundary == "model": raise RuntimeError("unexpected secret programming bug")
-            return {"type":"tool","name":"give_hint","arguments":{}}
+            context=kwargs["context"]
+            return {"type":"tool","name":"regulate_conversation","arguments":{
+                "turn_id":context.current_turn.turn_id,"signal":"requesting-help",
+                "confidence":.9,"strategy":"give-ordered-hint"}}
     engine=BoundedConversationEngine(repository=repo,runtime=runtime,curricula_dir=Path("src/math_tutor/curricula"),model=Model())
     if boundary == "mutation":
-        engine._service.commit_hint=lambda *args,**kwargs: (_ for _ in ()).throw(RuntimeError("unexpected mutation bug"))
+        engine._service.commit_regulation=lambda *args,**kwargs: (_ for _ in ()).throw(RuntimeError("unexpected mutation bug"))
     with caplog.at_level("WARNING"), pytest.raises(RuntimeError,match="unexpected"):
         await engine.decide(VoiceTurn("turn","respuesta",.9,Event()))
     assert engine._consecutive_llm_failures == 0

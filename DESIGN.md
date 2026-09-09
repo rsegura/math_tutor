@@ -131,10 +131,14 @@ The main domain components are:
 - `LearnerProfile`
 
 Candidate agent actions include presenting an activity, recording an answer,
-requesting clarification, giving a hint, adapting difficulty, recording an
+requesting clarification, proposing regulated help, adapting difficulty, recording an
 observation, proposing evidence, proposing a competency update, and ending the
 session. The final tool surface should remain small: deterministic activity
-generation and answer checking need not become model tools.
+generation and answer checking need not become model tools. Standalone
+`give_hint` remains an internal legacy registry/application capability, but is
+not advertised to or accepted from the model. Learner-turn hints pass through
+`regulate_conversation(give-ordered-hint)` or deterministic `SupportLearner`, so
+they share regulation revision, event closure, caps, and durable replay.
 
 ## 5. Session flow
 

@@ -53,6 +53,7 @@ class Repository:
         self.batches = []
 
     def load_command_result(self, command_id): return self.results.get(command_id)
+    def load_support_receipt(self, session_id, turn_id): return None
     def load_state(self, session_id): return self.state
     def load_activity(self, session_id, activity_id): return self.activity if activity_id == "activity" else None
     def commit_once(self, batch):

@@ -129,7 +129,11 @@ Open exceptions:
 
 The implemented recovery contract is deterministic: recognised help/repeat
 turns use reviewed hints or the canonical prompt and create no wrong-answer
-evidence; a durable receipt makes retries idempotent. Recoverable current-turn
+evidence. Every executed regulation action has an immutable turn-scoped receipt,
+so same-engine and restarted-engine retries return the exact prior speech/action
+without advancing hints, counters, revisions, events, or outcome closure. The
+model cannot invoke the legacy standalone `give_hint` path; it must propose the
+shared regulated-hint contract. Recoverable current-turn
 LLM failures 1 and 2 retry without ending the session, while failure 3 performs
 one durable terminal stop. Valid replies and applied/replayed tools reset the
 counter; help and low-confidence STT preserve it; cancelled or stale turns are

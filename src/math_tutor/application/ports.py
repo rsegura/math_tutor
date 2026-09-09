@@ -165,15 +165,29 @@ class LearnerSupportReceipt:
     activity_id: str
     action: str
     speech: str
+    regulation_revision: int | None = None
+    decision_reason: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("session_id", "turn_id", "activity_id", "speech"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f"{name.replace('_', ' ')} must be nonempty")
         if self.action not in {
-            "hint", "repeat", "simplify-language", "cap-choice",
+            "hint", "repeat", "repeat-instruction", "simplify-language",
+            "give-ordered-hint", "redirect-gently", "validate-emotion",
+            "take-short-pause", "cap-choice",
         }:
             raise ValueError("support action must be a closed canonical action")
+        if self.regulation_revision is not None and (
+            isinstance(self.regulation_revision, bool)
+            or not isinstance(self.regulation_revision, int)
+            or self.regulation_revision < 1
+        ):
+            raise ValueError("support regulation revision must be positive")
+        if self.decision_reason is not None and (
+            not isinstance(self.decision_reason, str) or not self.decision_reason.strip()
+        ):
+            raise ValueError("support decision reason must be nonempty")
 
 
 @dataclass(frozen=True, slots=True)

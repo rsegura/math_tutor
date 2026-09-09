@@ -291,6 +291,14 @@ class BoundedConversationEngine:
             self._stop(reason)
             speech = "De acuerdo, paramos aquí." if stop_requested else "La sesión ha terminado por hoy."
             return VoiceDecision(speech, terminal=True, reason=reason)
+        prior_regulation = None if stop_requested else self._repository.load_support_receipt(
+            aggregate.session.session_id, turn.turn_id
+        )
+        if prior_regulation is not None:
+            reason = prior_regulation.decision_reason
+            if reason is None:
+                reason = f"learner-support-{prior_regulation.action}"
+            return VoiceDecision(prior_regulation.speech, reason=reason)
         activity_id = next((event.activity_id for event in reversed(aggregate.events) if event.kind == "activity-selected"), None)
         if activity_id is None:
             raise RuntimeError("active activity is missing")

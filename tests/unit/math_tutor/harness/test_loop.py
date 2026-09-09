@@ -64,6 +64,30 @@ def test_sync_model_end_session_proposal_is_repaired_without_executing_stop(cont
     assert len(model.calls) == 2 and model.calls[1][2] is True
 
 
+def test_sync_model_standalone_hint_is_repaired_to_regulated_help(context):
+    class RegulationRegistry:
+        def __init__(self): self.proposals = []
+        def execute(self, proposal, context):
+            self.proposals.append(proposal)
+            return __import__("math_tutor.harness.contracts", fromlist=["HarnessDecision"]).HarnessDecision(
+                speech="Pista revisada.", applied_tool=proposal.name, reason="regulated"
+            )
+    registry = RegulationRegistry()
+    model = FakeModel([
+        {"type":"tool", "name":"give_hint", "arguments":{}},
+        {"type":"tool", "name":"regulate_conversation", "arguments":{
+            "turn_id":"turn", "signal":"requesting-help", "confidence":.9,
+            "strategy":"give-ordered-hint",
+        }},
+    ])
+    decision = PedagogicalHarness(model, registry, HarnessLimits()).run(context)
+    assert decision.speech == "Pista revisada."
+    assert [proposal.name for proposal in registry.proposals] == [
+        ToolName.REGULATE_CONVERSATION,
+    ]
+    assert [call[2] for call in model.calls] == [False, True]
+
+
 def test_unverified_mathematical_speech_is_never_released(context):
     model = FakeModel([{"type": "reply", "speech": "Cuatro más cuatro son ocho.", "speech_kind": "mathematical"}] * 2)
     with pytest.raises(HarnessContractExhausted) as caught:
@@ -170,7 +194,7 @@ async def test_post_fence_rejection_aborts_without_repair(context):
         def execute(self, proposal, context):
             from math_tutor.harness.registry import ToolRejected
             raise ToolRejected("secret persisted rejection", crossed_fence=True)
-    model=FakeModel([{"type":"tool","name":"give_hint","arguments":{}}, {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}])
+    model=FakeModel([{"type":"tool","name":"adapt_difficulty","arguments":{}}, {"type":"reply","speech":"Vamos paso a paso.","speech_kind":"social"}])
     with pytest.raises(HarnessProposalInvalid):
         await PedagogicalHarness(model,Registry(),HarnessLimits()).run_async(context)
     assert len(model.calls) == 1

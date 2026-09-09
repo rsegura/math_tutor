@@ -53,6 +53,19 @@ def _rows(repo):
         return [tuple(row) for row in db.execute("SELECT event_id,turn_id,signal,strategy,ordinal,outcome FROM regulation_events ORDER BY ordinal")]
 
 
+def _durable_regulation_snapshot(repo):
+    state = repo.load_state("session")
+    progress = state.progress_for("activity")
+    with repo._connect() as db:
+        commands = db.execute("SELECT COUNT(*) FROM processed_commands").fetchone()[0]
+        receipts = db.execute("SELECT COUNT(*) FROM learner_support_receipts").fetchone()[0]
+    return (
+        state.regulation_revision, state.consecutive_regulation_turns,
+        state.activity_sequence, state.pending_regulation_event,
+        progress.hints_used, progress.version, tuple(_rows(repo)), commands, receipts,
+    )
+
+
 def test_low_priority_turns_promote_exactly_on_second_and_advance_on_third(tmp_path):
     _, repo, runtime, service = _setup(tmp_path)
     _regulate(repo, runtime, service, 1)
@@ -80,6 +93,53 @@ def test_high_priority_materializes_immediately_and_replay_is_exactly_idempotent
     assert replay.replayed and replay.payload == result.payload
     assert (repo.load_state("session"), _rows(repo)) == before
     assert _rows(repo)[0][-1] == "unknown"
+
+
+def test_llm_regulation_replays_by_turn_after_repository_and_engine_reopen(tmp_path):
+    database, repo, runtime, service = _setup(tmp_path)
+    first = _regulate(repo, runtime, service, 1, ConversationalSignal.FRUSTRATED)
+    before = _durable_regulation_snapshot(repo)
+
+    reopened_repo = SQLiteTutoringRepository(database)
+    reopened_runtime = SessionRuntime()
+    reopened_service = _setup(tmp_path / "service-fixture")[3]
+    reopened_service._repository = reopened_repo
+    reopened_service._runtime = reopened_runtime
+    replay = reopened_service.commit_regulation(CommitRegulation(
+        command_id="different-ephemeral-command", session_id="session",
+        expected_session_version=1, expected_profile_version=1,
+        generation_id="generation-that-does-not-exist", turn_id="turn-1",
+        activity_id="activity", expected_regulation_revision=0,
+        signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.MEDIUM,
+        strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
+        presentation=("short",), adaptations=(),
+    ))
+
+    assert replay.status is CommandStatus.APPLIED and replay.replayed
+    assert replay.payload == first.payload
+    assert _durable_regulation_snapshot(reopened_repo) == before
+
+
+def test_turn_receipt_does_not_mask_a_same_command_id_collision(tmp_path):
+    _, repo, runtime, service = _setup(tmp_path)
+    first = _regulate(repo, runtime, service, 1, ConversationalSignal.FRUSTRATED)
+    before = _durable_regulation_snapshot(repo)
+    collision = service.commit_regulation(CommitRegulation(
+        command_id="regulate-1", session_id="session",
+        expected_session_version=1, expected_profile_version=1,
+        generation_id="different-generation", turn_id="turn-1",
+        activity_id="activity", expected_regulation_revision=0,
+        signal=ConversationalSignal.CONFUSED, confidence_band=ConfidenceBand.HIGH,
+        strategy=PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        regulation_policy=RegulationPolicy(tuple(PedagogicalStrategy), 4),
+        presentation=("short",), adaptations=(),
+    ))
+    assert first.status is CommandStatus.APPLIED
+    assert (collision.status, collision.reason) == (
+        CommandStatus.REJECTED, "command-id-collision",
+    )
+    assert _durable_regulation_snapshot(repo) == before
 
 
 def test_evaluable_answer_closes_open_event_and_resets_count_not_ordinal(tmp_path):
@@ -313,6 +373,47 @@ def test_support_uses_authorised_order_and_therapist_cap_without_defaults(tmp_pa
         else:
             assert result.payload.speech == "¿Quieres continuar o hacer una pausa?"
     assert repo.load_state("session").activity_sequence == 2
+
+
+def test_support_simplify_and_cap_replay_exactly_after_reopen(tmp_path):
+    database, repo, runtime, service = _setup(tmp_path)
+    policy = RegulationPolicy((
+        PedagogicalStrategy.SIMPLIFY_LANGUAGE,
+        PedagogicalStrategy.VALIDATE_EMOTION,
+        PedagogicalStrategy.REDIRECT_GENTLY,
+        PedagogicalStrategy.TAKE_SHORT_PAUSE,
+    ), 1)
+    originals = []
+    for number in (1, 2):
+        state = repo.load_state("session")
+        generation = runtime.start_generation("session")
+        originals.append(service.support_learner(SupportLearner(
+            command_id=f"original-{number}", session_id="session",
+            expected_session_version=state.session.version, expected_profile_version=1,
+            generation_id=generation.generation_id, turn_id=f"help-{number}",
+            activity_id="activity", regulation_policy=policy,
+            presentation=("short",), adaptations=(),
+        )))
+    before = _durable_regulation_snapshot(repo)
+
+    reopened_repo = SQLiteTutoringRepository(database)
+    reopened_service = _setup(tmp_path / "reopened-service")[3]
+    reopened_service._repository = reopened_repo
+    reopened_service._runtime = SessionRuntime()
+    for number, original in enumerate(originals, 1):
+        replay = reopened_service.support_learner(SupportLearner(
+            command_id=f"replay-{number}", session_id="session",
+            expected_session_version=0, expected_profile_version=0,
+            generation_id="not-active", turn_id=f"help-{number}",
+            activity_id="different-activity", regulation_policy=object(),
+            presentation=("invalid",), adaptations=("invalid",),
+        ))
+        assert replay.status is CommandStatus.APPLIED and replay.replayed
+        assert replay.payload == original.payload
+
+    assert originals[0].payload.action == "simplify-language"
+    assert originals[1].payload.action == "cap-choice"
+    assert _durable_regulation_snapshot(reopened_repo) == before
 
 
 def test_support_falls_back_to_authorised_repeat_when_hint_and_simplify_are_disabled(tmp_path):

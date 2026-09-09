@@ -86,7 +86,6 @@ class OpenResponsesAdapter:
         ]}
         schemas = {
             "record_answer": ({"turn_id": {"type": "string"}, "answer": answer}, ["turn_id", "answer"]),
-            "give_hint": ({}, []),
             "adapt_difficulty": ({"objective_id": {"type": "string", "enum": list(context.active_objective_ids)}, "difficulty": {"type": "integer"}, "seed": {"type": "integer"}, "activity_id": {"type": "string"}}, ["objective_id", "difficulty", "seed", "activity_id"]),
             "propose_skill_update": ({"objective_id": {"type": "string", "enum": list(context.authorised_objective_ids)}}, ["objective_id"]),
         }

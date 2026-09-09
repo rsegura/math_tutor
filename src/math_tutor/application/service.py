@@ -254,6 +254,41 @@ class TutoringService:
             return None, self._rejected(command, "stale-profile-version")
         return state, None
 
+    def _prior_command(self, command: Command) -> CommandResult | None:
+        """Preserve command collision semantics before turn-scoped replay."""
+        try:
+            prior = self._repository.load_command_result(command.command_id)
+        except Exception:
+            return self._failed(command, "persistence-unavailable")
+        if prior is None:
+            return None
+        if prior.command_fingerprint != self._fingerprint(command):
+            return self._rejected(command, "command-id-collision")
+        return prior.result.as_replay()
+
+    @staticmethod
+    def _receipt_action(receipt: LearnerSupportReceipt) -> ExecutedRegulationAction:
+        aliases = {
+            "hint": ExecutedRegulationAction.GIVE_ORDERED_HINT,
+            "repeat": ExecutedRegulationAction.REPEAT_INSTRUCTION,
+        }
+        if receipt.action in aliases:
+            return aliases[receipt.action]
+        return ExecutedRegulationAction(receipt.action)
+
+    def _load_turn_receipt(
+        self, command: Command
+    ) -> tuple[LearnerSupportReceipt | None, CommandResult | None]:
+        prior = self._prior_command(command)
+        if prior is not None:
+            return None, prior
+        try:
+            return self._repository.load_support_receipt(
+                command.session_id, command.turn_id
+            ), None
+        except Exception:
+            return None, self._failed(command, "persistence-unavailable")
+
     @staticmethod
     def _rejected(command: Command, reason: str) -> CommandResult:
         return CommandResult(command.command_id, CommandStatus.REJECTED, reason)
@@ -417,6 +452,19 @@ class TutoringService:
     def commit_regulation(self, command: CommitRegulation) -> CommandResult:
         """Execute one validated strategy and return speech only after the fence."""
 
+        receipt, replay = self._load_turn_receipt(command)
+        if replay is not None:
+            return replay
+        if receipt is not None:
+            return CommandResult(
+                command.command_id, CommandStatus.APPLIED, "replayed",
+                RegulationResult(
+                    receipt.speech, self._receipt_action(receipt),
+                    receipt.regulation_revision or 0,
+                ),
+                replayed=True,
+            )
+
         state, error = self._state(command)
         if error:
             return error
@@ -486,6 +534,10 @@ class TutoringService:
             ordinal=state.activity_sequence + 1,
         )
         payload = RegulationResult(speech, executed_action, revision)
+        receipt = LearnerSupportReceipt(
+            command.session_id, command.turn_id, command.activity_id,
+            executed_action.value, speech, revision, "regulated",
+        )
         return self._commit(
             command,
             activity_progress=progress_changes,
@@ -498,15 +550,15 @@ class TutoringService:
                 close_outcome=(RegulationOutcome.REPEATED_DIFFICULTY
                                if state.pending_regulation_event else None),
             ),
+            support_receipts=(receipt,),
             payload=payload,
         )
 
     def support_learner(self, command: SupportLearner) -> CommandResult:
         """Persist and replay deterministic help without storing learner text."""
-        try:
-            receipt = self._repository.load_support_receipt(command.session_id, command.turn_id)
-        except Exception:
-            return self._failed(command, "persistence-unavailable")
+        receipt, replay = self._load_turn_receipt(command)
+        if replay is not None:
+            return replay
         if receipt is not None:
             return CommandResult(
                 command.command_id, CommandStatus.APPLIED, "replayed", receipt,
@@ -562,7 +614,8 @@ class TutoringService:
             session = None
         receipt = LearnerSupportReceipt(
             command.session_id, command.turn_id, command.activity_id,
-            receipt_action, speech,
+            receipt_action, speech, state.regulation_revision + 1,
+            f"learner-support-{receipt_action}",
         )
         next_count = min(
             cap, state.consecutive_regulation_turns
@@ -576,7 +629,7 @@ class TutoringService:
         result = self._commit(
             command, session=session, activity_progress=progress_changes,
             expected_activity_progress=expected_progress, events=events,
-            support_receipts=((receipt,) if receipt.action in {"hint", "repeat"} else ()),
+            support_receipts=(receipt,),
             payload=receipt,
             expected_regulation_revision=state.regulation_revision,
             regulation_mutation=RegulationMutation(

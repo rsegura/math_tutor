@@ -170,7 +170,14 @@ class PedagogicalToolRegistry:
             if (
                 not isinstance(result.payload, RegulationResult)
                 or not result.payload.speech
-                or result.payload.regulation_revision != context.regulation_revision + 1
+                or (
+                    result.replayed
+                    and not 0 <= result.payload.regulation_revision <= context.regulation_revision
+                )
+                or (
+                    not result.replayed
+                    and result.payload.regulation_revision != context.regulation_revision + 1
+                )
             ):
                 logger.info("conversation_regulation_rejected", extra={**telemetry, "rejection_code": "canonical-regulation-result-missing"})
                 raise ToolRejected("canonical-regulation-result-missing", crossed_fence=True)

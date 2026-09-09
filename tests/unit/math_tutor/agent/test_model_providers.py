@@ -74,13 +74,14 @@ async def test_openrouter_fixture_translates_canonical_function_call():
 
 
 @pytest.mark.asyncio
-async def test_reasoning_item_is_ignored_alongside_one_function_call():
+async def test_unadvertised_legacy_hint_function_is_rejected():
     fixture = {"status":"completed","error":None,"output":[
         {"type":"reasoning","id":"rs_1","summary":[]},
         {"type":"function_call","name":"give_hint","arguments":"{}"},
     ]}
     adapter=OpenResponsesAdapter(client=SimpleNamespace(responses=Responses(fixture)),model="provider/model")
-    assert (await adapter.complete(prompt="system",context=context(),repair=False)) == {"type":"tool","name":"give_hint","arguments":{}}
+    with pytest.raises(ProviderInvalidResponse):
+        await adapter.complete(prompt="system",context=context(),repair=False)
 
 
 @pytest.mark.asyncio
